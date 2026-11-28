@@ -191,12 +191,15 @@ class FrozenNativeModuleCapsuleV1:
     fn expected_identity() -> text:
         "native-capsule-v1|{storage_identity_text_v1(self.module_name)}|{storage_identity_text_v1(self.mir_identity)}|{storage_identity_text_v1(self.storage_snapshot.module_identity)}|{storage_identity_text_v1(native_object_source_key_v1(self.cache_source))}|{storage_identity_text_v1(self.source_identity)}|{storage_identity_text_v1(self.module_witness)}|{storage_identity_text_v1(self.module_witness_reason)}|{storage_identity_text_v1(self.backend_name)}|{storage_identity_text_v1(self.provider_receipt_hash)}|{storage_identity_text_v1(self.target)}|{storage_identity_text_v1(self.target_cpu)}|{self.opt_level}|{self.is_release}|{storage_identity_text_v1(self.object_path)}"
 
-    fn identity_valid() -> bool:
+    fn metadata_identity_valid() -> bool:
         self.ok and self.mir_identity != ""
-            and self.mir_identity == native_capsule_mir_identity_v1(self.mir_module)
             and (self.cache_source == "" or self.source_identity != "")
             and self.storage_snapshot.identity_valid()
             and self.capsule_identity == self.expected_identity()
+
+    fn identity_valid() -> bool:
+        self.metadata_identity_valid()
+            and self.mir_identity == native_capsule_mir_identity_v1(self.mir_module)
 
     fn provider_receipt_valid(expected_hash: text) -> bool:
         "" != expected_hash and self.identity_valid()
@@ -282,16 +285,7 @@ fn frozen_storage_site_identity_v1(site: MirStorageViewSiteBindingV1,
     var field_rows: [text] = []
     for field in view.fields:
         field_rows.push("{field.field_id},{field.logical_offset},{field.field_size},{field.column_offset}")
-    var i = 0
-    while i < field_rows.len():
-        var j = i + 1
-        while j < field_rows.len():
-            if field_rows[j] < field_rows[i]:
-                val temporary = field_rows[i]
-                field_rows[i] = field_rows[j]
-                field_rows[j] = temporary
-            j = j + 1
-        i = i + 1
+    field_rows = field_rows.sort()
     val fields_identity = field_rows.join(":")
     "{site.function_symbol_id}|{site.base_local_id}|{site.index_bounds_proven}|{view.logical_type_id}|{view.revision}|{view.element_count}|{view.allocation_byte_len}|{view.logical_stride}|{view.address_observed}|{plan.contract_version}|{storage_layout_kind_to_u8(plan.layout)}|{plan.block_width}|{plan.alignment}|{plan.abi_pinned}|{storage_conversion_policy_to_u8(plan.conversion)}|{storage_identity_text_v1(plan.policy_hash)}|{storage_identity_text_v1(plan.decision_reason)}|{storage_identity_text_v1(fields_identity)}|{storage_identity_text_v1(evidence.allocation_identity)}|{storage_identity_text_v1(evidence.allocation_provenance)}|{storage_identity_text_v1(evidence.source_revision)}|{evidence.producer_contract_version}|{storage_identity_text_v1(evidence.producer_pattern)}|{storage_identity_text_v1(evidence.bounds_proof_kind)}|{evidence.produced_projection_count}"
 
@@ -305,23 +299,14 @@ fn frozen_storage_module_identity_v1(
     while index < sites.len():
         val site = sites[index]
         val row = evidence[index]
+        val site_id = frozen_storage_site_identity_v1(site, row)
         if site.function_symbol_id != row.site.function_symbol_id
             or site.base_local_id != row.site.base_local_id
-            or frozen_storage_site_identity_v1(site, row) !=
-                frozen_storage_site_identity_v1(row.site, row):
+            or site_id != frozen_storage_site_identity_v1(row.site, row):
             return "invalid"
-        rows.push(frozen_storage_site_identity_v1(site, row))
+        rows.push(site_id)
         index = index + 1
-    var i = 0
-    while i < rows.len():
-        var j = i + 1
-        while j < rows.len():
-            if rows[j] < rows[i]:
-                val temporary = rows[i]
-                rows[i] = rows[j]
-                rows[j] = temporary
-            j = j + 1
-        i = i + 1
+    rows = rows.sort()
     val joined = rows.join(";")
     "storage-module-v1|{storage_identity_text_v1(module_name)}|{storage_identity_text_v1(joined)}"
 
@@ -1253,7 +1238,8 @@ class CompileContext:
         target: text, target_cpu: text, opt_level: i64, is_release: bool,
         provider_receipt_hash: text = "",
         module_witnesses: {text: text} = {},
-        module_witness_reasons: {text: text} = {}
+        module_witness_reasons: {text: text} = {},
+        precomputed_mir_identities: {text: text} = {}
     ) -> FrozenNativeModuleCapsuleBatchV1:
         if not self.storage_registry_frozen
             or not self.frozen_storage_registry_well_formed():
@@ -1309,7 +1295,10 @@ class CompileContext:
             else:
                 "missing-witness-facts"
             val object_path = native_aot_object_path_v1(object_base, module_name)
-            val mir_identity = native_capsule_mir_identity_v1(module)
+            val has_precomputed_mir = (not (module_name == self.bootstrap_entry_mir_name and self.bootstrap_entry_mir.?)
+                and precomputed_mir_identities.contains_key(module_name))
+            val precomputed_mir = if has_precomputed_mir: precomputed_mir_identities[module_name] else: ""
+            val mir_identity = if precomputed_mir.len() == 64: precomputed_mir else: native_capsule_mir_identity_v1(module)
             if mir_identity == "":
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],

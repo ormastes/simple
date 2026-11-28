@@ -30,6 +30,7 @@ use compiler.common.driver_core_types.{
     driver_output_format_both,
     driver_output_format_smf
 }
+use compiler.driver.driver_log_helpers.{phase_elapsed_ms_v1}
 use compiler.driver.driver_types.{
     CompileContext, FrozenNativeModuleCapsuleBatchV1,
     frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1
@@ -254,3 +255,43 @@ describe "per-file worker OutputFormat.Both SMF part spooling and target gating"
         expect(smf_part_decode_manifest_v1(part_bytes)).to_equal([1u8, 2u8])
         link_spool = smf_object_spool_release_v1(link_spool)
         val _cleaned = rt_dir_remove_all(dir)
+
+describe "FrozenNativeModuleCapsuleV1 precomputed MIR identity and metadata validation":
+    it "reuses valid precomputed_mir_identities for identical capsules and still rejects metadata tampering":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        var consts: Dict<SymbolId, MirConstant> = {}
+        consts[SymbolId(id: 1)] = MirConstant(
+            symbol: SymbolId(id: 1), name: "C",
+            type_: MirType.i64(), value: MirConstValue.Int(99))
+        ctx.mir_modules["mod.pre"] = MirModule(name: "mod.pre", functions: {},
+            statics: {}, constants: consts, types: {})
+        val _frozen_reg = ctx.freeze_storage_registry()
+
+        val expected_mir_id = native_capsule_mir_identity_v1(ctx.mir_modules["mod.pre"])
+        var precomputed: {text: text} = {}
+        precomputed["mod.pre"] = expected_mir_id
+
+        val baseline = ctx.freeze_native_module_capsules_v1(
+            ["mod.pre"], "build/tmp/spec_precomp", "llvm",
+            "x86_64-unknown-linux-gnu", "baseline", 2, false)
+        val reused = ctx.freeze_native_module_capsules_v1(
+            ["mod.pre"], "build/tmp/spec_precomp", "llvm",
+            "x86_64-unknown-linux-gnu", "baseline", 2, false,
+            "", {}, {}, precomputed)
+        expect(baseline.ok).to_equal(true)
+        expect(reused.ok).to_equal(true)
+        val base_cap = frozen_native_capsule_batch_find_v1(baseline, "mod.pre")
+        var reused_cap = frozen_native_capsule_batch_find_v1(reused, "mod.pre")
+        expect(reused_cap.mir_identity).to_equal(base_cap.mir_identity)
+        expect(reused_cap.capsule_identity).to_equal(base_cap.capsule_identity)
+        expect(reused_cap.metadata_identity_valid()).to_equal(true)
+        expect(reused_cap.identity_valid()).to_equal(true)
+
+        reused_cap.target_cpu = "tampered-cpu"
+        expect(reused_cap.metadata_identity_valid()).to_equal(false)
+        expect(reused_cap.identity_valid()).to_equal(false)
+
+        val t0 = phase_elapsed_ms_v1()
+        val t1 = phase_elapsed_ms_v1()
+        expect(t0 >= 0).to_equal(true)
+        expect(t1 >= t0).to_equal(true)

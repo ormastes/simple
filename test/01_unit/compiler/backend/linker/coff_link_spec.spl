@@ -718,6 +718,48 @@ describe "internal freestanding Windows linker":
         expect(coff_sort_arm64_exception_table(
             [invalid]).unwrap_err()).to_contain("instruction-aligned")
 
+    it "sorts multi-entry AMD64 and ARM64 .pdata tables across O(N log N) merge passes":
+        var amd64_records: [u8] = []
+        var k: i64 = 19
+        while k >= 0:
+            val begin = 0x1000 + k * 0x100
+            amd64_records = _cl_u32(amd64_records, begin)
+            amd64_records = _cl_u32(amd64_records, begin + 0x40)
+            amd64_records = _cl_u32(amd64_records, 0x4000 + k)
+            k = k - 1
+        val amd64_pdata = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 240, data: amd64_records, characteristics: 0x40000040)
+        val amd64_sorted = coff_sort_amd64_exception_table([amd64_pdata]).unwrap()
+        var idx: i64 = 0
+        while idx < 20:
+            val off = idx * 12
+            val got_begin = (amd64_sorted[0].data[off] as i64) |
+                ((amd64_sorted[0].data[off + 1] as i64) << 8) |
+                ((amd64_sorted[0].data[off + 2] as i64) << 16) |
+                ((amd64_sorted[0].data[off + 3] as i64) << 24)
+            expect(got_begin).to_equal(0x1000 + idx * 0x100)
+            idx = idx + 1
+
+        var arm64_records: [u8] = []
+        var m: i64 = 17
+        while m >= 0:
+            val begin = 0x2000 + m * 0x80
+            arm64_records = _cl_u32(arm64_records, begin)
+            arm64_records = _cl_u32(arm64_records, 0x25)
+            m = m - 1
+        val arm64_pdata = PeImageSection(name: ".pdata", virtual_address: 0x3000,
+            virtual_size: 144, data: arm64_records, characteristics: 0x40000040)
+        val arm64_sorted = coff_sort_arm64_exception_table([arm64_pdata]).unwrap()
+        var j: i64 = 0
+        while j < 18:
+            val off = j * 8
+            val got_begin = (arm64_sorted[0].data[off] as i64) |
+                ((arm64_sorted[0].data[off + 1] as i64) << 8) |
+                ((arm64_sorted[0].data[off + 2] as i64) << 16) |
+                ((arm64_sorted[0].data[off + 3] as i64) << 24)
+            expect(got_begin).to_equal(0x2000 + j * 0x80)
+            j = j + 1
+
     it "validates the file-backed PE resource tree":
         var resource: [u8] = []
         resource = _cl_u32(resource, 0)

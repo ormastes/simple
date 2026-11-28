@@ -48,6 +48,7 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
     # per block copied it natively on every one of ~48k blocks. Tokens are
     # interned once per file; each block keeps only its id slice.
     var files_seen: {text: bool} = {}
+    var files_seen_count: i64 = 0
     var vocab_ids: {text: i64} = {}
     var vocab: [text] = []
     var current_file = ""
@@ -73,7 +74,9 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
                 val content = read_detector_source(block.file)
                 tokens = tokenize_for_path(block.file, content, config)
                 set_cached_tokens_with_content(cache_manager, block.file, tokens, content)
-            files_seen[block.file] = true
+            if not files_seen.contains_key(block.file):
+                files_seen[block.file] = true
+                files_seen_count = files_seen_count + 1
             current_file = block.file
             current_ids = intern_token_ids(tokens, vocab_ids, vocab)
             current_line_first = []
@@ -100,13 +103,13 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
         block_idx = block_idx + 1
         last_ms = progress_tick(config, "feature pass", block_idx, blocks_to_analyze.len(), start_ms, last_ms)
 
-    log_progress(config, "Extracted {block_token_ids.len()} feature vectors from {files_seen.keys().len()} files")
+    log_progress(config, "Extracted {block_token_ids.len()} feature vectors from {files_seen_count} files")
     SimilarityPrep(
         blocks: blocks_to_analyze,
         block_token_ids: block_token_ids,
         vocab: vocab,
         low_signal_flags: low_signal_flags,
-        file_count: files_seen.keys().len()
+        file_count: files_seen_count
     )
 
 fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -> {text: [i64]}:
@@ -378,7 +381,7 @@ fn scan_duplicate_blocks(files: [text], config: DuplicationConfig, cache_manager
     val summary = collect_repeated_hashes(files, config, cache_manager, interner)
     val candidate_files = summary.candidate_files.keys()
     val repeated_hashes = summary.repeated_hashes
-    val repeated_count = repeated_hashes.keys().len()
+    val repeated_count = repeated_hashes.len()
     log_progress(config, "  {repeated_count} repeated hashes in {candidate_files.len()} candidate files")
 
     log_progress(config, "Pass 2: extracting blocks from candidate files...")

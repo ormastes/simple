@@ -1037,3 +1037,30 @@ integ25 Stage 2 -> Stage 3 (go-to-end) failed HIR on
 class statically. Details: [lib](../lib/skill.md) § "`std.io_runtime` facade
 imports" and
 `doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`.
+
+## Seed LLVM mangler: text builtin methods vs closure-wide free functions (2026-11-28)
+
+- `s.byte_len()` on a text reaches `mangle.rs` as `MethodCallStatic`
+  `str.byte_len`. The text-UFCS arm of `resolve_method_call_static` bound it to
+  the lone free `byte_len` in the closure-wide suffix index, imported or not;
+  `is_text_builtin_method_call` now keeps `byte_len` / `char_count` method calls
+  out of every closure-wide arm. Free calls (`MirInst::Call`) still bind
+  closure-wide by design (split-part facades have no use/import entry).
+- Reproduce on `--backend llvm` only: Cranelift and the JIT do not run
+  `mangle.rs`. A seed without `--features llvm` cannot show this class at all.
+- Cranelift has its own half in `codegen/instr/closures_structs.rs`: a bare
+  (untyped-receiver) `byte_len` / `char_count` takes the text builtin unless
+  the calling module defines or imports one.
+- The script lane (`simple main.spl`) is one flattened unit with no use map;
+  scope there comes from the flattener's owner tags and import markers
+  (`Lowerer::flatten_free_fn_out_of_scope`), applied in HIR method lowering.
+- "In the use map" is wider than "named in a `use`": `collect_use_imports`
+  also inserts bare names with several project candidates that the imported
+  module owns (not `byte_len` / `char_count` since 2026-11-28).
+- A copied seed binary stops linking Cranelift probes once the worktree it was
+  built from is deleted (`refusing to weak-stub core enum runtime symbols`);
+  measure baselines before removing the worktree.
+- A small reproducer needs the Rust handler and a runtime archive:
+  `SIMPLE_NATIVE_BUILD_RUST=1 <seed> native-build --source src --entry
+  src/main.spl --backend llvm --runtime-path <dir with libsimple_runtime.a>`.
+- Bug: `doc/08_tracking/bug/seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28.md`.

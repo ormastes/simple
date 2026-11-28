@@ -18,7 +18,7 @@ use std.common.encoding.sfnt_kern.{sfnt_line_metric_units_ascent_descent_px}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy, input_value_line_device_dy, box_device_extra_h_at, text_line_frac_dy, text_device_content_area}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy, input_value_line_device_dy, box_device_extra_h_at, box_device_extra_w_at, svg_exact_content_size_milli, layout_root_font_px, text_line_frac_dy, text_device_content_area}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans, chrome_frame_spans}
 use std.gc_async_mut.gpu.browser_engine.media_control_chrome.{chrome_audio_control_spans, chrome_video_control_spans}
@@ -1784,6 +1784,12 @@ fn _html_svg_round_milli(value: i64) -> i32:
         return ((value + 500) / 1000).to_i32()
     (0 - ((0 - value + 500) / 1000)).to_i32()
 
+# Floor of a milli value in whole units (toward minus infinity).
+fn _html_svg_floor_milli(value: i64) -> i32:
+    if value >= 0:
+        return (value / 1000).to_i32()
+    (0 - ((0 - value + 999) / 1000)).to_i32()
+
 fn _html_draw_ir_svg_shape_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     i: i32, clip: ClipRect
@@ -1812,20 +1818,38 @@ fn _html_draw_ir_svg_shape_commands(
     var scale_den: i64 = 1
     var offset_x: i64 = 0
     var offset_y: i64 = 0
+    # A fractional used size (`width=40.5`, a 16.65625 px ratio height): the
+    # viewport is the box's snapped DEVICE rect and the shapes scale by the
+    # exact size from its origin. A shape paints the device px it covers
+    # fully (Chrome 159 anti-aliases the rest: `width=50 viewBox="0 0 3 1"`
+    # at k = 4 fills rows 723..788 and blends row 789).
+    # ponytail: the partly covered edge px stay unpainted; blending them needs
+    # a coverage rect.
+    val k = layout_device_scale()
+    val device_w = k * box_w + (if k > 1: box_device_extra_w_at(i) else: 0)
+    val device_h = k * box_h + (if k > 1: box_device_extra_h_at(i) else: 0)
+    var exact_w: i64 = box_w.to_i64() * 1000
+    var exact_h: i64 = box_h.to_i64() * 1000
+    val exact = svg_exact_content_size_milli(node, st, layout_root_font_px(nodes, styles), box_w)
+    if exact[0] - exact_w > -1000 and exact[0] - exact_w < 1000:
+        exact_w = exact[0]
+    if exact[1] > 0 and exact[1] - exact_h > -1000 and exact[1] - exact_h < 1000:
+        exact_h = exact[1]
+    val fractional = exact_w != box_w.to_i64() * 1000 or exact_h != box_h.to_i64() * 1000
     val view_parts = svg_view_box_milli(node.attrs_raw)
     if view_parts.len() == 4:
         val view_w = view_parts[2]
         val view_h = view_parts[3]
         view_x = view_parts[0]
         view_y = view_parts[1]
-        if box_w.to_i64() * view_h <= box_h.to_i64() * view_w:
-            scale_num = box_w.to_i64() * 1000
+        if exact_w * view_h <= exact_h * view_w:
+            scale_num = exact_w
             scale_den = view_w
         else:
-            scale_num = box_h.to_i64() * 1000
+            scale_num = exact_h
             scale_den = view_h
-        offset_x = (box_w.to_i64() * 1000 - view_w * scale_num / scale_den) / 2
-        offset_y = (box_h.to_i64() * 1000 - view_h * scale_num / scale_den) / 2
+        offset_x = (exact_w - view_w * scale_num / scale_den) / 2
+        offset_y = (exact_h - view_h * scale_num / scale_den) / 2
     val component_id = _html_draw_ir_component_id(node, i)
     val node_count = nodes.len() as i32
     var j = i + 1
@@ -1862,7 +1886,84 @@ fn _html_draw_ir_svg_shape_commands(
                     (shape_y + shape_h - view_y) * scale_num / scale_den + offset_y)
                 val radius = _html_svg_round_milli(
                     svg_number_milli(radius_raw) * scale_num / scale_den)
-                if x1 > x0 and y1 > y0:
+                if fractional:
+                    val ex0 = ((shape_x - view_x) * scale_num / scale_den + offset_x) * k.to_i64()
+                    val ey0 = ((shape_y - view_y) * scale_num / scale_den + offset_y) * k.to_i64()
+                    val ex1 = ((shape_x + shape_w - view_x) * scale_num / scale_den + offset_x) * k.to_i64()
+                    val ey1 = ((shape_y + shape_h - view_y) * scale_num / scale_den + offset_y) * k.to_i64()
+                    var dx0 = 0 - _html_svg_floor_milli(0 - ex0)
+                    var dy0 = 0 - _html_svg_floor_milli(0 - ey0)
+                    var dx1 = _html_svg_floor_milli(ex1)
+                    var dy1 = _html_svg_floor_milli(ey1)
+                    if dx0 < 0:
+                        dx0 = 0
+                    if dy0 < 0:
+                        dy0 = 0
+                    if dx1 > device_w:
+                        dx1 = device_w
+                    if dy1 > device_h:
+                        dy1 = device_h
+                    if dx1 > dx0 and dy1 > dy0:
+                        # k = 1: device px are CSS px. k > 1: the rect hangs
+                        # from the box origin as a `device-rect`; its clip is
+                        # the viewport's CSS px rounded out.
+                        val svg_clip = clip_intersect(clip, box_x, box_y, box_x + box_w + 1, box_y + box_h + 1)
+                        var frac_rect = if k <= 1:
+                            _html_draw_ir_overlay_rect(
+                                component_id + "_svg_rect_{j}",
+                                ClipRect(x0: box_x + dx0, y0: box_y + dy0, x1: box_x + dx1, y1: box_y + dy1),
+                                color, viewport
+                            )
+                        else:
+                            _html_draw_ir_overlay_rect(
+                                component_id + "_svg_rect_{j}",
+                                ClipRect(x0: box_x, y0: box_y, x1: box_x + (dx1 - dx0 + k - 1) / k, y1: box_y + (dy1 - dy0 + k - 1) / k),
+                                color, svg_clip
+                            )
+                        frac_rect.parent_id = component_id
+                        frac_rect.computed_style = [
+                            draw_ir_style_prop("replaced-media-part", "svg-rect")
+                        ]
+                        if k > 1:
+                            frac_rect.computed_style.push(draw_ir_style_prop("device-rect", "{dx0},{dy0},{dx1 - dx0},{dy1 - dy0}"))
+                        if radius > 0:
+                            frac_rect.computed_style.push(draw_ir_style_prop(
+                                "border-radius", "{radius}"
+                            ))
+                        commands.push(frac_rect)
+                        if k > 1 and radius == 0 and (color >> 24) == 255u32:
+                            val cov_l = if dx0 > 0 and dx0.to_i64() * 1000 > ex0: dx0.to_i64() * 1000 - ex0 else: 0
+                            val cov_r = if dx1 < device_w and ex1 > dx1.to_i64() * 1000: ex1 - dx1.to_i64() * 1000 else: 0
+                            val cov_t = if dy0 > 0 and dy0.to_i64() * 1000 > ey0: dy0.to_i64() * 1000 - ey0 else: 0
+                            val cov_b = if dy1 < device_h and ey1 > dy1.to_i64() * 1000: ey1 - dy1.to_i64() * 1000 else: 0
+                            val edge_ex: [i32] = [dx0 - 1, dx1, dx0, dx0, dx0 - 1, dx1, dx0 - 1, dx1]
+                            val edge_ey: [i32] = [dy0, dy0, dy0 - 1, dy1, dy0 - 1, dy0 - 1, dy1, dy1]
+                            val edge_ew: [i32] = [1, 1, dx1 - dx0, dx1 - dx0, 1, 1, 1, 1]
+                            val edge_eh: [i32] = [dy1 - dy0, dy1 - dy0, 1, 1, 1, 1, 1, 1]
+                            val edge_cov: [i64] = [
+                                cov_l, cov_r, cov_t, cov_b,
+                                cov_l * cov_t / 1000, cov_r * cov_t / 1000,
+                                cov_l * cov_b / 1000, cov_r * cov_b / 1000
+                            ]
+                            var ei = 0
+                            while ei < 8:
+                                val ecov = edge_cov[ei]
+                                val alpha = ((ecov * 255 + 500) / 1000) as i32
+                                if edge_ew[ei] > 0 and edge_eh[ei] > 0 and alpha > 0 and alpha < 255:
+                                    val edge_c = (color & 0x00FFFFFFu32) | ((alpha.to_u32()) << 24)
+                                    var edge_rect = _html_draw_ir_overlay_rect(
+                                        component_id + "_svg_rect_{j}_aa_{ei}",
+                                        ClipRect(x0: box_x, y0: box_y, x1: box_x + box_w + 1, y1: box_y + box_h + 1),
+                                        edge_c, svg_clip
+                                    )
+                                    edge_rect.parent_id = component_id
+                                    edge_rect.computed_style = [
+                                        draw_ir_style_prop("replaced-media-part", "svg-rect"),
+                                        draw_ir_style_prop("device-rect", "{edge_ex[ei]},{edge_ey[ei]},{edge_ew[ei]},{edge_eh[ei]}")
+                                    ]
+                                    commands.push(edge_rect)
+                                ei = ei + 1
+                elif x1 > x0 and y1 > y0:
                     var rect = _html_draw_ir_overlay_rect(
                         component_id + "_svg_rect_{j}",
                         ClipRect(x0: x0, y0: y0, x1: x1, y1: y1),

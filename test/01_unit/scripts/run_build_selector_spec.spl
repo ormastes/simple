@@ -1,0 +1,103 @@
+# @cover scripts/build/run-build.shs 80%
+"""
+## Purpose and audience
+Purpose: process-level selector contracts for scripts/build/run-build.shs (direct vs
+buildrunner owner, exact argv, exec/cwd/exit propagation, invalid selectors never start
+the owner). Ported from scripts/build/tests/run-build-test.py; not compiler or
+BuildRunner qualification.
+Audience: maintainers of scripts/build/run-build.shs.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, cwd}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv}
+
+fn script() -> text:
+    cwd() + "/scripts/build/run-build.shs"
+
+# Temp dir with a space in its name, plus a fake owner that prints pid, cwd and one
+# ARG line per argument and exits with $TEST_EXIT.
+fn setup_cmd() -> text:
+    var s = "unset SIMPLE_BUILD_EXECUTOR; d=$(mktemp -d); mkdir \"$d/build selector\"; r=\"$d/build selector\"; P=\"$r/owner with spaces\"; "
+    s = s + "echo '#!/bin/sh' > \"$P\"; echo 'echo \"PID:$$\"' >> \"$P\"; echo 'echo \"CWD:$(pwd)\"' >> \"$P\"; "
+    s = s + "echo 'for a in \"$@\"; do echo \"ARG:$a\"; done' >> \"$P\"; echo 'exit $TEST_EXIT' >> \"$P\"; chmod 700 \"$P\"; cd \"$r\"; TEST_EXIT=0; export TEST_EXIT d P; "
+    s
+
+fn run_sh(body: text) -> (text, text, i64):
+    val (sh_bin, sh_args) = resolve_shell_argv(setup_cmd() + body + "; rc=$?; cd /; rm -rf \"$d\"; exit $rc")
+    process_run(sh_bin, sh_args)
+
+# The owner's ARG: lines in order, joined with "|" (exact argv, no extras).
+fn arg_block(out: text) -> text:
+    var parts: [text] = []
+    for l in out.split("\n"):
+        if l.starts_with("ARG:"):
+            parts.push(l)
+    parts.join("|")
+
+fn run_build(options: text) -> (text, text, i64):
+    run_sh("sh '" + script() + "' " + options)
+
+describe "run-build.shs selector":
+    it "lets buildrunner own the run command with exact argv":
+        val (out, err, code) = run_build("--program=\"$P\" --executor=buildrunner -- --manifest 'manifest with spaces' --state state --source-root source")
+        expect(code).to_equal(0)
+        expect(arg_block(out)).to_equal("ARG:run|ARG:--manifest|ARG:manifest with spaces|ARG:--state|ARG:state|ARG:--source-root|ARG:source")
+    it "defaults to direct native-build, exec'ing the owner in the same cwd":
+        val body = "sh -c 'echo $$ > \"$d/pid\"; exec sh \"$0\" --program=\"$P\" -- --source \"source with spaces\" --backend llvm --output \"out;\$(x)\"' '" + script() + "'; echo \"OUTER:$(cat \"$d/pid\")\"; echo \"WANT_CWD:$(pwd)\""
+        val (out, err, code) = run_sh(body)
+        expect(code).to_equal(0)
+        expect(arg_block(out)).to_equal("ARG:native-build|ARG:--source|ARG:source with spaces|ARG:--backend|ARG:llvm|ARG:--output|ARG:out;$(x)")
+        val lines = out.split("\n")
+        var owner_pid = ""
+        var outer_pid = ""
+        var owner_cwd = ""
+        var want_cwd = ""
+        for l in lines:
+            if l.starts_with("PID:"):
+                owner_pid = l.substring(4, l.len())
+            if l.starts_with("OUTER:"):
+                outer_pid = l.substring(6, l.len())
+            if l.starts_with("CWD:"):
+                owner_cwd = l.substring(4, l.len())
+            if l.starts_with("WANT_CWD:"):
+                want_cwd = l.substring(9, l.len())
+        expect(owner_pid.len() > 0).to_equal(true)
+        expect(owner_pid).to_equal(outer_pid)
+        expect(owner_cwd).to_equal(want_cwd)
+    it "takes the env default and lets --executor override it":
+        val (out1, err1, code1) = run_sh("SIMPLE_BUILD_EXECUTOR=buildrunner sh '" + script() + "' --program=\"$P\" -- --manifest m")
+        expect(code1).to_equal(0)
+        expect(arg_block(out1)).to_equal("ARG:run|ARG:--manifest|ARG:m")
+        val (out2, err2, code2) = run_sh("SIMPLE_BUILD_EXECUTOR=invalid sh '" + script() + "' --program=\"$P\" --executor=direct -- input.spl")
+        expect(code2).to_equal(0)
+        expect(arg_block(out2)).to_equal("ARG:native-build|ARG:input.spl")
+    it "propagates the owner's exact exit status":
+        val (o1, e1, c1) = run_sh("TEST_EXIT=37 sh '" + script() + "' --program=\"$P\" --executor=direct -- input")
+        expect(c1).to_equal(37)
+        val (o2, e2, c2) = run_sh("TEST_EXIT=37 sh '" + script() + "' --program=\"$P\" --executor=buildrunner -- input")
+        expect(c2).to_equal(37)
+    it "rejects invalid selectors without starting the owner":
+        val cases = ["--executor=test-runner -- x", "--executor= -- x", "--bogus", "--executor=direct", "--", "--executor=direct --executor=buildrunner -- x"]
+        for opts in cases:
+            val (out, err, code) = run_build("--program=\"$P\" " + opts)
+            expect(code).to_equal(2)
+            expect(out).to_equal("")
+            expect(err.contains("run-build:")).to_equal(true)
+    it "rejects an invalid SIMPLE_BUILD_EXECUTOR":
+        val (out, err, code) = run_sh("SIMPLE_BUILD_EXECUTOR=invalid sh '" + script() + "' --program=\"$P\" -- x")
+        expect(code).to_equal(2)
+        expect(out).to_equal("")
+    it "prints help without any compiler":
+        val (out, err, code) = run_build("--help")
+        expect(code).to_equal(0)
+        for w in ["direct", "buildrunner", "SIMPLE_BUILD_EXECUTOR", "TestRunner"]:
+            expect(out.contains(w)).to_equal(true)
+    it "rejects a missing program":
+        val (o1, e1, c1) = run_build("-- x")
+        expect(c1).to_equal(2)
+        expect(e1.contains("run-build:")).to_equal(true)
+        val (o2, e2, c2) = run_build("--program=/no/such/compiler -- x")
+        expect(c2).to_equal(2)
+        expect(e2.contains("run-build:")).to_equal(true)

@@ -241,7 +241,7 @@ pub(crate) use interpreter_method::{
     eval_bdd_matcher_on_values, evaluate_call_args, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
     exec_resolved_method_with_self_owned_values, resolve_object_method, ResolvedMethod, shared_text_is_ascii, text_cp_len,
 };
-pub(crate) use interpreter_method::{lookup_class_method_index, lookup_impl_method_index};
+pub(crate) use interpreter_method::{dict_read_method_on_values, lookup_class_method_index, lookup_impl_method_index};
 use interpreter_method::{evaluate_negated_bdd_matcher, is_argless_bdd_matcher, peel_bdd_matcher_receiver};
 pub use interpreter_method::clear_pinned_strings;
 mod macros;

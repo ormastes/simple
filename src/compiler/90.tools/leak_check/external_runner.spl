@@ -4,13 +4,50 @@
 # by compiling the source to C and running with instrumentation.
 
 use std.io_runtime.{file_exists}
+use std.io_runtime.{env_get, platform_name}
 use app.io.file_shell.{shell, shell_output, file_write, file_delete}
-use app.compile.native.{find_cpp_compiler}
-use compiler.driver.driver_api_codegen_backends.{aot_c_file}
-use compiler.common.driver_compile_result.{CompileResult}
+use app.io.mod.{process_run}
 use compiler.tools.leak_check.types.*
 use parser
 use temp_paths.{leak_check_create_run_dir}
+
+fn find_cpp_compiler() -> text:
+    val compilers: [text] = ["clang++", "clang-cl"]
+    for compiler in compilers:
+        val check = shell_output("which {compiler} 2>/dev/null")
+        if check.len() > 0:
+            return compiler
+    ""
+
+fn find_simple_binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+
+    val is_win = platform_name() == "windows"
+    val ext = if is_win: ".exe" else: ""
+
+    if file_exists("bin/simple{ext}"):
+        return "bin/simple{ext}"
+    if not is_win:
+        if file_exists("bin/release/simple"):
+            return "bin/release/simple"
+        if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+            return "bin/release/aarch64-apple-darwin-macho/simple"
+        if file_exists("bin/release/macos-arm64/simple"):
+            return "bin/release/macos-arm64/simple"
+        if file_exists("bin/release/darwin-aarch64/simple"):
+            return "bin/release/darwin-aarch64/simple"
+        if file_exists("bin/release/macos-x86_64/simple"):
+            return "bin/release/macos-x86_64/simple"
+        if file_exists("bin/release/linux-x86_64/simple"):
+            return "bin/release/linux-x86_64/simple"
+    else:
+        if file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+    "bin/simple{ext}"
 
 # Run external leak check (ASan or Valgrind)
 fn run_external_check(cfg: LeakCheckConfig) -> LeakCheckResult:
@@ -45,21 +82,21 @@ fn run_external_check(cfg: LeakCheckConfig) -> LeakCheckResult:
         return result
 
     val temp_cpp = temp_dir + "/leak_check.cpp"
+    val simple_bin = find_simple_binary()
     if cfg.verbose:
-        print "Generating C++ via in-process aot_c_file..."
-    val aot_result = aot_c_file(cfg.source_file, temp_cpp)
-    match aot_result:
-        case CompileResult.Success(_):
-            if cfg.verbose:
-                print "Generated C++ code"
-        case _:
-            print "Error: C++ generation failed"
-            val errors = aot_result.get_errors()
-            for err in errors:
-                print err
-            shell("rm -rf '{temp_dir}'")
-            result.exit_code = 1
-            return result
+        print "Generating C++ via subprocess ({simple_bin} compile --emit-c)..."
+    val (gen_out, gen_err, gen_exit) = process_run(simple_bin, ["compile", cfg.source_file, "--emit-c", "-o", temp_cpp])
+    if gen_exit != 0 or not file_exists(temp_cpp):
+        print "Error: C++ generation failed"
+        if gen_out.trim() != "":
+            print gen_out.trim()
+        if gen_err.trim() != "":
+            print gen_err.trim()
+        shell("rm -rf '{temp_dir}'")
+        result.exit_code = 1
+        return result
+    if cfg.verbose:
+        print "Generated C++ code"
 
     val temp_bin = temp_dir + "/leak_check_bin"
 

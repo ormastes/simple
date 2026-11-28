@@ -15,13 +15,20 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 - DEAD: 1
 - DEAD_CANDIDATE: 8 (owner: keep)
 - OWNED_HELLO_SANITY: 13
-- P3_PLUS_ONLY: 31 (net, after 21 rows moved to the four classes below; excludes the 2 PORTED rows below; includes durable_wal_fsync)
-- PORTED by the gates lane: 2 (`sdk-observer-evidence-v1` #12231, `qmp-send-virtio-input`; `check-rt-*` x4 follow in work/py-gates-2)
+- P3_PLUS_ONLY: 28 (net, after 21 rows moved to the four classes below; run-build-test now PORTED, 2 cgroupfs rows now BLOCKED; includes durable_wal_fsync)
+- PORTED: 4 (gates lane: `sdk-observer-evidence-v1` #12231, `qmp-send-virtio-input`; `check-rt-*` x4 follow in work/py-gates-2; perf-tools lane: riscv64-unknown-elf-tool-wrapper PR #12221, run-build-test)
 - INDEPENDENT_ORACLE: 9 (policy exception, stays Python)
-- BLOCKED: 5 (see `python_test_oracle_piped_process_gaps_2026-11-27.md`)
+- BLOCKED: 7 (2 cgroupfs rows: `python_port_cgroupfs_sffi_gaps_2026-11-27.md`; see `python_test_oracle_piped_process_gaps_2026-11-27.md`)
 - BENCHMARK_FIXTURE: 1 (kept)
 - PERF_LANE: 6 (owned by the perf lane)
 - PRE_P2_ONLY: 20
+
+## Reconciliation (base `.py` files vs table rows, 2026-11-28)
+
+`git ls-tree -r origin/release/1.0.0 | grep '\.py$'` = 122 files; table = 104 rows. 122 - 21 + 3 = 104.
+
+- 21 base files not in the table, all out of scope per the Scope line: 20 under `src/compiler_rust/vendor/**` (criterion, encoding_rs, matrixmultiply, nanorand, tch x10, unicode-normalization, unicode-segmentation x2, unicode-width, unicode-width-0.1.14, walkdir) and 1 under `test/05_perf/fixtures/**` (`interpreter_startup/hello.py`). No uncovered file, so no row added.
+- 3 table rows not in the base `.py` list: `scripts/check/sdk-observer-evidence-v1.py` and `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` (PORTED, `.py` already deleted on base, rows kept as history) and `build/review/p3fix-caret2-20261111-logs/devhub_interpreter_driver.py` (not tracked on base; review-log artifact row kept from the original census).
 
 ## Files
 
@@ -44,12 +51,12 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/bootstrap/hello-sanity-matrix-darwin.py` | OWNED_HELLO_SANITY | scripts/bootstrap/hello-sanity-buildrunner.py scripts/bootstrap/hello-sanity-matrix.py test/01_unit/scripts/hello_sanity_matrix_test.py | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
 | `scripts/bootstrap/hello-sanity-matrix-windows.py` | OWNED_HELLO_SANITY | scripts/bootstrap/hello-sanity-buildrunner.py scripts/bootstrap/hello-sanity-matrix.py | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
 | `scripts/bootstrap/hello-sanity-matrix.py` | OWNED_HELLO_SANITY | scripts/bootstrap/hello-sanity-buildrunner-worker.py scripts/bootstrap/hello-sanity-buildrunner.py scripts/bootstrap/hello-sanity-matrix.shs +2 | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
-| `scripts/bootstrap/lib/stage3-cgroupfs.py` | P3_PLUS_ONLY | scripts/bootstrap/resume-stage3-from-admitted.sh test/01_unit/scripts/process_tree_rss_bounded_diagnostic_test.shs | stage3/stage4 (p3+) path |
+| `scripts/bootstrap/lib/stage3-cgroupfs.py` | BLOCKED | scripts/bootstrap/resume-stage3-from-admitted.sh test/01_unit/scripts/process_tree_rss_bounded_diagnostic_test.shs | missing SFFI (setuid/initgroups, pre-exec spawn, path chown/chmod, signals): todo `doc/08_tracking/todo/python_port_cgroupfs_sffi_gaps_2026-11-27.md` |
 | `scripts/bootstrap/owned_worker_wall_drain_windows.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `scripts/bootstrap/phase1-terminal-gate.py` | PRE_P2_ONLY | scripts/bootstrap/run-bootstrap-test-wave.py scripts/bootstrap/run-compiler-subsystem-test-products.shs scripts/bootstrap/tests/bootstrap-test-wave-test.py | seed/stage2/phase1 bootstrap path or its regression test |
 | `scripts/bootstrap/phase1-whole-tests.py` | PRE_P2_ONLY | scripts/bootstrap/run-bootstrap-test-wave.py scripts/bootstrap/tests/phase1-whole-stream-test.py | seed/stage2/phase1 bootstrap path or its regression test |
 | `scripts/bootstrap/run-bootstrap-test-wave.py` | PRE_P2_ONLY | scripts/bootstrap/tests/bootstrap-test-wave-test.py (stem import) | phase1 test wave; only its own test calls it (unwired; owner review) |
-| `scripts/bootstrap/run-process-group-bounded-log-windows.py` | BOTH | scripts/bootstrap/bootstrap-logged-process.shs scripts/bootstrap/collect-windows-phase2-objects.py scripts/bootstrap/hello-sanity-buildrunner.py +12 | exec by bootstrap-logged-process.shs (all phases) and phase-ladder-step.shs |
+| `scripts/bootstrap/run-process-group-bounded-log-windows.py` | BOTH | scripts/bootstrap/bootstrap-logged-process.shs scripts/bootstrap/collect-windows-phase2-objects.py scripts/bootstrap/hello-sanity-buildrunner.py +12 | exec by bootstrap-logged-process.shs (all phases) and phase-ladder-step.shs. **Twin:** `run-process-group-bounded-log-windows.spl` (windows_process_owner JobObject; pinned verified stage, fail-closed). `bootstrap-logged-process.shs` routes `BOOTSTRAP_LOGGED_PROCESS_PHASE=phase3/4/stage3/4` to the twin, unset/phase1/2 stay Python, unknown refuses. Parity: `scripts/bootstrap/tests/bounded-log-windows-twin-parity-test.shs`. Known difference: byte cap is enforced by file-size polling (late kill, up to one 10 ms poll past the cap before truncation to exactly max_bytes); `root_exit_members=unavailable`. Receipt-bound callers (sanity.shs, phase-ladder hello, requalification) stay on Python. verification-pending |
 | `scripts/bootstrap/tests/bootstrap-test-wave-test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `scripts/bootstrap/tests/hello-sanity-buildrunner-receipt-test.py` | OWNED_HELLO_SANITY | test/01_unit/app/bootstrap_builder/result_receipt_decode_spec.spl | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
 | `scripts/bootstrap/tests/phase-ladder-hello-test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
@@ -61,7 +68,7 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/bootstrap/tests/windows-collector-root-reap-test.py` | PRE_P2_ONLY | .github/workflows/repo-hygiene.yml | seed/stage2/phase1 bootstrap path or its regression test |
 | `scripts/bootstrap/tests/windows-output-root-env-test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `scripts/bootstrap/tool-code-authority.py` | BOTH | scripts/bootstrap/lib/product-tool-authority.shs scripts/bootstrap/run-bootstrap-test-wave.py | product-tool-authority.shs (stage2 products and p3 tool products). **Twin: `scripts/bootstrap/tool-code-authority.spl`** — `product-tool-authority.shs` routes producer phase3/phase4 to it on `SIMPLE_VERIFIED_STAGE_BINARY` + `SIMPLE_VERIFIED_STAGE_PIN` (fails closed, no Python fallback); phase1-2 stay on Python. Parity: `scripts/bootstrap/tests/tool-code-authority-twin-parity-test.shs`, routing: `product-tool-authority-routing-test.shs` (21/21 + 8/8; empty/unknown phase refused). Phase 3+ manifests must carry `verified_stage_sha256` = pinned stage digest (no in-repo producer emits tool manifests yet; the external producer must add it). pin must live at <source-root>/.../stage3/<platform>/provenance.env and hashes the running image (lib/verified_stage_pin.spl). Perf: median 42 s vs Python 11 s on the 499-member closure — filed `doc/08_tracking/bug/tool_code_authority_twin_slower_than_python_2026-11-27.md`. verification-pending |
-| `scripts/build/tests/run-build-test.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
+| `scripts/build/tests/run-build-test.py` | PORTED 2026-11-27 | - | now spec `test/01_unit/scripts/run_build_selector_spec.spl`; `.py` deleted |
 | `scripts/check/check-bootstrap-phase-feature-matrix.py` | P3_PLUS_ONLY | test/01_unit/scripts/bootstrap_phase_feature_matrix_test.py | stage3/stage4 (p3+) path |
 | `scripts/check/check-bootstrap-phase-live.py` | P3_PLUS_ONLY | scripts/bootstrap/stage4-tooling-matrix.shs test/01_unit/scripts/bootstrap_phase_live_test.py | stage3/stage4 (p3+) path |
 | `scripts/check/check-coff-partial-link.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
@@ -95,7 +102,7 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/tool/renderdoc-qrenderdoc-python-smoke.py` | P3_PLUS_ONLY | scripts/tool/renderdoc-export-events.shs test/02_integration/tool/renderdoc_exporter_contract_test.shs | EXCEPTION (owner default 2026-11-27): runs inside qrenderdoc embedded Python (`import renderdoc`); stays Python |
 | `scripts/tool/renderdoc-target-control-trigger.py` | P3_PLUS_ONLY | scripts/check/check-renderdoc-chrome-target-control.shs | EXCEPTION (owner default 2026-11-27): runs inside qrenderdoc embedded Python (`import renderdoc`); stays Python |
 | `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` | PORTED 2026-11-27 | scripts/tool/riscv64-unknown-elf-{gcc,gxx}-wrapper.cmd | now `scripts/tool/riscv64-unknown-elf-tool-wrapper.spl` (+ `scripts/tool/lib/riscv64_tool_wrapper_policy.spl`, spec `test/01_unit/scripts/riscv64_tool_wrapper_spec.spl`); `.py` deleted |
-| `test/00_quick/bootstrap/stage3_cgroupfs_kernel.py` | P3_PLUS_ONLY | - | stage3/stage4 (p3+) path |
+| `test/00_quick/bootstrap/stage3_cgroupfs_kernel.py` | BLOCKED | - | missing SFFI (setuid/initgroups, pre-exec spawn, path chown/chmod, signals): todo `doc/08_tracking/todo/python_port_cgroupfs_sffi_gaps_2026-11-27.md` |
 | `test/00_unit/scripts/stage4_retained_self_evidence_test.py` | P3_PLUS_ONLY | - | stage3/stage4 (p3+) path |
 | `test/01_unit/runtime/windows_terminal_raw_bytes/project-controlled-provider.py` | BLOCKED | - | BLOCKED on python_test_oracle_piped_process_gaps_2026-11-27.md (holds child stdin open; needs piped stderr, byte-safe I/O, env on the piped path) |
 | `test/01_unit/runtime/windows_terminal_raw_bytes/run-term-byte-fixtures.py` | BLOCKED | - | BLOCKED on python_test_oracle_piped_process_gaps_2026-11-27.md (holds child stdin open; needs piped stderr, byte-safe I/O, env on the piped path) |

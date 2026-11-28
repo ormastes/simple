@@ -11,7 +11,7 @@ use nogc_sync_mut.ui.session.{UISession}
 use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
 use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiWindowEvent, GUI_EVT_NONE, GUI_EVT_RESIZED, GUI_EVT_MOUSE_WHEEL}
 use app.ui.browser.backend.{BrowserBackend}
-use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event}
+use app.ui.browser.event_bridge.{translate_key_event, translate_browser_key_event, translate_mouse_event}
 use std.io_runtime.{file_exists, get_args, read_file, thread_sleep, time_now_unix_micros}
 use std.diag.{dbg_stage}
 use lazy common.window_protocol.geometry.{Size}
@@ -101,6 +101,7 @@ class BrowserApp:
     last_file_content: text
     last_mouse_x: i32
     last_mouse_y: i32
+    last_hover_id: text
     file_change_poll_ticks: i32
     file_change_poll_interval_ticks: i32
     next_draw_ir_input_key: i64
@@ -125,8 +126,9 @@ class BrowserApp:
                     val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "browser")
                     if store.is_some():
                         session.attach_access_store(store)
-                val width: i32 = 672
-                val height: i32 = 448
+                val width: i32 = 960
+                val height: i32 = 640
+                session.dispatch(UIEvent.Resize(width, height))
                 dbg_stage("browser", "backend_create_start")
                 val backend_result = BrowserBackend.create(width, height, gpu_backend, web_engine)
                 match backend_result:
@@ -147,6 +149,7 @@ class BrowserApp:
                             last_file_content: content,
                             last_mouse_x: 0,
                             last_mouse_y: 0,
+                            last_hover_id: "",
                             file_change_poll_ticks: 0,
                             file_change_poll_interval_ticks: FILE_CHANGE_POLL_INTERVAL_TICKS,
                             next_draw_ir_input_key: 0
@@ -193,31 +196,28 @@ class BrowserApp:
             self.backend.shutdown()
             return false
 
-        var next_present_at = browser_time_now_unix_micros() + 16000
         while self.running:
-            var had_event = false
+            var dirty = false
             var ev = browser_winit_event_loop_poll_events(event_loop, 1)
             while ev != 0:
-                had_event = true
-                self.handle_host_event(ev)
+                if self._handle_host_event_dirty(ev):
+                    dirty = true
                 browser_winit_event_free(ev)
                 ev = browser_winit_event_loop_poll_events(event_loop, 1)
 
-            val should_poll_file = self.consume_file_change_poll(had_event)
+            val should_poll_file = self.consume_file_change_poll(dirty)
             if should_poll_file:
                 if self.check_file_changes():
-                    had_event = true
+                    dirty = true
 
-            val now = browser_time_now_unix_micros()
-            if had_event:
+            if dirty:
                 self.render_session_frame()
                 if not self.present_host_window(window):
                     print "Error: failed to present browser frame"
                     presentation_ok = false
                     self.running = false
-                next_present_at = now + 16000
             else:
-                thread_sleep(8)
+                thread_sleep(12)
 
         browser_winit_window_free(window)
         browser_winit_event_loop_free(event_loop)
@@ -272,62 +272,206 @@ class BrowserApp:
         val submitted = self.session.submit_draw_ir_composition(composition)
         self.backend.render_frame_with_composition(state.tree, state, submitted)
 
+    me _is_text_input_focused() -> bool:
+        val fid = self.session.focused_widget()
+        if fid == "":
+            return false
+        if val Some(node) = self.session.current_tree().find_widget(fid):
+            val kind = node.kind_name()
+            return kind == "input" or kind == "textfield" or kind == "textarea"
+        false
+
+    me _clear_all_ui_focus():
+        for wid in self.session.current_tree().root_node().collect_ids():
+            if wid != "":
+                if val Some(wn) = self.session.current_tree().find_widget(wid):
+                    if wn.get_prop("ui_focus") == "true":
+                        wn.set_prop("ui_focus", "false")
+
+    me _dispatch_focus_cycle(cycle_event: UIEvent):
+        self._clear_all_ui_focus()
+        self.handle_ui_event(cycle_event)
+        val next_id = self.session.focused_widget()
+        if next_id != "":
+            if val Some(next_node) = self.session.current_tree().find_widget(next_id):
+                val kind = next_node.kind_name()
+                if kind == "input" or kind == "textfield" or kind == "textarea":
+                    next_node.set_prop("ui_focus", "true")
+                    self.handle_ui_event(UIEvent.InsertMode)
+                else:
+                    self.handle_ui_event(UIEvent.NormalMode)
+
+    me handle_host_mouse_click(x: i32, y: i32) -> bool:
+        """Route a left mouse press at (x, y) using real CSS layout hit boxes."""
+        self.last_mouse_x = x
+        self.last_mouse_y = y
+        val hit_id = self.backend.find_widget_at(x, y)
+        self._clear_all_ui_focus()
+        if hit_id.starts_with("ui_action_"):
+            self.handle_ui_event(UIEvent.Action(name: hit_id[10:]))
+            return true
+        if hit_id != "":
+            if val Some(node) = self.session.current_tree().find_widget(hit_id):
+                val kind = node.kind_name()
+                if kind == "input" or kind == "textfield" or kind == "textarea":
+                    node.set_prop("ui_focus", "true")
+                    self.handle_ui_event(UIEvent.FocusEvent(target_id: hit_id, kind: "focus"))
+                    self.handle_ui_event(UIEvent.InsertMode)
+                    return true
+                elif kind == "button":
+                    node.set_prop("ui_action_pending", "true")
+                    self.handle_ui_event(UIEvent.FocusEvent(target_id: hit_id, kind: "focus"))
+                    val action_name = node.get_prop("action")
+                    if action_name != "":
+                        self.handle_ui_event(UIEvent.Action(name: action_name))
+                    return true
+                elif kind == "checkbox" or kind == "switch":
+                    val next_checked = if node.get_prop("checked") == "true": "false" else: "true"
+                    node.set_prop("checked", next_checked)
+                    self.handle_ui_event(UIEvent.FocusEvent(target_id: hit_id, kind: "focus"))
+                    return true
+                else:
+                    self.handle_ui_event(UIEvent.FocusEvent(target_id: hit_id, kind: "focus"))
+                    self.handle_ui_event(UIEvent.NormalMode)
+                    return true
+        self.handle_ui_event(UIEvent.NormalMode)
+        false
+
+    me handle_host_mouse_button(button_code: i32, pressed: bool) -> bool:
+        if button_code == 0 and pressed:
+            self.handle_host_mouse_click(self.last_mouse_x, self.last_mouse_y)
+            return true
+        val action = if pressed: "press" else: "release"
+        val translated = translate_mouse_event(
+            self.last_mouse_x,
+            self.last_mouse_y,
+            button_code,
+            action
+        )
+        if val Some(ev) = translated:
+            self.handle_ui_event(ev)
+            return true
+        false
+
+    me handle_host_key(keycode: i32, scancode: i32, modifiers: i32) -> bool:
+        val text_focused = self._is_text_input_focused()
+        val translated = translate_browser_key_event(keycode, scancode, modifiers, text_focused)
+        if val Some(ev) = translated:
+            if text_focused:
+                match ev:
+                    UIEvent.NormalMode:
+                        self.handle_ui_event(UIEvent.NormalMode)
+                        return true
+                    UIEvent.FocusNext:
+                        self._dispatch_focus_cycle(ev)
+                        return true
+                    UIEvent.FocusPrev:
+                        self._dispatch_focus_cycle(ev)
+                        return true
+                    UIEvent.KeyPress(key):
+                        val fid = self.session.focused_widget()
+                        var cur_val = ""
+                        var is_textarea = false
+                        if val Some(node) = self.session.current_tree().find_widget(fid):
+                            cur_val = node.get_prop("value")
+                            is_textarea = node.kind_name() == "textarea"
+                        if key == "backspace":
+                            val next_val = _browser_pop_last_char(cur_val)
+                            self.handle_ui_event(UIEvent.InputChange(target_id: fid, value: next_val))
+                            return true
+                        elif key == "enter":
+                            if is_textarea:
+                                self.handle_ui_event(UIEvent.InputChange(target_id: fid, value: cur_val + "\n"))
+                            else:
+                                self.handle_ui_event(UIEvent.Action(name: "submit"))
+                            return true
+                        elif key == "delete" or key == "left" or key == "right" or key == "up" or key == "down" or key == "page_up" or key == "page_down":
+                            self.handle_ui_event(UIEvent.KeyPress(key: key))
+                            return true
+                        else:
+                            self.handle_ui_event(UIEvent.InputChange(target_id: fid, value: cur_val + key))
+                            return true
+                    _:
+                        self.handle_ui_event(ev)
+                        return true
+            else:
+                match ev:
+                    UIEvent.FocusNext:
+                        self._dispatch_focus_cycle(ev)
+                        return true
+                    UIEvent.FocusPrev:
+                        self._dispatch_focus_cycle(ev)
+                        return true
+                    UIEvent.KeyPress(key):
+                        if key == "page_down" or key == "down":
+                            return self.backend.scroll_by(48)
+                        elif key == "page_up" or key == "up":
+                            return self.backend.scroll_by(-48)
+                        else:
+                            self.handle_ui_event(UIEvent.KeyPress(key: key))
+                            return true
+                    _:
+                        self.handle_ui_event(ev)
+                        return true
+        false
+
+    me handle_host_wheel(delta_y: f64) -> bool:
+        val dy_i32 = (0.0 - delta_y * 24.0).to_i32()
+        val dy = if dy_i32 == 0 and delta_y > 0.0: -24 elif dy_i32 == 0 and delta_y < 0.0: 24 else: dy_i32
+        if dy == 0:
+            return false
+        val scrolled = self.backend.scroll_by(dy)
+        self.handle_ui_event(UIEvent.ScrollEvent(self.last_mouse_x.to_f64(), self.last_mouse_y.to_f64(), 0.0, dy.to_f64()))
+        scrolled or true
+
     me handle_host_event(ev: i64):
+        val _dirty = self._handle_host_event_dirty(ev)
+
+    me _handle_host_event_dirty(ev: i64) -> bool:
         val event_type = browser_winit_event_get_type(ev)
         if event_type == EVT_CLOSE:
             self.running = false
-            return
+            return false
 
         if event_type == EVT_KEYBOARD:
-            val (_scancode, keycode, pressed) = browser_winit_event_keyboard_input(ev)
+            val (scancode, keycode, pressed) = browser_winit_event_keyboard_input(ev)
             if pressed:
-                val translated = translate_key_event(keycode.to_i32(), 0)
-                if translated.is_some():
-                    self.handle_ui_event(translated)
-            return
+                return self.handle_host_key(keycode.to_i32(), scancode.to_i32(), 0)
+            return false
 
         if event_type == EVT_MOUSE_MOVED:
             val (mouse_x, mouse_y) = browser_winit_event_mouse_moved(ev)
             self.last_mouse_x = mouse_x.to_i32() / BROWSER_WINDOW_SCALE
             self.last_mouse_y = mouse_y.to_i32() / BROWSER_WINDOW_SCALE
-            val translated = translate_mouse_event(
-                self.last_mouse_x,
-                self.last_mouse_y,
-                0,
-                "move"
-            )
-            if translated.is_some():
-                self.handle_ui_event(translated)
-            return
+            val hover_id = self.backend.find_widget_at(self.last_mouse_x, self.last_mouse_y)
+            val hover_changed = hover_id != self.last_hover_id
+            self.last_hover_id = hover_id
+            if hover_changed:
+                val translated = translate_mouse_event(
+                    self.last_mouse_x,
+                    self.last_mouse_y,
+                    0,
+                    "move"
+                )
+                if val Some(mv) = translated:
+                    self.handle_ui_event(mv)
+            return hover_changed
 
         if event_type == EVT_MOUSE_BUTTON:
             val (button_code, pressed) = browser_winit_event_mouse_button(ev)
-            val action = if pressed:
-                "press"
-            else:
-                "release"
-            val translated = translate_mouse_event(
-                self.last_mouse_x,
-                self.last_mouse_y,
-                button_code.to_i32(),
-                action
-            )
-            if translated.is_some():
-                self.handle_ui_event(translated)
-            return
+            return self.handle_host_mouse_button(button_code.to_i32(), pressed)
 
         if event_type == GUI_EVT_MOUSE_WHEEL:
-            val dy_i32 = (0.0 - _host_gui_event.y * 24.0).to_i32()
-            val dy = if dy_i32 == 0 and _host_gui_event.y > 0.0: -24 elif dy_i32 == 0 and _host_gui_event.y < 0.0: 24 else: dy_i32
-            if dy != 0:
-                self.handle_ui_event(UIEvent.ScrollEvent(self.last_mouse_x.to_f64(), self.last_mouse_y.to_f64(), 0.0, dy.to_f64()))
-            return
+            return self.handle_host_wheel(_host_gui_event.y)
 
         if event_type == GUI_EVT_RESIZED:
             val new_w = _host_gui_event.x.to_i32() / BROWSER_WINDOW_SCALE
             val new_h = _host_gui_event.y.to_i32() / BROWSER_WINDOW_SCALE
             if new_w > 0 and new_h > 0:
+                self.backend.resize(new_w, new_h)
                 self.handle_ui_event(UIEvent.Resize(new_w, new_h))
+                return true
+        false
 
     me present_host_window(window: i64) -> bool:
         val pixels = self.backend.pixels_rgba_i64()
@@ -430,3 +574,19 @@ fn parse_web_engine_flag() -> text:
             return arg[13:]
         i = i + 1
     return "pure_simple"
+
+fn _browser_pop_last_char(s: text) -> text:
+    """Drop the final Unicode character from `s` using char-indexed access."""
+    var chars: [text] = []
+    var idx: i64 = 0
+    while s.char_at(idx) != "":
+        chars.push(s.char_at(idx))
+        idx = idx + 1
+    if chars.len() == 0:
+        return ""
+    var out = ""
+    var k: i64 = 0
+    while k < chars.len() - 1:
+        out = out + chars[k]
+        k = k + 1
+    out

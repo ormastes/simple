@@ -178,3 +178,20 @@ preserves raw ownership and avoids tiny-scope sweeps. The focused Rust unit,
 actual archive ABI fixture and LLDB boundary control pass. Rebuilt manager
 acceptance remains pending. See
 `doc/01_research/local/native_module_scope_allocator_residency_2026_10_30.md`.
+
+## C twins: which body runs (2026-11-28)
+
+The ordinary hosted bundle compiles `runtime.c` and `runtime_native.c` together
+and 95 symbols have two definitions. A strong definition beats a weak one;
+between two strong ones the first object on the link line wins, and that is
+`runtime.o` on ELF. On Mach-O the `SPL_RUNTIME_NATIVE_TWIN` copies are weak. So
+a fix made only in `runtime_native.c` may never run in a Stage 2 native binary,
+and a selfcheck that links one file proves nothing about the other.
+
+- Edit BOTH bodies, or run `sh scripts/check/check-runtime-c-twin-bodies.shs`:
+  it fails when a differing pair has no row in
+  `scripts/check/runtime_c_twin_allowlist.txt`, or when a listed body changed.
+- `--rows` prints current hashes. Read both bodies before updating a row.
+- A twin whose owner holds private state gets `SPL_RUNTIME_OWNER_TWIN` (weak on
+  ELF too) in `runtime.c`, not a second implementation.
+- Record: `doc/08_tracking/bug/runtime_c_twin_first_definition_wins_linux_divergence_2026-10-20.md`.

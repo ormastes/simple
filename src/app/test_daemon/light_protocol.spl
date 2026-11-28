@@ -374,8 +374,11 @@ pub fn light_lock_is_complete(content: text) -> bool:
 pub fn light_lock_pid(content: text) -> text:
     (content.split("\n")[0]).trim()
 
+var _light_tmp_seq: i64 = 0
+
 pub fn light_unique_tmp_path(path: text) -> text:
-    "{path}.{getpid()}.{time_now_unix_micros()}.tmp"
+    _light_tmp_seq = _light_tmp_seq + 1
+    "{path}.{getpid()}.{time_now_unix_micros()}.{_light_tmp_seq}.tmp"
 
 pub fn light_atomic_publish(path: text, content: text) -> bool:
     """Unique tmp + same-directory rename. No shared tmp name, no plain-write fallback."""
@@ -393,32 +396,43 @@ pub fn light_lock_older_than(path: text, secs: i64) -> bool:
     mtime > 0 and (time_now_unix_micros() / 1000000) - mtime > secs
 
 pub fn light_lock_break_stale(lock_path: text, binary_path: text, judged_pid: text, alive: fn(text) -> bool) -> bool:
-    """Delete the lock iff it is complete, still names judged_pid, and that pid is dead."""
+    """Delete the lock iff it is complete, still names judged_pid, and that pid is dead,
+    or if an aged incomplete/torn lock is empty or its recorded pid is dead."""
     val h = file_lock("{lock_path}.break", 10)
     if h < 0:
         return false
     var broke = false
     if file_exists(lock_path):
         val content = read_file_text(lock_path)
+        val pid = light_lock_pid(content)
         if light_lock_is_complete(content):
-            val pid = light_lock_pid(content)
             if pid == judged_pid and not alive(pid):
+                # Delete binary_path BEFORE lock_path so a new daemon claiming
+                # lock_path via O_EXCL cannot have its binary_path removed.
+                if binary_path != "":
+                    file_delete(binary_path)
                 file_delete(lock_path)
-                file_delete(binary_path)
                 broke = true
-        elif judged_pid == "" and light_lock_older_than(lock_path, 10):
-            # Torn record from a claimant that died mid-write: stale only after a grace.
-            file_delete(lock_path)
-            file_delete(binary_path)
-            broke = true
+        else:
+            val dead_or_empty = pid == "" or not alive(pid)
+            if (judged_pid == "" or pid == judged_pid) and dead_or_empty and light_lock_older_than(lock_path, 10):
+                # Torn or 1-line record from a dead/crashed claimant: stale only after a grace.
+                if binary_path != "":
+                    file_delete(binary_path)
+                file_delete(lock_path)
+                broke = true
     file_unlock(h)
     broke
 
 pub fn light_lock_release(lock_path: text, binary_path: text, my_pid: text):
-    """Release only a lock this pid owns."""
+    """Release only a lock this pid owns, deleting binary_path before lock_path."""
+    val h = file_lock("{lock_path}.break", 10)
     if file_exists(lock_path) and light_lock_pid(read_file_text(lock_path)) == my_pid:
+        if binary_path != "":
+            file_delete(binary_path)
         file_delete(lock_path)
-        file_delete(binary_path)
+    if h >= 0:
+        file_unlock(h)
 
 pub fn light_lock_claim(lock_path: text, digest: text, my_pid: text, alive: fn(text) -> bool, binary_path: text) -> bool:
     """Become the lane owner or report that someone else is. O_EXCL decides; no sleep arbitration."""
@@ -482,13 +496,15 @@ pub fn wait_for_daemon_record(lock_path: text, binary_path: text) -> bool:
     # The daemon claims LIGHT_LOCK first and publishes LIGHT_BINARY right
     # after. Returning on the lock alone raced that publish: the caller then
     # read no binary record, reported "identity unavailable or mismatched" and
-    # bypassed the daemon it had just started. Wait for both.
+    # bypassed the daemon it had just started. Wait for both to be complete.
     var waits = 0
     while waits < 40:
         if file_exists(lock_path) and file_exists(binary_path):
-            return true
+            if light_lock_is_complete(read_file_text(lock_path)) and read_file_text(binary_path).trim() != "":
+                return true
         thread_sleep(50)
         waits = waits + 1
-    file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
+    if lock_path == ".build/test_daemon_light/daemon.lock" and not file_exists("/tmp/simple-test-daemon-light.log"):
+        file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
     false
 

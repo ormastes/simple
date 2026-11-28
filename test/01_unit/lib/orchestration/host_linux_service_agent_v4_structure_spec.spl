@@ -97,7 +97,11 @@ describe "V4 agent owner structural pins (milestone_0021 PR2)":
             "machine_fresh_workload_begin_v3")
         val peff = s40_body(file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_probe_effects_v3.spl"),
             "machine_fresh_probe_begin_v3")
-        expect(s40_create_first(eff, "machine_fresh_launch_bind_v3(")).to_equal(true)
+        # The begin binds through workload_launch_bind_v3 (e8af6df8655, wait/logs reads), whose non-read arm is
+        # machine_fresh_launch_bind_v3; the create must still precede that call.
+        val effects = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        expect(s40_body(effects, "workload_launch_bind_v3")).to_contain("return machine_fresh_launch_bind_v3(custody, record, binding, command, template)")
+        expect(s40_create_first(eff, "workload_launch_bind_v3(")).to_equal(true)
         expect(s40_create_first(peff, "linux_fresh_workload_probe_bind_v3(")).to_equal(true)
 
     it "drops the source loan at stopping and never uses it after":
@@ -163,7 +167,11 @@ describe "V4 agent owner structural pins (milestone_0021 PR2)":
         val admitted = cv4.index_of("val manifest = host_linux_service_agent_admit_v4(")
         expect(replay >= 0 and admitted > replay).to_equal(true)
         step("the settled stage reaches host_agent_settled_v4 from the step dispatcher")
-        expect(s40_body(agent, "host_linux_service_agent_step_v4")).to_contain("if stage == \"settled\": return host_agent_settled_v4(agent, capacity, input)")
+        # The stage dispatch moved out of the step into host_agent_dispatch_v4 with the attach pre-step (86265d43216);
+        # the pre-step hands every non-running stage (settled, host-settle) to it as native.
+        expect(s40_body(agent, "host_agent_attachment_step_v4")).to_contain("    if state.stage != \"running\": return HostAgentAttachmentStepV4(agent: state, native: true, error: \"\")")
+        expect(s40_body(agent, "host_linux_service_agent_step_v4")).to_contain("    return host_agent_dispatch_v4(pre.agent, current, input)")
+        expect(s40_body(agent, "host_agent_dispatch_v4")).to_contain("    if stage == \"settled\": return host_agent_settled_v4(agent, capacity, input)\n    if agent.container.is_none()")
 
     it "binds the probe provider to the signed enrollment value and retries the epoch close after the loan end":
         # @req S40-AGENT-11 (P2R1-F3), S40-AGENT-07 (P2R1-F2)
@@ -203,7 +211,13 @@ describe "V4 agent owner structural pins (milestone_0021 PR2)":
     it "clears the agent slot only on the explicit not-found reason and carries the root on a lost transfer":
         # @req S40-AGENT-02 (N-06/T-08; P2R1-F8), S40-AGENT-07 (N-05; P2R1-F6)
         val cv4 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
-        expect(s40_count(cv4, "distributed_operation_journal_lookup_v2")).to_equal(0)
+        # The agent-slot clear (prepare) decides through daemon_operation_exact_v2 (envelope-checked), never the raw
+        # by-id lookup. The one other use in the file (the PR3b helper cancel row, 86265d43216, added after this pin)
+        # has only an id, propagates every lookup Err with `?` and clears no slot; the file-wide count (its import
+        # plus that call) keeps any further use out.
+        expect(s40_count(s40_body(cv4, "host_linux_service_prepare_v4"), "distributed_operation_journal_lookup_v2")).to_equal(0)
+        expect(s40_body(cv4, "linux_service_helper_cancel_row_v4")).to_contain("    val row = distributed_operation_journal_lookup_v2(capacity.journal, operation_id)?\n")
+        expect(s40_count(cv4, "distributed_operation_journal_lookup_v2")).to_equal(2)
         expect(cv4).to_contain("if prior.is_err() and prior.unwrap_err() == \"OPERATION_NOT_FOUND\":")
         expect(cv4).to_contain("val readback = daemon_operation_exact_v2(owner.capacity.unwrap().journal, owner.agent_operation.unwrap())")
         val open = s40_body(s40_agent(), "host_linux_service_agent_open_v4")

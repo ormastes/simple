@@ -284,7 +284,7 @@ lost its monitor. Source only, like the rest; not run in the guest.
 | Workspace primary attach (`attach --detach-keys= --sig-proxy=false`) | No. The leader lives as long as the transport and forks no monitor. It is built on the Inspect projection (`fresh-workspace-primary-attach-inspect-identity-required`), which clears the mode. | Pinned, not changed. |
 | `wait` / `logs` probes | No. Finite readers built on a verified Inspect projection. | Unchanged. |
 | Secondary exec, TTY or not (`LinuxOciEngineExecOwnerV3`) | No helper group at all: it talks to the installed engine socket (`local_unix_connect_v1`). The exec session's monitor belongs to that service. | Does not apply. |
-| Epoch startup V1 (`linux_fresh_epoch_project_launch_v1`) | Its operand allow-list admits `start` and `exec` from the caller's template, and it never asks. Its entry `local_container_service_start_fresh_epoch_v1` takes the template from its caller and has no caller in `src/` today. | **Not changed, open.** No owner there holds or retires an engine group, so asking would leave a group nobody kills; `start_provider_v1` is a pinned body. If a caller ever starts a container through it, that container loses its monitor as before. |
+| Epoch startup V1 (`linux_fresh_epoch_project_launch_v1`) | Its operand allow-list admits `start` and `exec` from the caller's template. Its entry `local_container_service_start_fresh_epoch_v1` takes the template from its caller and has no caller in `src/` today. | **Built in source 2026-11-28**, see "Edges closed". `start` asks; `exec` and every other operand do not. |
 
 ### Host measurement (podman 4.9.3 rootless, uid 1000, busybox:1.36, same emulation)
 
@@ -306,6 +306,91 @@ base stays byte-identical) and pins the settle order and the paths in the table.
 change (2 of 6), green after (6 of 6). `machine_fresh_engine_residue_containment_v3_spec.spl` link 2a and
 `machine_fresh_workload_engine_group_v3_spec.spl` (five sites) were updated in the same change.
 
+## Edges closed (2026-11-28)
+
+Source and unit specs only. Nothing here was run in the guest or against a live engine; the rows under
+"TODO" are what that still needs.
+
+### Epoch startup V1 asks, and the epoch close retires
+
+- **Retirement first.** The epoch lifecycle records the launch identity of a provider helper whose captured
+  launch asked (`attach_process_v1`, before the template check; the unattached cleanup records it as well).
+  `MachineFreshEpochAdmissionOwnerV1.close_v1` retires `simple-engine-<identity>` through the custody it
+  already holds, after `close_process_v1` and before the writer and custody are released. A refusal is plain
+  (nothing latched, the same close may be repeated) and `closed_v1` refuses
+  `machine-fresh-epoch-engine-group-retained` while a group is recorded.
+- **This is the second order of the decision (item 6)**, built for the epoch helper only: the group is killed
+  whatever the store records, because the epoch is ending and its store is not read again. The workload
+  owners keep the first order (after their own Stop, Remove and Absence).
+- **Request last.** `linux_fresh_epoch_leader_residue_mode_v1(provider, operation)`: `start` and a provider
+  path ending in `/podman`, nothing else. The projection rebuilds the profile, so a mode carried by the
+  caller's template never passes through. The `version` base the installed owner binds for every workload
+  and workspace helper is byte-identical to before; binding a bound `start` again yields the same bytes, so
+  `validate_profiled_launch_v1` still matches.
+- `exec` from the epoch template is not changed: the exec session's monitor was not measured on this path.
+
+### Live workload: Stop, Destroy, settle
+
+No kill was added at Stop: the measurement above stands (killing before Remove and Absence poisons the
+store). What was checked and pinned:
+
+- Order with a live workload (pure reducer, executed): nothing completed, Stop only, and Stop plus Remove
+  all refuse `machine-fresh-workload-engine-group-store-live`; all three with the Absence helper not yet
+  collected refuse `...-helper-active`; then every recorded group is named, in recording order.
+- A retired group is forgotten exactly once (`machine_fresh_engine_group_forget_v3`): a second retirement
+  of the same name refuses `machine-fresh-workload-engine-group-unrecorded`, so a settle that follows a
+  retirement can neither kill twice nor pass with a group still recorded.
+- **Leak fixed.** `engine_group_retired_v3` removed the identity but kept the recorded device and inode in
+  `engine_group_objects`. It now drops both.
+- Every route to the workspace settle runs the owner's own Stop: workspace Destroy is `inspect-exit`, `stop`,
+  `remove`, `absence`, and `stop` is skipped only when this owner already completed it. A workload that
+  exited by itself is stopped the same way (read in `machine_fresh_workspace_workflow_v3.spl`, pinned by
+  `linux_fresh_workspace_start_residue_v3_spec.spl`).
+- The probe lane's Start completes through the same `machine_fresh_workload_complete_v3`, so the typed move
+  refusal below applies there too.
+- The bound of four groups does not fail silently: `capture_v2` latches the owner when a fifth identity
+  cannot be recorded (read, not changed).
+
+### A refused move is the Start's own failure
+
+Before: `rt_lg_poll` discarded the result of `rt_lg_move_residue_v3`. When the delegated root refused the
+engine group, the residue was killed with the helper group and the Start helper still reported exit 0, so
+the owner saw a clean start of a container whose monitor was dead.
+
+- Runtime: the move returns 0 or an exit code and `rt_lg_poll` stores it as the leader's.
+  `RT_LG_RESIDUE_MOVE_PERMISSION_EXIT` 1001 for EACCES, EPERM or EROFS on `mkdirat` or on a member's
+  `cgroup.procs` write; `RT_LG_RESIDUE_MOVE_FAILED_EXIT` 1000 for every other failure of a requested and
+  attempted move (freeze, name already taken, a member that could not be moved). Both are above every wait
+  status and inside the observation's exit bound (4294967295). A move that was never attempted (leader
+  failed, timeout, cancel, nothing left) reports the leader's own code as before.
+- Owner: `machine_fresh_engine_group_move_outcome_v3` names them, and the `start` completion latches
+  `machine-fresh-workload-engine-group-move-permission` or `...-move-failed` ahead of the generic
+  `machine-fresh-workload-command-failed`. The group stays recorded and is found absent at retirement.
+- The residue is still killed: nothing may stay in the leader's group. The store of that container may
+  then be poisoned, exactly as before; what changed is that the owner knows and says why.
+- Selfcheck: seven cases. New: the name-taken case reports 1000; a root this uid may not create under
+  reports 1001, makes nothing and kills the residue (skipped as root, exit 77).
+
+### Proof (Rust seed interpreter, diagnostic; C selfcheck with clang on real cgroup v2)
+
+| Spec | Before the source change | After |
+|---|---|---|
+| `linux_fresh_epoch_start_residue_v1_spec.spl` (new) | executed 6, failed 5 | executed 6, passed 6 |
+| `machine_fresh_workload_engine_group_v3_spec.spl` (17 to 20 cases) | executed 20, failed 2 | executed 20, passed 20 |
+| `machine_fresh_engine_residue_containment_v3_spec.spl` | executed 4, failed 2 | executed 4, passed 4 |
+| `check-linux-group-residue-move.shs` | six cases | PASS, seven cases |
+
+### TODO (seed-only or source-only evidence; none of these is a PASS)
+
+| Item | Why it is not proven | Needs |
+|---|---|---|
+| Epoch close retires the engine group | The epoch lifecycle and admission close are stateful owners; the seed stops at the native origin check. Source pins only. `retire_engine_group_v3` goes through `borrow_workload_observer_v2` on the epoch's own custody: `epoch_native_workload_v2` first needs `epoch_native_current_v1` to pass and then opens the workload component lazily, and neither was ever run in a closing epoch whose engine group is still populated. If that observation refuses there, the close stays pending and repeatable, and the group stays under its name. | Guest: an epoch `start` whose container outlives its helper, then `close_v1`; the group must be gone and the close must pass. |
+| Start latches the typed move refusal | The `start` completion is in the stateful effects; pinned by source, the classifier is executed. | Guest: a delegated root the broker cannot create under; Start must fail with `...-move-permission`. |
+| Exit code 1001 reaches the owner | The runtime value is proven by the C selfcheck and the bounds were read (`linux_process_poll_decode_v1`, `group_process_observation_decode_v1`); the broker between them was not run. | Rebuilt broker in the guest. |
+| Stop, Destroy and settle of a workspace whose workload is still running | Order and forget are executed as DATA; the workspace workflow is not. | Guest: agent or remote-build workload alive at start-helper reap, then Stop, Destroy, the `settle` stage twice (the second must be the settled early return). |
+| Epoch `start` whose move was refused | The epoch creator has no reader of the helper's exit code, so 1000 and 1001 are not named on this path; the helper is collected like any other and the group is found absent at close. | A typed reason on the epoch path, once that path has a caller. |
+| `exec` from the epoch template | Not measured. | Host emulation of an epoch `exec` with the helper group killed. |
+
 ## Open
 
 - **Guest.** Nothing here was run in the guest. It needs the broker and runtime rebuilt and installed
@@ -322,6 +407,8 @@ change (2 of 6), green after (6 of 6). `machine_fresh_engine_residue_containment
 - **Permission of the move in the guest.** The broker writes into `<delegatedCgroup>/simple-engine-*`
   from its own scope; that needs the same write access to the delegated root's `cgroup.procs` that the
   engine's placement of `libpod-<id>` needs. True in the emulation, not checked in the guest.
+  Since 2026-11-28 a refusal there fails the Start under its own reason instead of passing as a clean
+  start ("Edges closed").
 - A newer engine may place conmon itself; not checked beyond 4.9.3.
 - `src/runtime/test/runtime_linux_group_start_ownership_selfcheck.c` does not compile at the base commit
   (`owned_adapter_fill_reserved_values` undeclared in its stub harness). Found here, not changed.

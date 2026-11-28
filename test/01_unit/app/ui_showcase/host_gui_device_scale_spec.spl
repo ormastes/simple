@@ -1,8 +1,13 @@
 use std.spec
 use std.spec.step
 use app.ui_showcase.hosts.scene_raster.{RasterSurface}
-use app.ui_showcase.hosts.host_gui.{gui_device_scale, gui_event_to_logical}
-use nogc_sync_mut.ui.gui_renderer.{GuiWindowEvent, GUI_EVT_MOUSE_MOVED, GUI_EVT_MOUSE_WHEEL}
+use app.ui_showcase.hosts.host_gui.{gui_device_scale, gui_event_to_logical, gui_event_to_host, gui_shift_ch}
+use common.ui.host_input_event.{HostInputEvent, HOST_MOD_SHIFT}
+use common.ui.key_code.{CANON_A, CANON_1}
+use nogc_sync_mut.ui.gui_renderer.{
+    GuiWindowEvent, GUI_EVT_MOUSE_MOVED, GUI_EVT_MOUSE_WHEEL,
+    GUI_EVT_KEYBOARD, GUI_EVT_TEXT_INPUT, GUI_EVT_RESIZED
+}
 
 """
 ## Purpose and audience
@@ -67,3 +72,46 @@ describe "GUI device scale":
         expect(m.x.to_i64()).to_equal(150)
         expect(m.y.to_i64()).to_equal(60)
         expect(gui_event_to_logical(wheel, 2).y.to_i64()).to_equal(3)
+
+    it "preserves shift modifiers and translates GUI_EVT_TEXT_INPUT and RESIZED":
+        # @req REQ-SGUI-005
+        # @req REQ-SGUI-006
+        step("Shift modifier on keyboard event produces shifted glyph and preserves HOST_MOD_SHIFT")
+        val k_shift = GuiWindowEvent(
+            native_id: 0, kind: GUI_EVT_KEYBOARD, scancode: 0, keycode: 65,
+            btn: 0, pressed: true, x: 0.0, y: 0.0, mods: HOST_MOD_SHIFT
+        )
+        val out_k = gui_event_to_host(k_shift)
+        expect(out_k.is_some()).to_equal(true)
+        match out_k!:
+            HostInputEvent.Key(code, ch, down, mods):
+                expect(code).to_equal(CANON_A)
+                expect(ch).to_equal("A")
+                expect(down).to_equal(true)
+                expect(mods).to_equal(HOST_MOD_SHIFT)
+            _:
+                expect(false).to_equal(true)
+        expect(gui_shift_ch("1")).to_equal("!")
+        step("GUI_EVT_TEXT_INPUT carries committed text_ch directly")
+        val txt_ev = GuiWindowEvent(
+            native_id: 0, kind: GUI_EVT_TEXT_INPUT, scancode: 0, keycode: 49,
+            btn: 0, pressed: true, x: 0.0, y: 0.0, mods: HOST_MOD_SHIFT, text_ch: "!"
+        )
+        val out_t = gui_event_to_host(txt_ev)
+        expect(out_t.is_some()).to_equal(true)
+        match out_t!:
+            HostInputEvent.Key(code, ch, down, mods):
+                expect(code).to_equal(CANON_1)
+                expect(ch).to_equal("!")
+                expect(down).to_equal(true)
+            _:
+                expect(false).to_equal(true)
+        step("Logical scaling divides GUI_EVT_RESIZED and preserves metadata")
+        val resized = GuiWindowEvent(
+            native_id: 0, kind: GUI_EVT_RESIZED, scancode: 0, keycode: 0,
+            btn: 0, pressed: false, x: 1600.0, y: 1200.0, scale_milli: 2000
+        )
+        val r_log = gui_event_to_logical(resized, 2)
+        expect(r_log.x.to_i64()).to_equal(800)
+        expect(r_log.y.to_i64()).to_equal(600)
+        expect(r_log.scale_milli).to_equal(2000)

@@ -425,7 +425,7 @@ pub fn sosix_fs_grant_contained_read_v1(tree: text) -> text                     
 
 | Op | Windows | Linux / FreeBSD / macOS |
 |---|---|---|
-| `link_readonly` | `file_hardlink` (`CreateHardLinkW`, already in `io/file_ops`). `file_seal_readonly` answers false on Windows by design and is not required: the object keeps its medium integrity label, so a low-integrity child cannot open it for write | `file_hardlink` + `file_seal_readonly` (0444); the launch variant adds the read-only mount or Seatbelt rule |
+| `link_readonly` | `file_hardlink` (`CreateHardLinkW`, already in `io/file_ops`). `file_seal_readonly` answers false on Windows (the runtime chmod is a no-op), so `container_view_create_v1` (`container/view_share_v1.spl`) seals the linked base with one `attrib +R` over `lower/`; the attribute belongs to the file, so the STORE OBJECT is read-only permanently too. The medium integrity label still keeps a low-integrity child from opening it for write | `file_hardlink` + `file_seal_readonly` (0444); the launch variant adds the read-only mount or Seatbelt rule |
 | `grant_contained_read` | read+execute ACE for the fixed reader SID on a tree | typed refusal until that host's lane |
 | `grant_contained_write` | Low mandatory label `(OI)(CI)` plus an inheritable modify ACE for the scope SID, via `SetNamedSecurityInfoW` | typed refusal `contained-write-unimplemented-<os>` until that host's lane defines its grant; never "granted" by default |
 
@@ -487,7 +487,7 @@ image pages between them.
   and `SIMPLE_CONTAINER_UPPER`. `storage_view_v1_save` keeps scanning `upper/` only.
 - The materializer pins the base refs (`immutable_store_v1_pin`, owner
   `pure-container`, pin id = view id) before linking and releases after `lower/`
-  is removed. GC stays unaffected: no read-only attribute is set, so a store
+  is removed. Linked base objects are now read-only on Windows (A2 `attrib +R`; the attribute is per file, so the store object too); GC still works on them (verified by spec), so a store
   object can still be moved or deleted, and a surviving link keeps its bytes.
 - A copy fallback is recorded per materialization. One copied file sets
   `readonly_file_backing_reuse` false for that report.

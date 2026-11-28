@@ -397,7 +397,7 @@ use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, sfnt_gray_glyph_outline, sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdGlyph, SfntLcdOutline}
 use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
 use std.common.encoding.font_registry.{FontAssetCandidate, FontAssetRuntimeValidation, clear_registered_selected_font_fixtures, register_selected_font_fixture, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
-use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_kern_face_pair_size_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
@@ -2380,18 +2380,19 @@ class FontRenderer:
     # kern rounded a real sub-pixel pair away -- the same under-measure round 12
     # removed from advances, removed here from kerning.
     me horizontal_kern_milli(left_codepoint: i32, right_codepoint: i32, font_size: i32) -> i32:
-        val foreign = self.horizontal_kern(left_codepoint, right_codepoint, font_size)
-        if foreign != 0:
-            return foreign * 1000
         if font_size <= 0 or font_size > 512:
             return 0
-        # Read the field in place: `val blob = self.selected_outline_blob`
-        # lowers to rt_array_copy under the JIT, one whole-font copy per call.
+        self.horizontal_kern_size_milli(left_codepoint, right_codepoint, font_size * 1000)
+
+    me horizontal_kern_size_milli(left_codepoint: i32, right_codepoint: i32, font_size_milli: i32) -> i32:
+        if font_size_milli <= 0 or font_size_milli > 512000:
+            return 0
+        val whole_px = (font_size_milli + 500) / 1000
+        val foreign = self.horizontal_kern(left_codepoint, right_codepoint, whole_px)
+        if foreign != 0:
+            return foreign * 1000
         if self.selected_outline_blob.len() == 0:
             return 0
-        # Same face-identity source the advance lane uses (`_adv_identity` in
-        # `get_glyph_advance_milli`): the glyph-id table is keyed on it, so a
-        # face swap cannot serve a stale glyph id to the kern lookup.
         val kern_rast = self.ttf_rasterizer
         val identity: text = if kern_rast != nil: kern_rast.?.cache_identity() else: ""
         if identity == "":
@@ -2403,7 +2404,7 @@ class FontRenderer:
         val right_gid = _gid_lookup(gid_slot, right_codepoint)
         if left_gid <= 0 or right_gid <= 0:
             return 0
-        sfnt_kern_face_pair_milli_px(self.selected_outline_blob, _gid_kern[gid_slot], left_gid, right_gid, font_size.to_i64()) as i32
+        sfnt_kern_face_pair_size_milli_px(self.selected_outline_blob, _gid_kern[gid_slot], left_gid, right_gid, font_size_milli.to_i64()) as i32
 
     me horizontal_line_metric(font_size: i32, field: i32) -> i32:
         val rast = self.ttf_rasterizer
@@ -2697,7 +2698,7 @@ class FontRenderer:
                         val direct_height = direct_meta[1] as i32
                         val direct_advance_raw = direct_meta[2] as i32
                         val direct_advance = if direct_advance_raw > 0: direct_advance_raw else: direct_width + 1
-                        val direct_bearing_x = direct_meta[3] as i32
+                        val direct_bearing_x = if not gray_base and direct_meta[7] == 310031 and direct_width > 0: direct_meta[19] as i32 else: direct_meta[3] as i32
                         val direct_bearing_y = direct_meta[4] as i32
                         self.glyph_phase_bitmap_non_nil = true
                         if direct_width > 0 and direct_height > 0:
@@ -3120,6 +3121,30 @@ class FontRenderer:
             prev_cp = cp
             ci = ci + 1
         boundaries[content_len] = cumulative
+        # Snap to exact integer font-unit sums when every step lies on the face's
+        # unitsPerEm grid so long runs keep zero milli-rounding drift.
+        val upem = _fr_units_per_em(_run_identity, self.selected_outline_blob)
+        if upem > 0 and content_len > 0:
+            val grid_den = (font_size as i64) * 1000
+            var on_grid = true
+            var gi = 0
+            while gi < content_len:
+                val step = boundaries[gi + 1] - boundaries[gi]
+                val u = _fr_scale_round(step, upem, grid_den)
+                val back = _fr_scale_round(u, grid_den, upem)
+                val off = step - back
+                if off < -1 or off > 1:
+                    on_grid = false
+                    break
+                gi = gi + 1
+            if on_grid:
+                var units: i64 = 0
+                gi = 0
+                while gi < content_len:
+                    val step = boundaries[gi + 1] - boundaries[gi]
+                    units = units + _fr_scale_round(step, upem, grid_den)
+                    boundaries[gi + 1] = _fr_scale_round(units, grid_den, upem)
+                    gi = gi + 1
         boundaries
 
     me measure_text_advances(content: text, font_size: i32) -> [i32]:
@@ -3188,23 +3213,25 @@ class FontRenderer:
     me render_text(buffer: [u32], buf_w: i32, buf_h: i32,
                    x: i32, y: i32, content: text,
                    color: u32, font_size: i32) -> [u32]:
-        """Render text string into an ARGB pixel buffer with anti-aliased glyphs."""
+        """Render text string into an ARGB pixel buffer with unified cumulative milli-px
+        pen stepping and kerning matching measure_text_advances."""
         var out = buffer
-        var cx = x
-        var prev_cp = -1
-        # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
-        var ci = 0
         val content_cps = text_codepoints(content)
         val content_len = content_cps.len()
+        if content_len == 0:
+            return out
+        var run_identity: text = ""
+        if val run_rasterizer = self.ttf_rasterizer:
+            run_identity = run_rasterizer.cache_identity()
+        val boundaries = self._text_pen_milli(content_cps, font_size, run_identity)
+        var ci = 0
         while ci < content_len:
             val cp = content_cps[ci] as i32
-            if prev_cp >= 0:
-                cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
             val glyph = self.get_glyph(cp, font_size)
+            val pen_x = x + _milli_px_to_px(boundaries[ci])
+            val draw_x = if not self.use_bitmap: pen_x + glyph.bearing_x else: pen_x
             if glyph.width > 0 and glyph.height > 0:
-                out = blit_glyph(out, buf_w, buf_h, cx, y, glyph, color)
-            cx = cx + glyph.advance
-            prev_cp = cp
+                out = blit_glyph(out, buf_w, buf_h, draw_x, y, glyph, color)
             ci = ci + 1
         out
 
@@ -3215,21 +3242,25 @@ class FontRenderer:
             return FontTextPayload(valid: true, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
         var layout = self.layout_text(content, font_size, 0)
         if layout.len() == 0 and (self.use_vector or self.use_bitmap):
-            var fallback_x: i64 = 0
+            val content_cps = text_codepoints(content)
+            val content_len = content_cps.len()
+            var run_identity: text = ""
+            if val run_rasterizer = self.ttf_rasterizer:
+                run_identity = run_rasterizer.cache_identity()
+            val boundaries = self._text_pen_milli(content_cps, font_size, run_identity)
             var fallback_byte_offset: i64 = 0
             # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
             var ci = 0
-            val content_cps = text_codepoints(content)
-            val content_len = content_cps.len()
             while ci < content_len:
                 val codepoint = content_cps[ci] as i32
                 val glyph = self.get_glyph(codepoint, font_size)
+                val pen_x = _milli_px_to_px(boundaries[ci]).to_i64()
+                val draw_x = if not self.use_bitmap: pen_x + glyph.bearing_x.to_i64() else: pen_x
                 layout = layout.push(LayoutGlyph(
-                    codepoint: codepoint.to_i64(), x: fallback_x, y: 0,
+                    codepoint: codepoint.to_i64(), x: draw_x, y: 0,
                     width: glyph.width.to_i64(), height: glyph.height.to_i64(),
                     byte_offset: fallback_byte_offset
                 ))
-                fallback_x = fallback_x + glyph.advance.to_i64()
                 fallback_byte_offset = fallback_byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())
                 ci = ci + 1
         if layout.len() == 0:
@@ -3906,10 +3937,11 @@ class FontRenderer:
             return CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
                 glyph_index: glyph_index, font_size: font_size, width: 0, height: 0,
                 advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+        val unphased_bearing_x = if meta[7] == 310031 and meta[0] > 0: meta[19].to_i32() else: meta[3].to_i32()
         var glyph = CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
             glyph_index: glyph_index, font_size: font_size,
             width: meta[0].to_i32(), height: meta[1].to_i32(),
-            advance: meta[2].to_i32(), bearing_x: meta[3].to_i32(),
+            advance: meta[2].to_i32(), bearing_x: unphased_bearing_x,
             bearing_y: meta[4].to_i32(), pixels: pixels)
         if self._lcd_applies(font_size) and glyph.width > 0 and glyph.height > 0:
             glyph = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, glyph_index.to_i64(), -1, glyph_index, generation, font_size, glyph)
@@ -4477,9 +4509,9 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
                 val pen_floor: i32 = if pen_scaled < 0.0 and (pen_trunc.to_f64() != pen_scaled): pen_trunc - 1 else: pen_trunc
                 pens_64 = pens_64.push(pen_floor)
             val cluster = material.clusters[i]
-            val before = total_advance.to_i32()
+            val before = (total_advance + 0.5).floor().to_i32()
             total_advance = total_advance + run.glyphs[i].x_advance
-            val after = total_advance.to_i32()
+            val after = (total_advance + 0.5).floor().to_i32()
             if cluster < 0 or cluster >= advances.len():
                 valid = false
             else:
@@ -4487,7 +4519,7 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             i = i + 1
         if i != material.glyph_ids.len() or i != run.glyphs.len():
             valid = false
-    val width = total_advance.to_i32()
+    val width = (total_advance + 0.5).floor().to_i32()
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
     _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0, pens_64: if payload.valid: pens_64 else: [], face_units: if payload.valid: sfnt_blob_line_metric_units(font_blob) else: [])
 

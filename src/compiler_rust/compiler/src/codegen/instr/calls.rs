@@ -4653,7 +4653,7 @@ pub fn compile_call<M: Module>(
                 let dest_signed = super::core::vreg_is_signed(ctx, *d) == Some(true);
                 if let Some(ret_type) = crate::codegen::runtime_sffi::fam_aware_return_type(ctx.fam_arrays, sffi_name)
                 {
-                    if ret_type == types::I32 || ret_type == types::I8 {
+                    if ret_type == types::I32 || ret_type == types::I8 || ret_type == types::I16 {
                         result = if dest_signed {
                             builder.ins().sextend(types::I64, result)
                         } else {

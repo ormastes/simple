@@ -303,6 +303,33 @@ fn is_text_only_builtin_leaf(name: &str) -> bool {
     matches!(name.rsplit('.').next().unwrap_or(name), "byte_len" | "char_count")
 }
 
+/// True when a METHOD-SYNTAX call (`MirInst::MethodCallStatic`) names a text
+/// builtin that codegen lowers itself, so the mangler must not rebind it to a
+/// free function the calling module never brought into scope.
+///
+/// `s.byte_len()` on a text receiver reaches the mangler as `str.byte_len`
+/// (`text.` / `String.` for the aliases), or as bare `byte_len` when the
+/// receiver type was erased. Left as emitted, the LLVM MethodCallStatic arm
+/// lowers the leaf to `rt_string_len` / `rt_string_char_count`
+/// (codegen/llvm/functions.rs). Rebound, it calls whatever
+/// the closure happens to hold: one free `fn byte_len(data: [u8])` in
+/// `os/kernel/loader/byte_utils.spl` was the lone suffix candidate, so the
+/// "text UFCS" arm of `resolve_method_call_static` bound EVERY
+/// `text.byte_len()` in the Stage 2 closure to it -- including modules that
+/// never import that file -- and its arm64 body read 0 for a text
+/// (seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28).
+///
+/// This guards the closure-wide fallbacks only. A function the module defines
+/// (`local_mangled`) or names in a `use` (`use_map`), and a `byte_len` method
+/// of a type the module imports, are in scope and still bind; a free CALL
+/// `byte_len(data)` is a `MirInst::Call` that never comes here.
+fn is_text_builtin_method_call(lookup_name: &str) -> bool {
+    match lookup_name.rsplit_once('.') {
+        Some((owner, leaf)) => matches!(owner, "str" | "text" | "String" | "string") && is_text_only_builtin_leaf(leaf),
+        None => is_text_only_builtin_leaf(lookup_name),
+    }
+}
+
 /// Last-resort suffix binding for a name no exact map resolved.
 ///
 /// `resolve_by_suffix` cuts the name at every `_` and treats the tail as a
@@ -920,6 +947,11 @@ pub(crate) fn mangle_mir(
                             let use_resolved = if hits.len() == 1 { hits.pop() } else { None };
                             if let Some(resolved) = use_resolved {
                                 *func_name = resolved;
+                            } else if is_text_builtin_method_call(func_name.as_str()) {
+                                // The project import map lists every free
+                                // function in the closure under its bare
+                                // name, imported here or not; a bare text
+                                // builtin must not bind through it.
                             } else if let Some(resolved) = import_map.get(func_name.as_str()) {
                                 *func_name = resolved.clone();
                             }
@@ -1334,7 +1366,23 @@ fn resolve_method_call_static(
         }
     }
 
-    if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
+    // A text builtin that codegen lowers itself. Under a text qualifier the
+    // receiver is a text and the builtin wins outright. Bare, the receiver was
+    // erased: the imported-type scan below may still bind it (it only reaches
+    // methods of types this module imports), but the closure-wide arms -- name
+    // variants, lone suffix candidate, `resolve_unbound_by_suffix` -- know
+    // nothing about what the module imported and must not capture it.
+    let text_builtin = is_text_builtin_method_call(lookup_name);
+    if text_builtin && lookup_name.contains('.') {
+        return;
+    }
+
+    let variant_resolved = if text_builtin {
+        None
+    } else {
+        resolve_name_variants(lookup_name, use_map, import_map)
+    };
+    if let Some(resolved) = variant_resolved {
         *func_name = resolved;
     } else {
         let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
@@ -1470,7 +1518,7 @@ fn resolve_method_call_static(
                 // `str.rfind` versus `DoubleEndedIterator.rfind`).  Bare calls
                 // have no such evidence and retain the unique-candidate
                 // fallback.
-                if !has_type_qualifier && candidates.len() == 1 {
+                if !has_type_qualifier && !text_builtin && candidates.len() == 1 {
                     candidates.first()
                 } else {
                     None
@@ -1531,6 +1579,8 @@ fn resolve_method_call_static(
             if let Some(b) = best {
                 *func_name = b.clone();
             }
+        } else if text_builtin {
+            // No candidate at all: stay bare for codegen's builtin lowering.
         } else if let Some(resolved) =
             resolve_unbound_by_suffix(lookup_name, local_suffix_index, suffix_index)
         {
@@ -2242,6 +2292,121 @@ mod tests {
         expected.push("byte_len".to_string());
         expected.push("driver__incremental__IncrChangeSet.len".to_string());
         assert_eq!(emitted, expected);
+    }
+
+    /// seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28:
+    /// one free `fn byte_len(data: [u8])` anywhere in the closure is listed
+    /// bare in the project import map and is the lone suffix candidate. A
+    /// module that never imports it must keep its text `.byte_len()` /
+    /// `.char_count()` METHOD calls as emitted (codegen lowers them to
+    /// `rt_string_*`), while a free CALL `byte_len(data)` still binds.
+    #[test]
+    fn closure_wide_free_fn_never_captures_text_builtin_method_calls() {
+        use crate::mir::{MirFunction, MirInst, MirModule, Terminator};
+
+        const USER_BYTE_LEN: &str = "os__kernel__loader__byte_utils__byte_len";
+        const USER_CHAR_COUNT: &str = "lib__common__glyphs__char_count";
+        const TYPE_BYTE_LEN: &str = "lib__common__buf__ByteBuf.byte_len";
+
+        fn method(name: &str) -> MirInst {
+            MirInst::MethodCallStatic {
+                dest: None,
+                receiver: crate::mir::VReg(0),
+                func_name: name.to_string(),
+                args: vec![],
+            }
+        }
+        fn mangled_names(insts: Vec<MirInst>, use_map: &HashMap<String, String>, local_fns: &[&str]) -> Vec<String> {
+            let mut import_map = HashMap::new();
+            let mut suffix_index = HashMap::new();
+            for (bare, mangled) in [("byte_len", USER_BYTE_LEN), ("char_count", USER_CHAR_COUNT)] {
+                import_map.insert(bare.to_string(), mangled.to_string());
+                suffix_index.insert(bare.to_string(), vec![mangled.to_string()]);
+            }
+            let mut mir = MirModule::new();
+            for name in local_fns {
+                let mut local =
+                    MirFunction::new(name.to_string(), crate::hir::TypeId::I64, simple_parser::Visibility::Private);
+                local.blocks[0].terminator = Terminator::Return(None);
+                mir.functions.push(local);
+            }
+            let mut caller = MirFunction::new(
+                "row_shape".to_string(),
+                crate::hir::TypeId::I64,
+                simple_parser::Visibility::Private,
+            );
+            caller.blocks[0].instructions.extend(insts);
+            caller.blocks[0].terminator = Terminator::Return(None);
+            mir.functions.push(caller);
+            super::mangle_mir(
+                &mut mir,
+                "app__compiler_entrypoint__inventory_events",
+                false,
+                &import_map,
+                &std::collections::HashSet::new(),
+                use_map,
+                &suffix_index,
+            );
+            mir.functions
+                .last()
+                .unwrap()
+                .blocks[0]
+                .instructions
+                .iter()
+                .map(|inst| match inst {
+                    MirInst::MethodCallStatic { func_name, .. } => func_name.clone(),
+                    MirInst::Call { target, .. } => target.name().to_string(),
+                    other => panic!("unexpected instruction {other:?}"),
+                })
+                .collect()
+        }
+
+        // Not imported: every method spelling stays as emitted.
+        let methods = [
+            "byte_len",
+            "str.byte_len",
+            "text.byte_len",
+            "String.byte_len",
+            "str_dot_byte_len",
+            "char_count",
+            "str.char_count",
+            "text.char_count",
+        ];
+        let emitted = mangled_names(methods.iter().map(|name| method(name)).collect(), &HashMap::new(), &[]);
+        assert_eq!(emitted, methods.iter().map(|name| name.to_string()).collect::<Vec<_>>());
+
+        // A free CALL is not method syntax and keeps binding closure-wide.
+        let free_call = MirInst::Call {
+            dest: None,
+            target: CallTarget::Pure("byte_len".to_string()),
+            args: vec![crate::mir::VReg(0)],
+        };
+        assert_eq!(mangled_names(vec![free_call], &HashMap::new(), &[]), [USER_BYTE_LEN]);
+
+        // In scope through an authored `use`: an erased-receiver method call
+        // binds to it, a text-typed receiver still gets the builtin.
+        let mut use_map = HashMap::new();
+        use_map.insert("byte_len".to_string(), USER_BYTE_LEN.to_string());
+        assert_eq!(
+            mangled_names(vec![method("byte_len"), method("str.byte_len")], &use_map, &[]),
+            [USER_BYTE_LEN, "str.byte_len"]
+        );
+
+        // A `byte_len` method of a type this module imports is in scope for an
+        // erased receiver; the free function elsewhere in the closure is not.
+        let mut type_use_map = HashMap::new();
+        type_use_map.insert("ByteBuf".to_string(), "lib__common__buf__ByteBuf".to_string());
+        type_use_map.insert("ByteBuf.byte_len".to_string(), TYPE_BYTE_LEN.to_string());
+        assert_eq!(
+            mangled_names(vec![method("byte_len"), method("str.byte_len")], &type_use_map, &[]),
+            [TYPE_BYTE_LEN, "str.byte_len"]
+        );
+
+        // In scope because the module defines it.
+        assert_eq!(
+            mangled_names(vec![method("byte_len"), method("text.byte_len")], &HashMap::new(), &["byte_len"]),
+            ["app__compiler_entrypoint__inventory_events__byte_len", "text.byte_len"]
+        );
     }
 
     /// The same defect from SOURCE: the shape of `incremental.spl:1026` lowered

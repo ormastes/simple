@@ -2,7 +2,10 @@
 
 Status: source workaround landed (rename + reason-bearing refusal), verified on
 reduced native probes built by the pinned `c6e3ee3c112` seed. NOT yet confirmed
-by a full Stage 2 bootstrap. The seed mangler defect itself is OPEN.
+by a full Stage 2 bootstrap. The seed mangler defect is FIXED in source (see
+"Seed fix" below) and verified on a two-module native reproducer; the
+`lb_byte_len` workaround stays until a Stage 2 rebuild with the fixed seed
+confirms it.
 
 - **Severity:** P1 (every aarch64 Stage 2 candidate refused cold SCV admission)
 - **Area:** Rust seed native-project mangler; `src/os/kernel/loader/byte_utils.spl`
@@ -86,22 +89,131 @@ happens to be right for ASCII text, so the defect is silent there.
   carries the measured byte length (`row-shape:byte_len=0:H examples/...`), so
   this class is self-evident the next time it happens.
 
+## Seed fix (2026-11-28)
+
+Rebinding site isolated by instrumenting the mangler on a two-module
+reproducer (a free `fn byte_len(data: [u8]) -> i64: 99` in `util/bytes.spl`; a
+second module that does not import it calls `s.byte_len()` on a text):
+
+- `s.byte_len()` reaches the mangler as `MirInst::MethodCallStatic` named
+  `str.byte_len`, not as a bare name and not as a `Call`.
+- Nothing binds it until the "text UFCS" arm at the end of
+  `resolve_method_call_static`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`): for a
+  `str` / `text` / `string` qualifier it takes the LONE unowned candidate for
+  the leaf in the closure-wide suffix index. That index does not know what the
+  calling module imported and carries no parameter types, so one free
+  `byte_len` in the closure captures every text `.byte_len()`.
+- This is the LLVM lane. The Cranelift backend does not run `mangle.rs` and
+  gets every typed shape right; it has its own, narrower instance (see Open).
+
+Seeds built from `bf9f1968949` with `--features llvm`, host aarch64. The
+second probe adds an optional unwrap, a struct text field, a cross-module call
+result, a dict value, a field in a struct loop, an untyped parameter and a
+free `char_count` in the closure (wanted `3 7 6 4 5 9 3`):
+
+| seed | backend | first probe | second probe |
+|---|---|---|---|
+| unfixed | llvm | `99 99 198 99 99` | `99 99 99 99 198 99 55` |
+| unfixed | cranelift | `5 5 5 4 99` | `3 7 6 4 5 99 3` |
+| fixed | llvm | `5 5 5 4 99` | `3 7 6 4 5 9 3` |
+| fixed | cranelift | `5 5 5 4 99` | `3 7 6 4 5 99 3` |
+
+The JIT (`simple main.spl`) prints the Cranelift rows.
+
+Fix: `is_text_builtin_method_call` in `mangle.rs`, for method-syntax calls
+named `byte_len` / `char_count`:
+
+- under a `str` / `text` / `String` / `string` qualifier the call is never
+  rebound; it stays as emitted and the LLVM lowering sends it to
+  `rt_string_len` / `rt_string_char_count`;
+- bare (erased receiver) it is no longer bound by a closure-wide arm: the bare
+  project import-map entry in `mangle_mir`'s `MethodCallStatic` arm, and the
+  name-variant, lone-suffix-candidate and `resolve_unbound_by_suffix` arms of
+  `resolve_method_call_static`.
+
+Still bound, as before: a function the module defines or names in a `use`, a
+`byte_len` method of a type the module imports, and a free call
+`byte_len(data)` (a `Call`, which legitimately resolves closure-wide). Pinned
+by `closure_wide_free_fn_never_captures_text_builtin_method_calls` (red with
+the guard disabled, green with it).
+
+## Seed fix, Cranelift lane (2026-11-28)
+
+The Cranelift lane resolves methods in
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
+(`compile_method_call_static`), not in `mangle.rs`. Typed text receivers arrive
+as `str.byte_len` and take the builtin first. An UNTYPED receiver arrives as
+bare `byte_len`, and name resolution bound it to the one `<module>__byte_len`
+in the unit, imported or not: `fn f(x): x.byte_len()` printed 99 for a text.
+
+Fix: `is_bare_text_only_builtin_method` + `bare_method_is_in_scope`. A bare
+zero-argument `byte_len` / `char_count` lowers to `rt_string_len` /
+`rt_string_char_count` unless the calling module defines a function or method
+of that name or its use map carries one. Second probe, `--backend cranelift`
+(wanted `3 7 6 4 5 9 3`): `3 7 6 4 5 99 3` before, `3 7 6 4 5 9 3` after. The
+in-scope probe (imported free `byte_len`, `ByteBuf.byte_len`, an untyped
+parameter holding a `ByteBuf`) is unchanged at `99 1007 5 5 99`. Pinned by
+`bare_text_only_builtin_method_needs_an_in_scope_user_definition`.
+
+## Seed fix, script lane and use map (2026-11-28)
+
+`simple main.spl` flattens every imported module into one unit and compiles it
+with Cranelift: no use map, every function "defined here", so the Cranelift
+scope test above cannot separate modules. The flattener's owner tags and import
+markers can. `Lowerer::flatten_free_fn_out_of_scope`
+(`src/compiler_rust/compiler/src/hir/lower/lowerer.rs`) answers whether the
+unit's free `byte_len` / `char_count` is one the calling module neither defines
+nor imports (selectively, by glob, or through a re-export). When it is, and no
+type in the unit declares a method of that name, the erased-receiver arm of
+method lowering (`hir/lower/expr/mod.rs`) types the receiver as text, so the
+call lowers as the typed `str.byte_len` builtin.
+
+Use map: `collect_use_imports` (`pipeline/native_project/imports.rs`) also
+inserts every bare name with SEVERAL candidates in the project that the
+imported module owns, so with a second `byte_len` anywhere (a struct method is
+enough) `use util.bytes.{helper}` put the free `byte_len` in the importer's use
+map. That scan now skips `byte_len` / `char_count`; they enter a use map only
+when the `use` names them.
+
+Fixture `test/fixtures/seed_byte_len_scope/` (prints `typed loop untyped count
+entry free`, wanted `5 5 9 3 4 154`): `5 5 99 55 99 154` on the `f43f68c218e`
+seed, as wanted on the fixed seed. The second-candidate probe (free `byte_len`
+plus a struct method `byte_len`, importer names another symbol) goes from 99
+to 9 on both native lanes. Pinned by
+`test/01_unit/compiler/text_byte_len_out_of_scope_free_fn_spec.spl` (fails
+against the old seed, passes against the fixed one),
+`flattened_out_of_scope_free_byte_len_leaves_text_builtin_on_untyped_receiver`
+and `use_map_bare_scan_never_imports_text_only_builtin_names`.
+
+The fixture declares a free `byte_len` under `test/fixtures/`; none exists
+under `src/`, which is what the `lb_byte_len` workaround relies on.
+
 ## Open
 
-- Seed fix not attempted here; it needs a seed rebuild to verify. The rebinding
-  site is not isolated. Candidates, all in
-  `src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`:
-  `resolve_method_call_static` resolving through `resolve_name_variants` (a
-  free function leaking into the import map as a bare entry, the documented
-  `char_at` class), or the exact-lone-candidate arm of
-  `resolve_unbound_by_suffix`. `resolve_method_call_static` already returns
-  early for a list of string builtins (`starts_with`, `trim`, `char_at`, ...);
-  `byte_len` and `char_count` are not on it, which is the candidate fix. Free
-  calls `byte_len(data)` go through `resolve_call_target` and must keep binding
-  (`exact_user_byte_len_candidate_still_binds`). Retire the `@workaround` tag
-  once a seed fix lands and a Stage 2 rebuild confirms it.
+- The seed fix is not yet exercised by a Stage 2 bootstrap. Remove the
+  `lb_byte_len` `@workaround` only after a `--full-bootstrap
+  --stop-after-stage2` run on the fixed seed passes.
+- Script lane, ambiguous case: when the unit also holds a TYPE with a
+  `byte_len` method, an untyped `.byte_len()` in a module that sees neither
+  still binds to the out-of-scope free function (99). The receiver could be
+  that type, so the lowering cannot call it a text; sound dispatch there needs
+  a runtime type switch. An untyped parameter holding such a struct also
+  prints 99 (wanted 1007).
+- LLVM lane: an untyped parameter holding a struct whose own module defines
+  `byte_len` as a method binds to the unit's free `byte_len` (99, wanted 1007;
+  Cranelift is correct). Same before and after both seed fixes.
+- Residual, by construction: the mangler has no receiver types. A bare
+  (erased-receiver) `.byte_len()` in a module that defines or imports a free
+  `byte_len` still binds to that function (measured: an untyped parameter
+  holding a `ByteBuf` in a module importing both prints the free function's
+  99, same on both seeds). Other text builtins with a codegen lowering
+  (`split`, `replace`, `substring`, `rfind`, `bytes`) keep the lone-candidate
+  text-UFCS arm and have the same exposure if the closure ever holds exactly
+  one free function of that name.
 - `byte_utils.spl` also declares a free `byte_at`. The `c6e3` candidate carries
-  no `byte_utils__byte_at` symbol, so it is not hijacked today; it is the same
-  exposure.
+  no `byte_utils__byte_at` symbol, so it is not hijacked today. A probe with a
+  lone free `byte_at(data: [u8], i)` in the closure left `"hello".byte_at(1)`
+  correct (101) on the unfixed LLVM seed, so the seed fix does not touch it.
 - A full `--full-bootstrap --stop-after-stage2` run is still needed to prove the
   Stage 2 gate passes.

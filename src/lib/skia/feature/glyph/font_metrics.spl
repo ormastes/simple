@@ -55,6 +55,7 @@ class FontMetricsOs2:
     typo_ascent: i64
     typo_descent: i64
     typo_line_gap: i64
+    fs_selection: i64
 
 class FontMetricsPost:
     italic_angle: f64
@@ -98,6 +99,7 @@ fn parse_hhea(data: [u8]) -> Option<FontMetricsHhea>:
 
 # OS/2 table (relevant offsets):
 #   0   uint16  version
+#  62   uint16  fsSelection
 #  68   int16   sTypoAscender
 #  70   int16   sTypoDescender
 #  72   int16   sTypoLineGap
@@ -111,6 +113,7 @@ fn parse_os2(data: [u8]) -> Option<FontMetricsOs2>:
     if data.len() < 78:
         return None
     val version = _read_u16_be(data, 0)
+    val fs_selection = _read_u16_be(data, 62)
     val typo_ascent = _read_i16_be(data, 68)
     val typo_descent = _read_i16_be(data, 70)
     val typo_line_gap = _read_i16_be(data, 72)
@@ -137,7 +140,8 @@ fn parse_os2(data: [u8]) -> Option<FontMetricsOs2>:
         win_descent: win_descent,
         typo_ascent: typo_ascent,
         typo_descent: typo_descent,
-        typo_line_gap: typo_line_gap
+        typo_line_gap: typo_line_gap,
+        fs_selection: fs_selection
     ))
 
 # post table layout (header, version 1/2/3/4 share first 32 bytes):
@@ -168,3 +172,26 @@ fn parse_post(data: [u8]) -> Option<FontMetricsPost>:
         underline_thickness: underline_thickness,
         is_fixed_pitch: is_fixed_pitch
     ))
+
+# Unified line-box metric selection matching Skia/Chrome (`OS/2` typo metrics when
+# `fsSelection` bit 7 USE_TYPO_METRICS is set and valid, else `hhea`), in font units:
+# [ascent, descent_positive, line_gap_positive].
+fn font_metrics_line_box_units(hhea: FontMetricsHhea, os2: Option<FontMetricsOs2>) -> [i64]:
+    if val Some(os2_m) = os2:
+        if (os2_m.fs_selection & 128) != 0 and (os2_m.typo_ascent > 0 or os2_m.typo_descent < 0):
+            val desc = if os2_m.typo_descent < 0: 0 - os2_m.typo_descent else: 0
+            val gap = if os2_m.typo_line_gap > 0: os2_m.typo_line_gap else: 0
+            return [os2_m.typo_ascent, desc, gap]
+    val desc = if hhea.descent < 0: 0 - hhea.descent else: hhea.descent
+    val gap = if hhea.line_gap > 0: hhea.line_gap else: 0
+    [hhea.ascent, desc, gap]
+
+# Scale font-unit line metric (`units`) by fractional `size_milli` / `upem` with nearest-pixel rounding.
+fn font_metrics_scale_round_px(units: i64, size_milli: i64, upem: i64) -> i64:
+    if upem <= 0 or size_milli <= 0:
+        return 0
+    val num = units * size_milli
+    if num >= 0:
+        (num + upem * 500) / (upem * 1000)
+    else:
+        -((-num + upem * 500) / (upem * 1000))

@@ -1,0 +1,108 @@
+"""
+## Purpose and audience
+Purpose: verifies REQ-WEB-004 measurable fractional layout follow-ups:
+- `vertical-align: top|bottom` baseline alignment at `k=4`
+- `inline-block` `height:12.5px` baseline hanging at `k=1`
+- CSS 2.2 §9.5.2 negative clearance for `clear:both` + large `margin-top`
+- `<svg>` post-clamp `max-width` residual suppression at `k=1`
+- `<svg>` 1-device-px anti-aliased edge coverage overlays at `k=4`
+Audience: maintainers of the web layout and Draw IR paint engine.
+"""
+
+"""
+Traceability: REQ-WEB-004 - fractional vertical-align, inline-block, clearance, and SVG AA follow-ups.
+"""
+# @tag: unit, browser_engine, layout, float, svg, device_scale, chrome159
+use std.spec.*
+use std.io_runtime.{file_exists}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{
+    layout_device_scale_set
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val LIB_SANS_FONT: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+
+fn _find_commands_with_id(comp: DrawIrComposition, needle: text) -> [DrawIrCommand]:
+    var found: [DrawIrCommand] = []
+    for batch in comp.batches:
+        for cmd in batch.commands:
+            if cmd.component_id.contains(needle):
+                found.push(cmd)
+    found
+
+fn _cmd_prop(cmd: DrawIrCommand, key: text) -> text:
+    for prop in cmd.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+describe "REQ-WEB-004 fractional layout follow-ups (Chrome 159)":
+    it "AC-1: vertical-align:top box keeps device baseline shift on sibling text at k=4":
+        if not file_exists(LIB_SANS_FONT):
+            skip("no Liberation Sans on this host")
+            return
+        layout_device_scale_set(4)
+        val html_ref = "<!doctype html><html><body style=\"margin:0;font:16px/1.5 sans-serif\"><p id=\"p\" style=\"margin:0\">ab</p></body></html>"
+        val html_top = "<!doctype html><html><body style=\"margin:0;font:16px/1.5 sans-serif\"><p id=\"p\" style=\"margin:0\">ab <svg width=\"10\" height=\"41\" style=\"vertical-align:top\"></svg></p></body></html>"
+        val res_ref = simple_web_layout_render_html_draw_ir_result(html_ref, 300, 80)
+        val res_top = simple_web_layout_render_html_draw_ir_result(html_top, 300, 80)
+        layout_device_scale_set(1)
+        var dy_ref = ""
+        var dy_top = ""
+        for batch in res_ref.composition.batches:
+            for cmd in batch.commands:
+                if cmd.text_value == "ab":
+                    dy_ref = _cmd_prop(cmd, "device-y-offset")
+        for batch in res_top.composition.batches:
+            for cmd in batch.commands:
+                if cmd.text_value.starts_with("ab"):
+                    dy_top = _cmd_prop(cmd, "device-y-offset")
+        expect(dy_ref).to_equal("2")
+        expect(dy_top).to_equal(dy_ref)
+
+    it "AC-2: inline-block height:12.5px hangs from baseline as 12px at k=1":
+        val html = "<!doctype html><html><body style=\"margin:0;font:16px/1.5 sans-serif\"><span id=\"ib12\" style=\"display:inline-block;width:10px;height:12.5px;background:#000\"></span><span id=\"ib20\" style=\"display:inline-block;width:10px;height:20.5px;background:#111\"></span></body></html>"
+        val res = simple_web_layout_render_html_draw_ir_result(html, 200, 60)
+        val ib12 = _find_commands_with_id(res.composition, "ib12")
+        val ib20 = _find_commands_with_id(res.composition, "ib20")
+        expect(ib12.len()).to_be_greater_than(0)
+        expect(ib20.len()).to_be_greater_than(0)
+        expect(ib12[0].height).to_equal(12)
+        expect(ib20[0].height).to_equal(21)
+
+    it "AC-3: clear:both with margin-top > float bottom uses CSS 2.2 §9.5.2 negative clearance":
+        layout_device_scale_set(4)
+        val html = "<!doctype html><html><body style=\"margin:0\"><div style=\"height:300px\"></div><div id=\"wrap\" style=\"height:50px\"><div style=\"float:left;width:20px;height:30.75px;background:#aaa\"></div><div id=\"clr\" style=\"clear:both;margin-top:40.5px;height:5px;background:#112233\"></div></div></body></html>"
+        val res = simple_web_layout_render_html_draw_ir_result(html, 200, 400)
+        layout_device_scale_set(1)
+        val clr = _find_commands_with_id(res.composition, "clr")
+        expect(clr.len()).to_be_greater_than(0)
+        expect(clr[0].y).to_equal(330)
+        expect(_cmd_prop(clr[0], "device-y-offset")).to_equal("3")
+
+    it "AC-4: svg width:40.5px clamped by max-width:40px does not carry fractional width at k=1":
+        val html = "<!doctype html><html><body style=\"margin:0\"><svg id=\"clamped\" style=\"width:40.5px;max-width:40px;height:10px;background:#112233\"></svg></body></html>"
+        val res = simple_web_layout_render_html_draw_ir_result(html, 200, 40)
+        val cmds = _find_commands_with_id(res.composition, "clamped")
+        expect(cmds.len()).to_be_greater_than(0)
+        expect(cmds[0].width).to_equal(40)
+
+    it "AC-5: fractional svg emits 1-device-px AA coverage edge rects and blends boundary pixels at k=4":
+        layout_device_scale_set(4)
+        val html = "<!doctype html><html><body style=\"margin:0;background:#fff\"><svg width=\"50\" viewBox=\"0 0 3 1\"><rect x=\"0\" y=\"0\" width=\"3\" height=\"1\" fill=\"#000000\"/></svg></body></html>"
+        val res = simple_web_layout_render_html_draw_ir_result(html, 100, 40)
+        layout_device_scale_set(1)
+        val aa_cmds = _find_commands_with_id(res.composition, "_aa_")
+        expect(aa_cmds.len()).to_be_greater_than(0)
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, 100, 40, 4, "cpu_simd")
+        # Row 66 (0-indexed) has ~0.625 coverage on #000 over #fff -> grey channel strictly between 50 and 150
+        val edge_px = px[66 * 400 + 20]
+        val edge_r = ((edge_px >> 16) & 0xFFu32) as i32
+        expect(edge_r).to_be_greater_than(40)
+        expect(edge_r).to_be_less_than(160)

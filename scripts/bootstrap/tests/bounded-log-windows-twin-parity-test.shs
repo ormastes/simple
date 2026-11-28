@@ -1,0 +1,98 @@
+#!/bin/sh
+# Parity: run-process-group-bounded-log-windows.py vs its Simple twin (.spl).
+# Compares exit code, helper stdout/stderr, published log bytes and receipt
+# bytes (helper_sha256 differs by construction and is normalised) per case.
+# Needs native Windows (Git Bash), a native python, and a Simple binary:
+#   SIMPLE_BIN=<simple.exe> sh scripts/bootstrap/tests/bounded-log-windows-twin-parity-test.shs
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+repo_w=$(cygpath -m "$repo")
+simple=${SIMPLE_BIN:?SIMPLE_BIN must name the Simple binary under test}
+py=$(cygpath -m "$(command -v python || command -v python3)")
+py_helper=$repo_w/scripts/bootstrap/run-process-group-bounded-log-windows.py
+spl_helper=$repo_w/scripts/bootstrap/run-process-group-bounded-log-windows.spl
+py_sha=$(sha256sum <"$py_helper" | cut -c1-64)
+spl_sha=$(sha256sum <"$spl_helper" | cut -c1-64)
+t=$(mktemp -d)
+tw=$(cygpath -m "$t")
+pin_dir=$repo/build/stage3/twin-parity-$$
+mkdir -p "$pin_dir"
+trap 'rm -rf "$t" "$pin_dir"' EXIT
+printf 'schema=simple-bootstrap-stage3-provenance-v5\nstatus=pass\nartifact_kind=pure-simple-bootstrap-compiler\nstage3_sha256=%s\n' \
+    "$(sha256sum <"$simple" | cut -c1-64)" >"$pin_dir/provenance.env"
+export SIMPLE_VERIFIED_STAGE_PIN; SIMPLE_VERIFIED_STAGE_PIN=$(cygpath -m "$pin_dir/provenance.env")
+cat >"$t/child.py" <<'EOF'
+import os, sys, time
+mode = sys.argv[1]
+if mode == "exit7":
+    print("hello out", flush=True); print("hello err", file=sys.stderr, flush=True); print("tail", flush=True); sys.exit(7)
+if mode == "env":
+    print(os.environ.get("PARITY_A", "-") + "|" + os.environ.get("parity_b", "-"), flush=True); sys.exit(0)
+if mode == "flood":
+    while True: sys.stdout.write("x" * 4096); sys.stdout.flush()
+if mode == "sleep":
+    print("before", flush=True); time.sleep(60)
+if mode == "native":
+    os._exit(int(sys.argv[2]))
+EOF
+child=$tw/child.py
+pass=0 failn=0
+# run <name> <helper-kind py|spl> <extra-args...>
+run_one() {
+    kind=$1; name=$2; shift 2
+    out=$t/$kind-$name; mkdir -p "$out"
+    if [ "$kind" = py ]; then
+        set -- "$py" "$py_helper" --helper-sha256="${HSHA:-$py_sha}" "$@"
+    else
+        set -- "$simple" run "$spl_helper" --helper-sha256="${HSHA:-$spl_sha}" "$@"
+    fi
+    OUTP=$(cygpath -m "$out")
+    "$@" >"$out.stdout" 2>"$out.stderr.raw"
+    echo $? >"$out.code"
+        # Only the helper's own diagnostics; seed compile/lint noise is not output.
+    grep '^bounded-log-error:\|^FAIL:' "$out.stderr.raw" >"$out.stderr" || true
+}
+compare() {
+    name=$1
+    ok=1
+    for f in code stdout stderr; do cmp -s "$t/py-$name.$f" "$t/spl-$name.$f" || { ok=0; echo "  $f differs: py=$(head -c 300 "$t/py-$name.$f") spl=$(head -c 300 "$t/spl-$name.$f")"; }; done
+    if [ -f "$t/py-$name/log" ] || [ -f "$t/spl-$name/log" ]; then
+        cmp -s "$t/py-$name/log" "$t/spl-$name/log" || { ok=0; echo "  log bytes differ"; }
+    fi
+    if [ -f "$t/py-$name/receipt" ] || [ -f "$t/spl-$name/receipt" ]; then
+        sed 's/^helper_sha256=.*/helper_sha256=H/' "$t/py-$name/receipt" >"$t/py-$name.r" 2>/dev/null
+        sed 's/^helper_sha256=.*/helper_sha256=H/' "$t/spl-$name/receipt" >"$t/spl-$name.r" 2>/dev/null
+        cmp -s "$t/py-$name.r" "$t/spl-$name.r" || { ok=0; echo "  receipt differs:"; diff "$t/py-$name.r" "$t/spl-$name.r" | head -10; }
+    fi
+    if [ $ok = 1 ]; then pass=$((pass + 1)); echo "PASS $name"; else failn=$((failn + 1)); echo "FAIL $name"; fi
+}
+case_both() {
+    name=$1; shift
+    for kind in py spl; do
+        mkdir -p "$t/$kind-$name"
+        run_one "$kind" "$name" --output-parent="$(cygpath -m "$t/$kind-$name")" "$@"
+    done
+    compare "$name"
+}
+std="--log-leaf=log --receipt-leaf=receipt --term-grace-seconds=0"
+# shellcheck disable=SC2086
+case_both exit7 $std --max-bytes=4096 --timeout-seconds=30 -- "$py" "$child" exit7
+case_both clean_env $std --max-bytes=4096 --timeout-seconds=30 --command-environment=clean-prefix -- env -i SystemRoot='C:\Windows' parity_b=2 PARITY_A=1 "$py" "$child" env
+case_both overflow $std --max-bytes=1000 --timeout-seconds=30 -- "$py" "$child" flood
+case_both timeout $std --max-bytes=4096 --timeout-seconds=2 -- "$py" "$child" sleep
+case_both native_av $std --max-bytes=4096 --timeout-seconds=30 -- "$py" "$child" native 3221225477
+case_both native_256 $std --max-bytes=4096 --timeout-seconds=30 -- "$py" "$child" native 256
+case_both bad_leaf --log-leaf=a/b --receipt-leaf=receipt --term-grace-seconds=0 --max-bytes=1 --timeout-seconds=1 -- "$py" "$child" exit7
+case_both leaf_collide --log-leaf=Log --receipt-leaf=log --term-grace-seconds=0 --max-bytes=1 --timeout-seconds=1 -- "$py" "$child" exit7
+case_both bad_limits $std --max-bytes=0 --timeout-seconds=1 -- "$py" "$child" exit7
+case_both no_env_prefix $std --max-bytes=1 --timeout-seconds=1 --command-environment=clean-prefix -- "$py" "$child" exit7
+HSHA=0000000000000000000000000000000000000000000000000000000000000000 case_both helper_mismatch $std --max-bytes=1 --timeout-seconds=1 -- "$py" "$child" exit7
+for kind in py spl; do mkdir -p "$t/$kind-collision"; : >"$t/$kind-collision/log"; done
+case_both collision $std --max-bytes=1 --timeout-seconds=1 -- "$py" "$child" exit7
+# Twin-only: the trust anchor fails closed with no pin.
+mkdir -p "$t/nopin"
+SIMPLE_VERIFIED_STAGE_PIN= "$simple" run "$spl_helper" --helper-sha256="$spl_sha" --output-parent="$tw/nopin" $std --max-bytes=1 --timeout-seconds=1 -- "$py" "$child" exit7 >/dev/null 2>&1
+nopin=$?
+if [ "$nopin" = 2 ] && [ -z "$(ls -A "$t/nopin")" ]; then pass=$((pass + 1)); echo "PASS no_pin_fails_closed"; else failn=$((failn + 1)); echo "FAIL no_pin_fails_closed (exit $nopin)"; fi
+echo "bounded-log twin parity: $pass passed, $failn failed"
+[ "$failn" = 0 ]

@@ -84,7 +84,7 @@ spl_i64 rt_string_to_int_lenient(spl_i64 value) {
     return sign < 0 ? -(spl_i64)result : (spl_i64)result;
 }
 
-spl_u64 rt_mem_read_u8(spl_u64 address) {
+spl_u8 rt_mem_read_u8(spl_u64 address) {
     return *(volatile const spl_u8 *)address;
 }
 

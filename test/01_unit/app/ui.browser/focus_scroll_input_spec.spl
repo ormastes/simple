@@ -1,0 +1,174 @@
+"""
+## Purpose and audience
+Verifies pure-Simple browser shell interaction parity:
+1. `translate_browser_key_event`: macOS/winit uppercase keycodes, DOM punctuation codes, Backspace/Delete/Enter/Tab/Escape/PageUp/PageDown/Arrows, and suppression of `i`/`j`/`k`/`:` mode hotkeys while a text input has focus.
+2. `BrowserBackend`: real CSS HTML layout hit-test cache (`layout_cache`, `content_height`), `scroll_by` / `set_scroll_y` clamping & cache invalidation, and `browser_scroll_plane` HTML wrapping.
+3. `BrowserApp`: default `960x640` viewport with `UIEvent.Resize` tokens, clicking text fields to focus (`ui_focus == "true"` + `Insert` mode), typing `'i'`, `'j'`, `'k'`, `':'`, and Backspace, button `ui_action_pending` / `Action` dispatch, checkbox toggle, and wheel `scroll_by`.
+
+Audience: `app.ui.browser` maintainers.
+"""
+# @cover src/app/ui.browser/event_bridge.spl 80%
+# @cover src/app/ui.browser/backend.spl 50%
+# @cover src/app/ui.browser/app.spl 50%
+# @tag: unit, app, ui, browser
+
+use std.spec.{describe, it, expect, step, fail_test}
+use app.ui.browser.event_bridge.{translate_browser_key_event}
+use app.ui.browser.backend.{BrowserBackend, LayoutEntry}
+use app.ui.browser.app.{BrowserApp}
+use common.ui.widget.{UIEvent, UIMode}
+use common.ui.builder.{panel, text_widget, button, checkbox, text_field, textarea, build_tree_with_title}
+use common.ui.state.{init_state}
+
+fn _find_entry(entries: [LayoutEntry], target_id: text) -> LayoutEntry?:
+    for entry in entries:
+        if entry.id == target_id:
+            return Some(entry)
+    None
+
+fn _make_rich_tree():
+    var children = [
+        text_field("tf_main", "", "Type here"),
+        textarea("ta_notes", "", "Notes", 3),
+        checkbox("chk_agree", "Agree", false),
+        button("btn_go", "Go", "submit_search")
+    ]
+    var i = 0
+    while i < 20:
+        children.push(text_widget("row_{i}", "Scrollable item row {i} with padding content"))
+        i = i + 1
+    val root = panel("root_panel", "Browser Controls", children)
+    build_tree_with_title(root, "Browser Controls", "glass_dark")
+
+describe "Browser key event translation":
+    it "maps hotkeys when unfocused and preserves typed i/j/k/: when text input focused":
+        step("Unfocused i and : map to InsertMode and CommandMode")
+        val ev_i_unfocused = translate_browser_key_event(73, 73, 0, false)
+        if val Some(ev) = ev_i_unfocused:
+            match ev:
+                UIEvent.InsertMode => expect(true).to_equal(true)
+                _ => fail_test("expected InsertMode when unfocused 'i'")
+        else:
+            fail_test("expected InsertMode")
+
+        val ev_colon_unfocused = translate_browser_key_event(186, 186, 1, false)
+        if val Some(ev) = ev_colon_unfocused:
+            match ev:
+                UIEvent.CommandMode => expect(true).to_equal(true)
+                _ => fail_test("expected CommandMode when unfocused Shift+;")
+        else:
+            fail_test("expected CommandMode")
+
+        step("Focused text input receives i, j, k, :, uppercase A, and backspace as KeyPress")
+        val cases = [
+            (73, 73, 0, "i"),
+            (74, 74, 0, "j"),
+            (75, 75, 0, "k"),
+            (186, 186, 1, ":"),
+            (65, 65, 1, "A"),
+            (8, 8, 0, "backspace"),
+            (0, 51, 0, "backspace"),
+            (0, 117, 0, "delete")
+        ]
+        for row in cases:
+            val kc = row.0
+            val sc = row.1
+            val mods = row.2
+            val want = row.3
+            val got = translate_browser_key_event(kc, sc, mods, true)
+            if val Some(ev) = got:
+                match ev:
+                    UIEvent.KeyPress(key) => expect(key).to_equal(want)
+                    _ => fail_test("expected KeyPress({want}) when text input focused")
+            else:
+                fail_test("expected KeyPress({want}) instead of nil")
+
+describe "BrowserBackend CSS layout hit-test cache and viewport scroll_y":
+    it "populates real CSS hit boxes, clamps scroll_y, and invalidates frame caches":
+        step("Render rich widget tree into a compact 320x120 viewport")
+        val tree = _make_rich_tree()
+        val state = init_state(tree)
+        val backend = BrowserBackend.create(320, 120, "software").unwrap()
+        backend.render_frame(state.tree, state)
+
+        expect(backend.content_height).to_be_greater_than(120)
+        val tf_box = _find_entry(backend.layout_cache, "tf_main")
+        expect(tf_box.is_some()).to_equal(true)
+        if val Some(box) = tf_box:
+            val cx = (box.x + box.width / 2.0).to_i32()
+            val cy = (box.y + box.height / 2.0).to_i32()
+            expect(backend.find_widget_at(cx, cy)).to_equal("tf_main")
+
+        step("Scroll down, verify cache invalidation, and clamp at document bounds")
+        expect(backend.static_frame_state_valid).to_equal(true)
+        expect(backend.scroll_by(40)).to_equal(true)
+        expect(backend.scroll_y).to_equal(40)
+        expect(backend.static_frame_state_valid).to_equal(false)
+        expect(backend.present_pixels_cache_valid).to_equal(false)
+        expect(backend.static_shell_cache_key).to_equal("")
+
+        backend.render_frame(state.tree, state)
+        expect(backend.last_artifact_html).to_contain("browser_scroll_plane")
+        expect(backend.last_artifact_html).to_contain("margin-top: -40px;")
+
+        expect(backend.set_scroll_y(-25)).to_equal(true)
+        expect(backend.scroll_y).to_equal(0)
+        expect(backend.set_scroll_y(999999)).to_equal(true)
+        expect(backend.scroll_y).to_equal(backend.content_height - 120)
+
+describe "BrowserApp click focus, text typing, actions, and wheel scroll":
+    it "initializes 960x640 viewport and handles click-to-focus, typing, button, checkbox, and wheel":
+        step("Create BrowserApp from fixture and verify 960x640 viewport + Resize tokens")
+        val app = BrowserApp.new("test/03_system/gui/ui_browser/fixtures/hello.ui.sdn", 0, "software").unwrap()
+        expect(app.backend.viewport_width()).to_equal(960)
+        expect(app.backend.viewport_height()).to_equal(640)
+        expect(app.session.current_tree().resolve_token("viewport_w")).to_equal("960")
+        expect(app.session.current_tree().resolve_token("viewport_h")).to_equal("640")
+
+        step("Load rich tree, render CSS hit boxes, click textfield, and type i/j/k/: + backspace")
+        app.session.update_tree(_make_rich_tree())
+        app.render_session_frame()
+        val tf_box = _find_entry(app.backend.layout_cache, "tf_main").unwrap()
+        val tf_x = (tf_box.x + tf_box.width / 2.0).to_i32()
+        val tf_y = (tf_box.y + tf_box.height / 2.0).to_i32()
+
+        expect(app.handle_host_mouse_click(tf_x, tf_y)).to_equal(true)
+        expect(app.session.focused_widget()).to_equal("tf_main")
+        expect(app.session.current_state().mode == UIMode.Insert).to_equal(true)
+        val tf_node = app.session.current_tree().find_widget("tf_main").unwrap()
+        expect(tf_node.get_prop("ui_focus")).to_equal("true")
+
+        app.handle_host_key(73, 73, 0)     # 'i'
+        app.handle_host_key(74, 74, 0)     # 'j'
+        app.handle_host_key(75, 75, 0)     # 'k'
+        app.handle_host_key(186, 186, 1)   # ':'
+        app.handle_host_key(65, 65, 1)     # 'A'
+        app.handle_host_key(8, 8, 0)       # backspace removes 'A'
+        expect(tf_node.get_prop("value")).to_equal("ijk:")
+
+        step("Click button and verify ui_action_pending + ui_focus cleared")
+        val btn_box = _find_entry(app.backend.layout_cache, "btn_go").unwrap()
+        val bx = (btn_box.x + btn_box.width / 2.0).to_i32()
+        val by = (btn_box.y + btn_box.height / 2.0).to_i32()
+        expect(app.handle_host_mouse_click(bx, by)).to_equal(true)
+        expect(tf_node.get_prop("ui_focus")).to_equal("false")
+        expect(app.session.take_pending_action()).to_equal("submit_search")
+
+        step("Click checkbox twice and verify checked toggle")
+        val chk_box = _find_entry(app.backend.layout_cache, "chk_agree").unwrap()
+        val cx = (chk_box.x + chk_box.width / 2.0).to_i32()
+        val cy = (chk_box.y + chk_box.height / 2.0).to_i32()
+        expect(app.handle_host_mouse_click(cx, cy)).to_equal(true)
+        val chk_node = app.session.current_tree().find_widget("chk_agree").unwrap()
+        expect(chk_node.get_prop("checked")).to_equal("true")
+        expect(app.handle_host_mouse_click(cx, cy)).to_equal(true)
+        expect(chk_node.get_prop("checked")).to_equal("false")
+
+        step("Dispatch ui_action_* entry and wheel scroll")
+        app.backend.layout_cache = app.backend.layout_cache.push(LayoutEntry(id: "ui_action_nav_home", x: 1.0, y: 1.0, width: 10.0, height: 10.0))
+        expect(app.handle_host_mouse_click(5, 5)).to_equal(true)
+        app.backend.content_height = 1200
+        expect(app.handle_host_wheel(-2.0)).to_equal(true)
+        expect(app.backend.scroll_y).to_equal(48)
+        expect(app.handle_host_wheel(2.0)).to_equal(true)
+        expect(app.backend.scroll_y).to_equal(0)

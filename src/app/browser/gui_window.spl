@@ -13,8 +13,20 @@
 # itself, as SIMPLE_GUI=1 does). Headless environments without a display: run under Xvfb (or a
 # container providing one), same as app.ui.browser.
 
-use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE, GUI_EVT_RESIZED}
+use nogc_sync_mut.ui.gui_renderer.{
+    GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE, GUI_EVT_RESIZED,
+    GUI_EVT_KEYBOARD, GUI_EVT_MOUSE_BUTTON, GUI_EVT_MOUSE_MOVED, GUI_EVT_MOUSE_WHEEL
+}
 use nogc_sync_mut.src.time.{sleep_ms}
+
+pub enum BrowserWindowAction:
+    None
+    Close
+    Resize(width: i32, height: i32)
+    Click(x: i32, y: i32)
+    Move(x: i32, y: i32)
+    Wheel(dy: i32)
+    Key(keycode: i64, scancode: i64)
 
 pub fn browser_window_open(url: text, width: i32, height: i32) -> GuiRenderer?:
     """Open the browser window. `width`/`height` are PHYSICAL pixels, so a
@@ -41,40 +53,77 @@ pub fn browser_window_present(g: GuiRenderer, width: i32, height: i32, pixels: [
     print "Error: failed to present the rendered frame to the window"
     false
 
-pub fn browser_window_wait(g: GuiRenderer, width: i32, height: i32) -> [i32]:
-    """Block until the window closes ([0, 0]) or its drawable size settles
-    at a new extent ([w, h], physical pixels). Rendering stays in the caller
+# reason: window pixel dimensions matching GuiRenderer physical extent API
+# @allow(primitive_api)
+pub fn browser_window_wait_action(g: GuiRenderer, width: i32, height: i32) -> BrowserWindowAction:
+    """Block until the window closes, settles at a new drawable size, or
+    receives pointer/wheel/keyboard input. Rendering stays in the caller
     (main.spl): running the engine from inside this module's call chain
     used to trip a whole-module tree-walk fallback (measured 2026-08-06).
-    Resize bursts are coalesced: the size is only reported once no further
-    resize event arrives for ~150ms, so a drag re-renders once, not per
-    intermediate frame."""
+    Resize bursts are coalesced (~150ms quiet window)."""
     var pending_w: i32 = 0
     var pending_h: i32 = 0
     var quiet_ms: i64 = 0
     while true:
         val ev = g.poll_event()
         if ev.kind == GUI_EVT_CLOSE:
-            return [0, 0]
-        if ev.kind == GUI_EVT_RESIZED:
+            return BrowserWindowAction.Close
+        elif ev.kind == GUI_EVT_RESIZED:
             val nw = ev.x.to_i64().to_i32()
             val nh = ev.y.to_i64().to_i32()
             if nw > 0 and nh > 0:
                 pending_w = nw
                 pending_h = nh
                 quiet_ms = 0
+        elif ev.kind == GUI_EVT_MOUSE_BUTTON:
+            if ev.btn == 0 and ev.pressed:
+                return BrowserWindowAction.Click(
+                    x: ev.x.to_i64().to_i32(),
+                    y: ev.y.to_i64().to_i32()
+                )
+        elif ev.kind == GUI_EVT_MOUSE_MOVED:
+            return BrowserWindowAction.Move(
+                x: ev.x.to_i64().to_i32(),
+                y: ev.y.to_i64().to_i32()
+            )
+        elif ev.kind == GUI_EVT_MOUSE_WHEEL:
+            var dy = 0 - (ev.y * 40.0).to_i64().to_i32()
+            if ev.y > 0.0 and dy == 0:
+                dy = -40
+            elif ev.y < 0.0 and dy == 0:
+                dy = 40
+            if dy != 0:
+                return BrowserWindowAction.Wheel(dy: dy)
+        elif ev.kind == GUI_EVT_KEYBOARD:
+            if ev.pressed:
+                return BrowserWindowAction.Key(
+                    keycode: ev.keycode,
+                    scancode: ev.scancode
+                )
         elif ev.kind == GUI_EVT_NONE:
-            # ponytail: fixed poll interval, not an OS-level blocking wait —
-            # fine for a static page; switch to a blocking wait if the window
-            # needs timer-driven redraws.
             sleep_ms(16)
             if pending_w > 0:
                 quiet_ms = quiet_ms + 16
                 if quiet_ms >= 150:
                     if pending_w != width or pending_h != height:
-                        return [pending_w, pending_h]
+                        return BrowserWindowAction.Resize(width: pending_w, height: pending_h)
                     pending_w = 0
                     pending_h = 0
+    BrowserWindowAction.Close
+
+pub fn browser_window_wait(g: GuiRenderer, width: i32, height: i32) -> [i32]:
+    """Block until the window closes ([0, 0]) or its drawable size settles
+    at a new extent ([w, h], physical pixels). Legacy resize-only wrapper over
+    `browser_window_wait_action`."""
+    while true:
+        val action = browser_window_wait_action(g, width, height)
+        match action:
+            case BrowserWindowAction.Close:
+                return [0, 0]
+            case BrowserWindowAction.Resize(nw, nh):
+                return [nw, nh]
+            case _:
+                ()
     [0, 0]
 
 pub fn run_browser_window_gui_frames(

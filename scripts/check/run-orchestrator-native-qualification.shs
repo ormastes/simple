@@ -46,6 +46,15 @@
 #   ORCH_QUAL_MEM_MAX (60% of MemAvailable, min 30G; 0 = no cgroup cap;
 #                      needs `systemd-run --user`)
 #   ORCH_QUAL_CACHE_SCOPE (orch-native-qual)
+#   ORCH_QUAL_PEER_SCOPE / ORCH_QUAL_PEER_SETSID (1; 0 disables one peer-build
+#                      containment, used by --selftest to prove each alone)
+# The peer build runs from a private checkout, <out-dir>/peer-src (HEAD plus
+# the tracked and untracked changes under src/), so its build/scv scratch never
+# lands in the shared clone. It runs in its own session and, when
+# `systemd-run --user` works, its own scope; on timeout, first compile error,
+# or exit, every member of both is SIGKILLed and waited for, because
+# native_build_worker leaves the build's process group (setpgid) and survives
+# timeout(1)'s group signal, re-parented to PID 1.
 
 set -u
 
@@ -98,7 +107,7 @@ while [ $# -gt 0 ]; do
         --only) [ $# -ge 2 ] || die "--only needs a value"; ONLY="$2"; shift ;;
         --no-ssh) DO_SSH=0 ;;
         --no-guest) DO_GUEST=0 ;;
-        -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,57p' "$0"; exit 0 ;;
         -*) die "unknown option: $1" ;;
         *) [ -z "$BIN" ] || die "exactly one binary expected"; BIN="$1" ;;
     esac
@@ -107,6 +116,7 @@ done
 
 [ -n "$LIST" ] || LIST="$SCRIPT_DIR/orchestrator_native_qualification_specs.txt"
 [ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/build/orch-native-qual"
+case "$OUT_DIR" in /*) ;; *) OUT_DIR="$(pwd)/$OUT_DIR" ;; esac
 
 # ---------------------------------------------------------------------------
 # Verdict parsing
@@ -183,9 +193,22 @@ selftest() {
     for st_n in pass fail blocked crash silent vacuous notrun timeout ssh; do
         : > "$ST/root/t/${st_n}_spec.spl"
     done
+    git -C "$ST/root" init -q && git -C "$ST/root" add -A &&
+        git -C "$ST/root" -c user.name=selftest -c user.email=selftest@invalid \
+            commit -q -m fixture || selftest_fail "git fixture root"
     cat > "$ST/fake" <<'FAKE'
 #!/bin/sh
 if [ "$1" = "native-build" ]; then
+    # Where a real native-build drops its SCV scratch: <cwd>/build/scv.
+    mkdir -p build/scv && : > build/scv/fake-marker
+    if [ "${FAKE_BUILD_FAIL:-0}" = "hang" ]; then
+        # A worker that leaves the build's process group (like the real
+        # native_build_worker's setpgid, here via timeout(1)), ignores TERM,
+        # and outlives its parent, re-parented to PID 1.
+        timeout 300 sh -c 'trap "" TERM; echo $$ > "$FAKE_PIDFILE.inner"; while :; do sleep 1; done' &
+        echo $! > "$FAKE_PIDFILE"
+        exec sleep 300
+    fi
     [ "${FAKE_BUILD_FAIL:-0}" = "1" ] && { echo "error: fake codegen failure"; exit 1; }
     [ "${FAKE_BUILD_FAIL:-0}" = "oom" ] && { echo "Terminated"; exit 143; }
     while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
@@ -274,10 +297,39 @@ FAKE
         st_rc=$?
         [ "$st_rc" -eq 0 ] || selftest_fail "peer build killed: exit $st_rc, wanted 0"
         selftest_expect "$ST/out/last-run.txt" '^BLOCKED t/ssh_spec.spl .*peer-build-resource-limit' "case6 blocked"
+        # The peer builds from a private checkout under --out-dir, so its
+        # build/scv scratch never lands in the shared clone.
+        [ -f "$ST/out/peer-src/build/scv/fake-marker" ] || selftest_fail "case6: peer scratch not under out-dir"
+        [ ! -e "$ST/root/build" ] || selftest_fail "case6: peer wrote build/ into the shared root"
+
+        # 7. a peer build that hits its timeout leaves NO descendant alive,
+        #    even one that left the process group and ignores TERM. Each
+        #    containment (session, systemd scope) is proven on its own.
+        st_modes="ORCH_QUAL_PEER_SCOPE=0"
+        if systemd-run --user --scope -q true >/dev/null 2>&1; then
+            st_modes="$st_modes ORCH_QUAL_PEER_SETSID=0"
+        fi
+        for st_m in $st_modes; do
+            rm -f "$ST/hang.pid" "$ST/hang.pid.inner"
+            env "$st_m" FAKE_BUILD_FAIL=hang FAKE_PIDFILE="$ST/hang.pid" ORCH_QUAL_PEER_BUILD_TIMEOUT=3 \
+                ORCH_QUAL_IN_SELFTEST=1 ORCH_QUAL_MEM_MAX=0 sh "$0" --root "$ST/root" \
+                --out-dir "$ST/out" --no-guest --list "$ST/l6" "$ST/fake" > "$ST/out.txt" 2>&1
+            st_rc=$?
+            [ "$st_rc" -eq 0 ] || selftest_fail "case7 $st_m: exit $st_rc, wanted 0"
+            selftest_expect "$ST/out/last-run.txt" '^BLOCKED t/ssh_spec.spl .*peer-build-resource-limit rc=124' "case7 $st_m"
+            for st_pf in "$ST/hang.pid" "$ST/hang.pid.inner"; do
+                st_pid=$(cat "$st_pf" 2>/dev/null)
+                is_uint "$st_pid" || selftest_fail "case7 $st_m: no pid in $st_pf (fixture did not start)"
+                if kill -0 "$st_pid" 2>/dev/null; then
+                    kill -KILL "$st_pid" 2>/dev/null
+                    selftest_fail "case7 $st_m: peer-build descendant $st_pid survived the timeout"
+                fi
+            done
+        done
     fi
 
     rm -rf "$ST"
-    echo "selftest: OK (classification, non-vacuity, missing path, guest pass-through, peer build failure)"
+    echo "selftest: OK (classification, non-vacuity, missing path, guest pass-through, peer build failure, peer tree kill, peer scratch location)"
 }
 
 # ---------------------------------------------------------------------------
@@ -370,6 +422,70 @@ ssh_teardown() {
     FIX=""
 }
 
+PEER_SURVIVORS=""
+peer_reap() {
+    # peer_reap <sid> <scope unit> <pid>: SIGKILL every member of the peer
+    # build's session and scope (and <pid>), and wait until none is left.
+    # Returns 1 with PEER_SURVIVORS set if something outlives ~30 s.
+    pr_sid="$1"; pr_unit="$2"; pr_pid="$3"
+    PEER_SURVIVORS=""
+    # Never the script's own session (a fallback setsid fork would leave the
+    # child in it), never 0/1.
+    pr_own=$(ps -o sid= -p $$ 2>/dev/null | tr -d ' ')
+    if ! is_uint "$pr_sid" || [ "$pr_sid" -le 1 ] || [ "$pr_sid" = "$pr_own" ]; then pr_sid=""; fi
+    [ -n "$pr_pid" ] && kill -KILL "$pr_pid" 2>/dev/null
+    pr_i=0
+    while :; do
+        pr_alive=""
+        if [ -n "$pr_sid" ] && pgrep -s "$pr_sid" >/dev/null 2>&1; then pr_alive="session=$pr_sid"; fi
+        if [ -n "$pr_unit" ] && systemctl --user is-active --quiet "$pr_unit.scope" 2>/dev/null; then
+            pr_alive="$pr_alive scope=$pr_unit.scope"
+        fi
+        [ -n "$pr_alive" ] || return 0
+        if [ "$pr_i" -ge 30 ]; then PEER_SURVIVORS="$pr_alive"; return 1; fi
+        [ -n "$pr_sid" ] && pkill -KILL -s "$pr_sid" 2>/dev/null
+        [ -n "$pr_unit" ] && systemctl --user kill --signal=KILL "$pr_unit.scope" >/dev/null 2>&1
+        sleep 1
+        pr_i=$((pr_i + 1))
+    done
+}
+
+PEER_SRC=""
+peer_source_root() {
+    # Sets PEER_SRC to a private checkout under $OUT_DIR at HEAD plus the
+    # working-tree changes under src/ (what SRC_ID's `-dirty` names), so the
+    # build's <cwd>/build/scv scratch stays out of the shared clone. Reused
+    # across runs (git reset), which keeps its SCV cache warm.
+    PEER_SRC="$OUT_DIR/peer-src"
+    ps_head=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) || {
+        PEER_ERR="peer-source-root-failed: $ROOT is not a git checkout"; return 1; }
+    if [ ! -e "$PEER_SRC/.git" ]; then
+        git -C "$ROOT" worktree prune 2>/dev/null
+        git -C "$ROOT" worktree add -q --detach "$PEER_SRC" "$ps_head" > /dev/null 2>&1 || {
+            PEER_ERR="peer-source-root-failed: git worktree add $PEER_SRC $ps_head"; return 1; }
+    fi
+    git -C "$PEER_SRC" reset -q --hard "$ps_head" > /dev/null 2>&1 &&
+        git -C "$PEER_SRC" clean -q -fd -- src > /dev/null 2>&1 || {
+        PEER_ERR="peer-source-root-failed: reset $PEER_SRC to $ps_head"; return 1; }
+    ps_diff="$OUT_DIR/peer-src.diff"
+    git -C "$ROOT" diff --binary HEAD -- src > "$ps_diff" 2>/dev/null || {
+        PEER_ERR="peer-source-root-failed: git diff HEAD -- src"; return 1; }
+    if [ -s "$ps_diff" ]; then
+        git -C "$PEER_SRC" apply --binary "$ps_diff" 2>/dev/null || {
+            PEER_ERR="peer-source-root-failed: dirty src/ diff does not apply to $PEER_SRC"; return 1; }
+    fi
+    rm -f "$ps_diff"
+    ps_new="$OUT_DIR/peer-src.untracked"
+    git -C "$ROOT" ls-files --others --exclude-standard -- src > "$ps_new" 2>/dev/null || {
+        PEER_ERR="peer-source-root-failed: git ls-files --others -- src"; return 1; }
+    while IFS= read -r ps_f; do
+        mkdir -p "$PEER_SRC/$(dirname "$ps_f")" && cp -p "$ROOT/$ps_f" "$PEER_SRC/$ps_f" || {
+            PEER_ERR="peer-source-root-failed: copy untracked $ps_f"; rm -f "$ps_new"; return 1; }
+    done < "$ps_new"
+    rm -f "$ps_new"
+    return 0
+}
+
 ensure_peer() {
     # Sets PEER to a compiled simple-orchestrator. Returns 1 with PEER_ERR set.
     PEER_ERR=""
@@ -388,18 +504,42 @@ ensure_peer() {
     fi
     rm -f "$ep_out" "$ep_id"
     ep_log="$OUT_DIR/logs/peer-build.log"
-    echo "peer: building $GATEWAY_ENTRY with $BIN (timeout ${PEER_BUILD_TIMEOUT}s) ..."
+    peer_source_root || return 1
+    echo "peer: building $GATEWAY_ENTRY with $BIN in $PEER_SRC (timeout ${PEER_BUILD_TIMEOUT}s) ..."
+    # Containment: own session (setsid) and, when available, own systemd
+    # scope. Both are independent of the memory cap.
+    ep_setsid=""
+    if [ "${ORCH_QUAL_PEER_SETSID:-1}" != "0" ] && command -v setsid >/dev/null 2>&1; then
+        ep_setsid="setsid"
+    fi
+    ep_unit=""
+    ep_wrap=""
+    if [ "${ORCH_QUAL_PEER_SCOPE:-1}" != "0" ] && command -v systemd-run >/dev/null 2>&1 &&
+            systemd-run --user --scope -q true >/dev/null 2>&1; then
+        ep_unit="orch-qual-peer-$$-$(date +%s)"
+        ep_wrap="systemd-run --user --scope -q --unit=$ep_unit"
+        [ "$MEM_MAX" = "0" ] || ep_wrap="$ep_wrap -p MemoryMax=$MEM_MAX"
+    fi
     # The build runs in the background so a compile error stops it at once: a
     # failed native-build has been seen to keep respawning workers for more
     # than 30 minutes after `phase 3 FAILED` instead of exiting.
     # shellcheck disable=SC2086
-    SIMPLE_BOOTSTRAP=1 SIMPLE_CACHE_SCOPE="$CACHE_SCOPE-peer" $WRAP timeout "$PEER_BUILD_TIMEOUT" \
-        "$BIN" native-build "$GATEWAY_ENTRY" $PEER_BUILD_ARGS -o "$ep_out" > "$ep_log" 2>&1 &
+    (
+        cd "$PEER_SRC" || exit 97
+        SIMPLE_BOOTSTRAP=1; SIMPLE_CACHE_SCOPE="$CACHE_SCOPE-peer"
+        export SIMPLE_BOOTSTRAP SIMPLE_CACHE_SCOPE
+        exec $ep_setsid $ep_wrap timeout "$PEER_BUILD_TIMEOUT" \
+            "$BIN" native-build "$GATEWAY_ENTRY" $PEER_BUILD_ARGS -o "$ep_out"
+    ) > "$ep_log" 2>&1 &
     ep_pid=$!
+    # A non-job-control shell's background child is not a group leader, so
+    # setsid(1) does not fork: the session id is the child's pid.
+    ep_sid=""
+    [ -n "$ep_setsid" ] && ep_sid="$ep_pid"
     ep_stopped=""
     while kill -0 "$ep_pid" 2>/dev/null; do
         if grep -q 'first-compile-error\|phase 3 FAILED' "$ep_log" 2>/dev/null; then
-            kill "$ep_pid" 2>/dev/null
+            peer_reap "$ep_sid" "$ep_unit" "$ep_pid"
             ep_stopped=" (stopped on first compile error)"
             break
         fi
@@ -407,6 +547,9 @@ ensure_peer() {
     done
     wait "$ep_pid"
     ep_rc=$?
+    if ! peer_reap "$ep_sid" "$ep_unit" ""; then
+        echo "warning: peer build left survivors: $PEER_SURVIVORS" | tee -a "$RESULTS"
+    fi
     if [ "$ep_rc" -ne 0 ] || [ -n "$ep_stopped" ] || [ ! -x "$ep_out" ]; then
         ep_first=$(tr '\r' '\n' < "$ep_log" | grep -m 1 'first-compile-error' | cut -c1-300)
         [ -n "$ep_first" ] || ep_first=$(tr '\r' '\n' < "$ep_log" | grep -m 1 '^error\|\[ERROR\]' | cut -c1-300)
@@ -560,12 +703,17 @@ EOF
         ssh_teardown; return
     fi
 
-    SIMPLE_CARET_SSH_ACCEPTANCE_CONFIG="$FIX/servers.sdn" \
-    SIMPLE_CARET_SSH_ACCEPTANCE_CONTEXT=qual \
-    SIMPLE_CARET_SSH_ACCEPTANCE_SERVER=qual \
-    SIMPLE_CARET_SSH_ACCEPTANCE_PROFILE="$FIX/profile.sdn" \
-    SIMPLE_CARET_SSH_ACCEPTANCE_REQUEST="$FIX/req_inspect.sdn" \
-        run_spec "$srt_spec"
+    # The spec reads its fixture names from a Host config SDN file (linux_host_config_v1), not from
+    # per-key environment. This lane is not the installed unit, so it names a caller-owned file.
+    cat > "$FIX/host.sdn" <<EOF
+caretSshConfig: "$FIX/servers.sdn"
+caretSshContext: "qual"
+caretSshServer: "qual"
+caretSshProfile: "$FIX/profile.sdn"
+caretSshRequest: "$FIX/req_inspect.sdn"
+EOF
+    chmod 644 "$FIX/host.sdn"
+    SIMPLE_HOST_CONFIG_TEST_PATH="$FIX/host.sdn" run_spec "$srt_spec"
     srt_class=$(classify "$RS_RC" "$RS_LOG")
     srt_line=$(verdict_line "$RS_LOG")
     [ -n "$srt_line" ] || srt_line="(no SPEC FILE VERDICT line)"

@@ -13,8 +13,8 @@ use std.spec.step
 
 use std.spec.*
 use common.ui.widget.{WidgetNode, UIState}
-use common.ui.builder.{column, button, build_tree}
-use common.ui.event.{focus_next, focus_prev, get_focusable_ordered}
+use common.ui.builder.{column, button, label, panel, checkbox, build_tree}
+use common.ui.event.{focus_next, focus_prev, get_focusable_ordered, handle_focus_event}
 
 
 fn tab_state() -> UIState:
@@ -82,3 +82,41 @@ describe "focus traversal honors tab_index":
         ])
         val order = get_focusable_ordered(build_tree(root))
         assert_true(index_of(order, "plain_a") < index_of(order, "plain_b"))
+
+    it "excludes non-interactive, hidden, and disabled widgets from focus traversal":
+        # @req REQ-SGUI-004
+        step("Build tree with static label/panel, hidden button, disabled checkbox, and active button")
+        val hidden_btn = button("hid_btn", "Hidden", "hid").set_visible(false)
+        val dis_chk = checkbox("dis_chk", "Disabled", false).set_prop("disabled", "true")
+        val root = panel("wrap_panel", "Panel", [
+            label("static_lbl", "Static"),
+            hidden_btn,
+            dis_chk,
+            button("live_btn", "Live", "live"),
+        ])
+        val order = get_focusable_ordered(build_tree(root))
+        expect(index_of(order, "wrap_panel")).to_equal(-1)
+        expect(index_of(order, "static_lbl")).to_equal(-1)
+        expect(index_of(order, "hid_btn")).to_equal(-1)
+        expect(index_of(order, "dis_chk")).to_equal(-1)
+        expect(index_of(order, "live_btn")).to_equal(0)
+
+    it "clears ui_focus and preedit on focus transitions and explicit blur":
+        # @req REQ-SGUI-004
+        step("Move focus from tab_b to tab_c and check previous widget blur cleanup")
+        var s = tab_state()
+        s = handle_focus_event(s, "tab_b", "focus")
+        expect(s.focused_id).to_equal("tab_b")
+        expect(WidgetNode(id: "tab_b").get_prop("ui_focus")).to_equal("true")
+        WidgetNode(id: "tab_b").set_prop("preedit", "ka")
+        s = focus_next(s)
+        expect(s.focused_id).to_equal("tab_c")
+        expect(WidgetNode(id: "tab_b").get_prop("ui_focus")).to_equal("false")
+        expect(WidgetNode(id: "tab_b").get_prop("preedit")).to_equal("")
+        expect(WidgetNode(id: "tab_c").get_prop("ui_focus")).to_equal("true")
+        step("Explicit blur clears focused_id and ui_focus")
+        WidgetNode(id: "tab_c").set_prop("preedit", "na")
+        s = handle_focus_event(s, "tab_c", "blur")
+        expect(s.focused_id).to_equal("")
+        expect(WidgetNode(id: "tab_c").get_prop("ui_focus")).to_equal("false")
+        expect(WidgetNode(id: "tab_c").get_prop("preedit")).to_equal("")

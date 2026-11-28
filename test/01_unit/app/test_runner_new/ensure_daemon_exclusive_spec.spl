@@ -9,10 +9,10 @@ spawned; the slower one destroyed the first daemon's live lock. The
 # @req REQ-TESTRUNNER-ENSURE-DAEMON-EXCLUSIVE
 """
 use std.spec.*
-use std.io_runtime.{file_exists, read_file_text, file_write, file_delete, dir_create_all}
+use std.io_runtime.{file_exists, read_file_text, file_write, file_delete, dir_create_all, dir_remove_all}
 use std.nogc_sync_mut.io.file_ops.{file_append}
 use app.test_daemon.light_protocol.{ensure_daemon_at}
-use app.test_daemon.light_protocol.{light_lock_claim, light_lock_release}
+use app.test_daemon.light_protocol.{light_lock_claim, light_lock_release, light_unique_tmp_path, light_atomic_publish, wait_for_daemon_record}
 
 val DIR: text = ".build/ensure_daemon_exclusive_spec"
 val LOCK: text = ".build/ensure_daemon_exclusive_spec/daemon.lock"
@@ -97,7 +97,33 @@ describe "light daemon exclusive claim", :
     it "release deletes only a lock owned by the releasing pid", :
         reset()
         file_write(LOCK, "1001\ndigest")
+        file_write(BIN, "/bin/simple")
         light_lock_release(LOCK, BIN, "1002")
         expect(file_exists(LOCK)).to_be_true()
+        expect(file_exists(BIN)).to_be_true()
         light_lock_release(LOCK, BIN, "1001")
         expect(file_exists(LOCK)).to_be_false()
+        expect(file_exists(BIN)).to_be_false()
+
+    it "uses distinct unique tmp paths and refuses non-atomic fallback on rename failure", :
+        reset()
+        val tmp1 = light_unique_tmp_path(LOCK)
+        val tmp2 = light_unique_tmp_path(LOCK)
+        expect(tmp1 != tmp2).to_be_true()
+        expect(tmp1 != "{LOCK}.tmp").to_be_true()
+        val blocking_dir = "{DIR}/blocking_dir"
+        dir_create_all(blocking_dir)
+        val publish_ok = light_atomic_publish(blocking_dir, "/bin/simple")
+        dir_remove_all(blocking_dir)
+        expect(publish_ok).to_be_false()
+
+    it "rejects incomplete lock records in wait_for_daemon_record and routes main.spl through light_protocol", :
+        reset()
+        file_write(LOCK, "4242\ndigest")
+        file_write(BIN, "/bin/simple")
+        expect(wait_for_daemon_record(LOCK, BIN)).to_be_true()
+        val main_src = read_file_text("src/app/test_daemon/main.spl")
+        expect(main_src).to_contain("ensure_daemon_at(")
+        expect(main_src).to_contain("light_atomic_publish(")
+        val shared_tmp_pattern = "{" + "path}.tmp"
+        expect(main_src.contains(shared_tmp_pattern)).to_be_false()

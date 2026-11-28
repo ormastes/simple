@@ -1,0 +1,418 @@
+# Simple twin of run-process-group-bounded-log-windows.py (p3+ callers only;
+# pre-p2 callers keep the Python helper). Same CLI, same receipt schema and key
+# order, same exit codes, same bounded-log-error diagnostics.
+#
+# Trust anchor: before any output is touched the RUNNING stage image must match
+# the pin record (SIMPLE_VERIFIED_STAGE_PIN or --stage-pin, located at
+# <source-root>/.../stage3/<platform>/provenance.env); it is re-checked at the
+# end together with the helper self-digest. Any mismatch fails closed (exit 2).
+#
+# Process ownership is std.nogc_sync_mut.io.windows_process_owner: suspended
+# CreateProcessW, KILL_ON_JOB_CLOSE JobObject, exact inherited handle list,
+# producer digest pin. The combined stdout+stderr stream is one shared file
+# handle (equal stream paths), so ordering is preserved.
+#
+# ponytail: the owner exposes no pipe, so the byte cap is enforced by polling
+# the log file size every 10 ms and terminating the job (125) once it exceeds
+# --max-bytes; the published log is exactly the first max_bytes bytes, so
+# bytes_captured/log_sha256/reason/raw_status match Python. Ceiling: an
+# overflowing child can write past the cap for up to one poll interval before
+# the kill (Python stops reading at the cap). Upgrade path: the piped-process
+# SFFI (rt_process_wait_readable_v1, #12259/#12272) once it assigns the child
+# to a JobObject and offers a merged stream.
+# ponytail: root_exit_members (terminate-job remnant diagnostics) needs a
+# JobObject PID-list query the owner does not expose; the twin records
+# "unavailable" there. Upgrade path: an owner member-list query.
+# ponytail: inherited mode requires an absolute executable (the owner pins a
+# producer digest, so there is no PATH search) and drops the per-drive "=C:"
+# pseudo variables, which the owner refuses as environment names.
+use std.nogc_sync_mut.io_runtime.{file_exists, file_delete, file_size, file_read_bytes_at, file_write_bytes, file_hash_sha256_or_empty, file_rename, get_args, exit, host_os, getpid, cwd, is_dir}
+use std.nogc_sync_mut.io.time_ops.{sleep_ms}
+use std.nogc_sync_mut.sffi.system_env_core.{env_vars_nilable}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessPollV1, windows_process_start_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_directory_no_follow_v1, _windows_process_wide_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{CreateFileW, CloseHandle, GetTickCount64, windows_abi_get_process_heap, windows_abi_heap_free}
+use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_check, verified_stage_pin_recheck}
+
+var _temps: [text] = []
+var _held: [i64] = []
+
+fn _release():
+    for t in _temps:
+        if file_exists(t):
+            val _d = file_delete(t)
+    for h in _held:
+        val _c = unsafe(capabilities: [ffi]): CloseHandle(h)
+    _held = []
+
+fn bl_fail(message: text):
+    _release()
+    eprint("bounded-log-error: " + message)
+    exit(126)
+
+fn usage(message: text):
+    eprint("run-process-group-bounded-log-windows: error: " + message)
+    exit(2)
+
+fn _is_leaf(v: text) -> bool:
+    if v == "" or v == "." or v == "..": return false
+    for i in 0..v.len():
+        val c = v.char_code_at(i)
+        val ok = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95 or c == 46 or c == 45
+        if not ok: return false
+    true
+
+fn _is_env_name(v: text) -> bool:
+    if v == "": return false
+    for i in 0..v.len():
+        val c = v.char_code_at(i)
+        val alpha = (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+        if not alpha and not (i > 0 and c >= 48 and c <= 57): return false
+    true
+
+fn _is_sha(v: text) -> bool:
+    if v.len() != 64: return false
+    for i in 0..64:
+        val c = v.char_code_at(i)
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)): return false
+    true
+
+fn _parse_nonneg(v: text) -> i64:
+    if v == "" or v.len() > 18: return -1
+    var n: i64 = 0
+    var i = 0
+    var neg = false
+    if v.char_code_at(0) == 45:
+        neg = true
+        i = 1
+        if v.len() == 1: return -1
+    while i < v.len():
+        val c = v.char_code_at(i)
+        if c < 48 or c > 57: return -2
+        n = n * 10 + (c - 48)
+        i = i + 1
+    if neg: -1 - n else: n
+
+fn _is_abs_drive(p: text) -> bool:
+    if p.len() < 3: return false
+    val d = p.char_code_at(0)
+    val drive = (d >= 65 and d <= 90) or (d >= 97 and d <= 122)
+    val sep = p.char_code_at(2)
+    drive and p.char_code_at(1) == 58 and (sep == 47 or sep == 92)
+
+# UTF-16-LE bytes of a code-point string (surrogate pairs above the BMP).
+fn _utf16le(t: text) -> [u8]:
+    var out: [u8] = []
+    for i in 0..t.len():
+        val cp = t.char_code_at(i)
+        if cp > 65535:
+            val v = cp - 65536
+            val hi = 55296 + (v / 1024)
+            val lo = 56320 + (v % 1024)
+            out = out.push((hi % 256) as u8).push((hi / 256) as u8).push((lo % 256) as u8).push((lo / 256) as u8)
+        else:
+            out = out.push((cp % 256) as u8).push((cp / 256) as u8)
+    out
+
+@unsafe(reason: "holds an output-parent directory handle without FILE_SHARE_DELETE until exit", capabilities: [ffi, raw_ptr])
+fn _hold_directory(path: text) -> bool:
+    val heap = windows_abi_get_process_heap()
+    if heap == 0: return false
+    val wide = _windows_process_wide_v1(heap, path)
+    if wide == 0: return false
+    # FILE_READ_ATTRIBUTES, share read|write, OPEN_EXISTING,
+    # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
+    val handle = CreateFileW(wide, 128u32, 3u32, 0, 3u32, 35651584u32, 0)
+    val _f = windows_abi_heap_free(heap, wide)
+    if handle == -1 or handle == 0: return false
+    _held = _held.push(handle)
+    true
+
+fn _native_map(native: i64) -> i64:
+    if native <= 255: return native
+    if native == 3221225477 or native == 3221225725: return 139
+    if native == 3221225501: return 132
+    if native == 3221225620: return 136
+    if (native / 1073741824) % 4 == 3: 125 else: 1
+
+fn _now_ms() -> i64:
+    unsafe(capabilities: [ffi]): GetTickCount64() as i64
+
+fn _poll(lease: WindowsProcessLeaseV1) -> WindowsProcessPollV1:
+    match windows_process_poll_v1(lease):
+        case Ok(p): p
+        case Err(e):
+            bl_fail(e)
+            WindowsProcessPollV1(terminal: false, leader_reaped: false, tree_empty: false, active_processes: 0, exit_code: -1, timed_out: false, cancelled: false)
+
+fn main():
+    val argv = get_args()
+    var start = -1
+    var self_path = ""
+    for k in 0..argv.len():
+        if start < 0 and argv[k].ends_with(".spl"):
+            start = k + 1
+            self_path = argv[k]
+    # The interpreter's script argument is the first .spl entry; a later crafted
+    # argument cannot move the source root used by the pin location guard.
+    if start < 0 or not self_path.replace("\\", "/").ends_with("/scripts/bootstrap/run-process-group-bounded-log-windows.spl"):
+        usage("cannot locate helper path in argv")
+    var opts: Dict<text, text> = {}
+    var stage_pin = ""
+    var command: [text] = []
+    var i = start
+    while i < argv.len():
+        val a = argv[i]
+        if a == "--":
+            command = argv[i + 1..argv.len()]
+            i = argv.len()
+        elif a.starts_with("--"):
+            var key = a[2..a.len()]
+            var value = ""
+            val eq = key.index_of("=")
+            if eq >= 0:
+                value = key[eq + 1..key.len()]
+                key = key[0..eq]
+            else:
+                if i + 1 >= argv.len(): usage("argument --" + key + ": expected one argument")
+                value = argv[i + 1]
+                i = i + 1
+            if key == "stage-pin":
+                stage_pin = value
+            else:
+                opts[key] = value
+            i = i + 1
+        else:
+            usage("unrecognized arguments: " + a)
+    for key in ["output-parent", "log-leaf", "receipt-leaf", "helper-sha256", "max-bytes", "timeout-seconds", "term-grace-seconds"]:
+        if not opts.contains_key(key): usage("the following arguments are required: --" + key)
+    val environment_mode = opts.get("command-environment") ?? "inherited"
+    val root_exit_policy = opts.get("root-exit-policy") ?? "wait-job"
+    if environment_mode != "inherited" and environment_mode != "clean-prefix": usage("argument --command-environment: invalid choice")
+    if root_exit_policy != "wait-job" and root_exit_policy != "terminate-job": usage("argument --root-exit-policy: invalid choice")
+    val max_bytes = _parse_nonneg(opts["max-bytes"])
+    val timeout_seconds = _parse_nonneg(opts["timeout-seconds"])
+    val term_grace = _parse_nonneg(opts["term-grace-seconds"])
+    if max_bytes == -2 or timeout_seconds == -2 or term_grace == -2: usage("argument: invalid int value")
+
+    # Trust anchor before any state is touched.
+    val os = host_os()
+    val linux = os == "linux"
+    val windows = os == "windows"
+    val self_norm = self_path.replace("\\", "/")
+    val bs_idx = self_norm.last_index_of("/scripts/bootstrap/")
+    val source_root = if bs_idx > 0: self_norm[0..bs_idx] else: ""
+    val pin = match verified_stage_pin_check(stage_pin, source_root, linux, windows):
+        case Ok(p): p
+        case Err(e):
+            eprint("FAIL: " + e)
+            exit(2)
+            return
+    if not windows: bl_fail("Windows adapter requires native Windows")
+
+    if command.len() == 0 or max_bytes <= 0 or timeout_seconds < 0 or term_grace < 0:
+        bl_fail("invalid command or limits")
+    var environment: [text] = []
+    var environment_text = ""
+    if environment_mode == "clean-prefix":
+        if command.len() < 2 or command[0] != "env" or command[1] != "-i":
+            bl_fail("clean environment requires an env -i prefix")
+        command = command[2..command.len()]
+        var names: [text] = []
+        var keys: [text] = []
+        var values: [text] = []
+        while command.len() > 0 and command[0].contains("="):
+            val pair = command[0]
+            command = command[1..command.len()]
+            val eq = pair.index_of("=")
+            val key = pair[0..eq]
+            if not _is_env_name(key) or names.contains(key.lower()):
+                bl_fail("invalid or duplicate clean environment name")
+            names = names.push(key.lower())
+            keys = keys.push(key)
+            values = values.push(pair[eq + 1..pair.len()])
+        if command.len() == 0 or not _is_abs_drive(command[0]):
+            bl_fail("clean environment requires an absolute native executable")
+        # Sorted by casefold (names are ASCII by the check above).
+        var order: [i64] = []
+        for k in 0..keys.len():
+            var pos = order.len()
+            while pos > 0 and keys[order[pos - 1]].lower() > keys[k].lower():
+                pos = pos - 1
+            order = order[0..pos] + [k] + order[pos..order.len()]
+        for k in order:
+            environment = environment.push(keys[k] + "=" + values[k])
+            environment_text = environment_text + keys[k] + "=" + values[k] + "\0"
+        environment_text = environment_text + "\0"
+    else:
+        if val pairs = env_vars_nilable():
+            for pair in pairs:
+                if pair.0 != "" and not pair.0.contains("="):
+                    environment = environment.push(pair.0 + "=" + pair.1)
+    val log_leaf = opts["log-leaf"]
+    val receipt_leaf = opts["receipt-leaf"]
+    if not _is_leaf(log_leaf) or not _is_leaf(receipt_leaf): bl_fail("unsafe output leaf")
+    if log_leaf.lower() == receipt_leaf.lower(): bl_fail("log and receipt leaves collide")
+    val helper_sha = opts["helper-sha256"]
+    if not _is_sha(helper_sha) or file_hash_sha256_or_empty(self_path) != helper_sha:
+        bl_fail("collector helper hash mismatch")
+
+    val parent_raw = opts["output-parent"]
+    var parent = parent_raw.replace("\\", "/")
+    while parent.len() > 3 and parent.ends_with("/"): parent = parent[0..parent.len() - 1]
+    if not _is_abs_drive(parent): bl_fail("output parent must be an absolute local directory")
+    val parts = parent.split("/")
+    for p in parts:
+        if p == "." or p == "..": bl_fail("output parent must be an absolute local directory")
+    # Reject reparse points and hold every directory without FILE_SHARE_DELETE.
+    var ancestor = parts[0] + "/"
+    var chain: [text] = [ancestor]
+    for k in 1..parts.len():
+        if parts[k] != "":
+            ancestor = if ancestor.ends_with("/"): ancestor + parts[k] else: ancestor + "/" + parts[k]
+            chain = chain.push(ancestor)
+    for directory in chain:
+        if not windows_process_directory_no_follow_v1(directory):
+            bl_fail("output parent contains a non-directory or reparse point")
+        val held = unsafe(capabilities: [ffi, raw_ptr]): _hold_directory(directory)
+        if not held: bl_fail("lock output directory")
+        if not windows_process_directory_no_follow_v1(directory):
+            bl_fail("output parent changed to a reparse point")
+    val log_path = parent + "/" + log_leaf
+    val receipt_path = parent + "/" + receipt_leaf
+    if file_exists(log_path) or file_exists(receipt_path) or is_dir(log_path) or is_dir(receipt_path):
+        bl_fail("output collision")
+    val pid = getpid()
+    var log_tmp = parent + "/." + log_leaf + ".tmp.{pid}"
+    val receipt_tmp = parent + "/." + receipt_leaf + ".tmp.{pid}"
+    _temps = [log_tmp, receipt_tmp]
+
+    var reason = "exec-failure"
+    var raw_status: i64 = 127
+    var native_status = "not-run"
+    var receipt_status = "complete"
+    var cleanup_status = "not-needed"
+    var cleanup_wait_code = "not-observed"
+    var cleanup_last_error = "not-observed"
+    var bound_raw_status = "not-observed"
+    var job_remnants_terminated = false
+    var root_exit_active_count = "not-observed"
+    var root_exit_elapsed_ms = "not-observed"
+    var root_exit_members = "not-observed"
+    var captured: i64 = 0
+
+    val program = command[0].replace("\\", "/")
+    if environment_mode == "inherited" and not _is_abs_drive(program):
+        bl_fail("Simple twin requires an absolute native executable")
+    val producer = if file_exists(program) and not is_dir(program): file_hash_sha256_or_empty(program) else: ""
+    val request = WindowsProcessRequestV1(program: program, producer_digest: producer,
+        args: command[1..command.len()], environment: environment, directory: cwd(), inputs: [],
+        stdout_path: log_tmp, stderr_path: log_tmp,
+        timeout_ms: timeout_seconds * 1000)
+    if producer == "":
+        if not file_write_bytes(log_tmp, []): bl_fail("create log temporary")
+    else:
+        match windows_process_start_v1(request):
+            case Err(e): bl_fail(e)
+            case Ok(lease):
+                val started = _now_ms()
+                var running = true
+                while running:
+                    val p = _poll(lease)
+                    if p.timed_out:
+                        reason = "timeout"
+                        raw_status = 124
+                        running = false
+                    elif file_size(log_tmp) > max_bytes:
+                        reason = "overflow"
+                        raw_status = 125
+                        match windows_process_cancel_v1(lease):
+                            case Err(e): bl_fail(e)
+                            case Ok(_): pass
+                        running = false
+                    elif p.leader_reaped and not p.tree_empty and root_exit_policy == "terminate-job":
+                        native_status = "{p.exit_code}"
+                        root_exit_active_count = "{p.active_processes}"
+                        root_exit_elapsed_ms = "{_now_ms() - started}"
+                        root_exit_members = "unavailable"
+                        match windows_process_cancel_v1(lease):
+                            case Err(e): bl_fail(e)
+                            case Ok(_): pass
+                        job_remnants_terminated = true
+                        val cleanup_deadline = _now_ms() + 10000
+                        while not _poll(lease).tree_empty:
+                            if _now_ms() >= cleanup_deadline: bl_fail("root-exit job cleanup deadline")
+                            sleep_ms(10)
+                        val native = p.exit_code
+                        reason = if (native / 1073741824) % 4 == 3: "child-native-status" else: "child-exit"
+                        raw_status = _native_map(native)
+                        running = false
+                    elif p.terminal:
+                        if native_status == "not-run": native_status = "{p.exit_code}"
+                        val native = p.exit_code
+                        reason = if (native / 1073741824) % 4 == 3: "child-native-status" else: "child-exit"
+                        raw_status = _native_map(native)
+                        running = false
+                    else:
+                        sleep_ms(10)
+                if reason == "timeout" or reason == "overflow":
+                    val cleanup_deadline = _now_ms() + 10000
+                    var last = _poll(lease)
+                    while not last.terminal and _now_ms() < cleanup_deadline:
+                        sleep_ms(10)
+                        last = _poll(lease)
+                    if last.terminal:
+                        cleanup_status = "reaped"
+                        cleanup_wait_code = "0"
+                        cleanup_last_error = "0"
+                        native_status = "{last.exit_code}"
+                    else:
+                        cleanup_status = "deadline"
+                        cleanup_wait_code = "258"
+                        cleanup_last_error = "0"
+                        receipt_status = "aborted"
+                        bound_raw_status = "{raw_status}"
+                        eprint("bounded-log-error: root reap deadline; bound_reason={reason}; bound_raw_status={raw_status}; wait_code=258; win32_error=0")
+                        raw_status = 126
+                if cleanup_status != "deadline":
+                    match windows_process_collect_v1(lease):
+                        case Err(e): bl_fail(e)
+                        case Ok(_): pass
+        # Exact byte bound: keep the first max_bytes bytes.
+        # Copy the bounded prefix into a fresh file: on the reap-deadline path a
+        # live writer may still hold log_tmp, so it is never measured or hashed.
+        val bounded_tmp = log_tmp + ".bounded"
+        _temps = _temps.push(bounded_tmp)
+        val size = file_size(log_tmp)
+        val keep = if size > max_bytes: max_bytes else: size
+        val kept = if keep > 0: (file_read_bytes_at(log_tmp, 0, keep) ?? []) else: []
+        if kept.len() != keep or not file_write_bytes(bounded_tmp, kept): bl_fail("truncate bounded log")
+        if cleanup_status != "deadline":
+            val _d = file_delete(log_tmp)
+        log_tmp = bounded_tmp
+    captured = file_size(log_tmp)
+    if captured < 0: bl_fail("read bounded log size")
+    if file_hash_sha256_or_empty(self_path) != helper_sha:
+        bl_fail("collector helper mutated during execution")
+    # Stage identity is re-checked BEFORE anything is published, so a failed
+    # recheck can never leave a complete receipt behind.
+    match verified_stage_pin_recheck(pin, linux, windows):
+        case Ok(_): pass
+        case Err(e):
+            _release()
+            eprint("FAIL: " + e)
+            exit(2)
+    val log_sha = file_hash_sha256_or_empty(log_tmp)
+    # ponytail: publication is check-then-rename under the held parent chain
+    # (no MoveFileExW in the ABI); a collision still fails without replacing.
+    if file_exists(log_path) or not file_rename(log_tmp, log_path): bl_fail("publish log without replacement")
+    _temps = [receipt_tmp]
+    val env_sha = if environment_mode == "clean-prefix": sha256_u8_hex(_utf16le(environment_text)) else: "inherited"
+    val receipt = "schema=simple-bounded-process-log-v1\nstatus={receipt_status}\nreason={reason}\nraw_status={raw_status}\nnative_exit_status={native_status}\ncleanup_status={cleanup_status}\ncleanup_wait_code={cleanup_wait_code}\ncleanup_last_error={cleanup_last_error}\nbound_raw_status={bound_raw_status}\nmax_bytes={max_bytes}\nbytes_captured={captured}\ntimeout_seconds={timeout_seconds}\nterm_grace_seconds={term_grace}\ncombined_stream=stdout-stderr\nprocess_group=windows-job\ntermination=job-terminate\nartifact_limit=none\nroot_exit_policy={root_exit_policy}\njob_remnants_terminated=" + (if job_remnants_terminated: "yes" else: "no") + "\nroot_exit_active_count={root_exit_active_count}\nroot_exit_elapsed_ms={root_exit_elapsed_ms}\nroot_exit_members={root_exit_members}\nlog_leaf={log_leaf}\nlog_sha256={log_sha}\nhelper_sha256={helper_sha}\ncommand_environment={environment_mode}\nenvironment_sha256={env_sha}\n"
+    if not file_write_bytes(receipt_tmp, receipt.bytes()): bl_fail("write receipt temporary")
+    if file_exists(receipt_path) or not file_rename(receipt_tmp, receipt_path): bl_fail("publish receipt without replacement")
+    _temps = []
+    _release()
+    exit(raw_status)
+
+main()
