@@ -37,14 +37,49 @@ describe "x86 runtime HAL boundary":
     it "preserves compatibility names as aliases to the typed facade":
         val cpu64 = file_read("src/os/kernel/arch/x86_64/cpu.spl")
         val cpu32 = file_read("src/os/kernel/arch/x86_32/cpu.spl")
-        val paging64 = file_read("src/os/kernel/arch/x86_64/paging.spl")
 
-        expect(cpu64).to_contain("hal_x86_64_port_inb as port_inb")
+        # Port I/O is owned by port_io_owner (x86_runtime_owner_contract_spec);
+        # x86_64 paging reaches CR3 through vmm_core._load_cr3, not the facade.
+        expect(cpu64).to_contain("use os.kernel.arch.x86.port_io_owner.{")
         expect(cpu64).to_contain("hal_x86_64_read_cr3 as read_cr3")
-        expect(cpu32).to_contain("hal_x86_32_port_inb as port_inb")
+        expect(cpu64).to_contain("hal_x86_64_write_cr3 as write_cr3")
+        expect(cpu32).to_contain("use os.kernel.arch.x86.port_io_owner.{")
         expect(cpu32).to_contain("hal_x86_32_read_cr3 as read_cr3")
-        expect(paging64).to_contain("hal_x86_64_write_cr3(pml4_phys)")
-        expect(paging64).to_contain("hal_x86_64_read_cr3()")
+        expect(cpu32).to_contain("hal_x86_32_write_cr3 as write_cr3")
+
+    it "declares raw CR3 externs only in the per-ISA runtime_hal owners":
+        # Prevention (pure_simple_hal.md sec. 1: the runtime is a boundary with
+        # one typed owner): every x86-family arch/arch_adapt source that
+        # mentions CR3 (census via rg -li cr3) must not re-declare the raw
+        # rt_read_cr3/rt_write_cr3 externs. A new CR3-touching file is added
+        # to this list when it lands.
+        val consumers = [
+            "src/os/kernel/arch/x86_32/address_space_switch_completion_adapter_v1.spl",
+            "src/os/kernel/arch/x86_32/context.spl",
+            "src/os/kernel/arch/x86_32/cpu.spl",
+            "src/os/kernel/arch/x86_32/paging.spl",
+            "src/os/kernel/arch/x86_32/privilege_abi.spl",
+            "src/os/kernel/arch/x86_32/token_registry.spl",
+            "src/os/kernel/arch/x86_32/user_entry.spl",
+            "src/os/kernel/arch/x86_32/user_page_root_owner_v1.spl",
+            "src/os/kernel/arch/x86_32/user_prepare_contract.spl",
+            "src/os/kernel/arch/x86_64/address_space_switch_completion_adapter_v1.spl",
+            "src/os/kernel/arch/x86_64/context.spl",
+            "src/os/kernel/arch/x86_64/cpu.spl",
+            "src/os/kernel/arch/x86_64/paging.spl",
+            "src/os/kernel/arch/x86_64/ring3_slice.spl",
+            "src/os/kernel/arch/x86_64/scheduler_dispatch.spl",
+            "src/os/kernel/arch/x86_64/scheduler_dispatch_contract.spl",
+            "src/os/kernel/arch/x86_64/user_entry.spl",
+            "src/os/kernel/arch/x86_64/user_entry_validation.spl",
+            "src/os/kernel/arch_adapt/x86_32/cpu.spl",
+            "src/os/kernel/arch_adapt/x86_64/cpu.spl",
+            "src/os/kernel/arch_adapt/x86_64_runtime_hal.spl",
+        ]
+        for path in consumers:
+            val src = file_read(path)
+            expect(src.contains("extern fn rt_read_cr3")).to_be(false)
+            expect(src.contains("extern fn rt_write_cr3")).to_be(false)
 
     it "executes host-safe provider capability and ABI metadata":
         expect(hal_x86_32_cr3_width_bits()).to_equal(32)
