@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -56,10 +56,24 @@ its consumers can be named.
 Equality with the mir matcher is stated for `forward` join-point facts whose
 `symbol` is the function name and whose `attrs` are its attributes.
 
+## Match identity is not order identity
+The selector id says which functions a predicate matches, nothing more. The mir
+matcher also ranks equal-priority advice by `predicate_specificity`, which is
+read from the spelling: `execution(* run(..))` ranks 1 (it contains a `*`),
+`execution(i64 run())` and `run` rank 4, and a `*` in a trailing comment lowers
+the rank to 1 as well. These spellings share one selector id and can still be
+woven in a different order. `aop_predicate_specificity_v1` returns that rank;
+every key that covers woven order (the mdsoc selection key, the mir rule set
+digest of the weave plan) folds it next to the selector id.
+
 ## Retired identity
 `aop_selector_digest` and its substring read-set are deleted. The mdsoc
-selection key and reverse index use `aop_selector_id_v1`; the read-set is
-derived from the atoms of the lowered selector.
+selection key folds `aop_selector_id_v1` with the specificity; the reverse index
+uses the selector id, and its read-set is derived from the atoms of the lowered
+selector. The example below reads the file that defined the retired digest and
+the file that called it. That no other caller is left under `src`, `test` and
+`scripts` is the `git grep` evidence recorded with the change, not something
+this spec scans for.
 
 ## Decision inventory (aop_selector_identity_v1.spl)
 
@@ -227,7 +241,7 @@ expect(aop_predicate_lower_v1("execution(run_fast)").supported).to_equal(false)
 
 ### Equivalent spellings share one PointcutSelectorId
 
-#### gives the mir spellings of one function the logical selector's digest
+#### gives match-equivalent mir spellings of one function the logical selector digest
 
 - Compare the ids of four spellings with the logical-family selector digest
    - Exec capture: after_step
@@ -368,11 +382,99 @@ expect(aop_selector_id_v1("execution(* app.run(..))") == aop_selector_id_v1("exe
 
 </details>
 
+### Selector identity does not cover weave order
+
+#### lets a respelling with the same selector id flip equal-priority advice
+
+- Weave two equal-priority rules on run, with the first rule spelled with and without a star
+   - Exec capture: after_step
+   - Evidence: execution result verified by 3 expected checks
+   - Expected: aop_selector_id_v1("execution(* run(..))") equals `aop_selector_id_v1("execution(i64 run())")`
+   - Expected: mir_order("execution(* run(..))", "run", run) equals `z,m`
+   - Expected: mir_order("execution(i64 run())", "run", run) equals `m,z`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Weave two equal-priority rules on run, with the first rule spelled with and without a star")
+# @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+val run = ProbeFn(name: "run", attrs: [])
+expect(aop_selector_id_v1("execution(* run(..))")).to_equal(aop_selector_id_v1("execution(i64 run())"))
+expect(mir_order("execution(* run(..))", "run", run)).to_equal("z,m")
+expect(mir_order("execution(i64 run())", "run", run)).to_equal("m,z")
+```
+
+</details>
+
+#### reports the rank that decides that order, also for a star in a trailing comment
+
+- Read the specificity of four spellings of one selector and weave the commented one
+   - Exec capture: after_step
+   - Evidence: execution result verified by 6 expected checks
+   - Expected: aop_predicate_specificity_v1("execution(* run(..))") equals `1)  # oracle: 1 - the spelling contains a star`
+   - Expected: aop_predicate_specificity_v1("execution(i64 run())") equals `4)  # oracle: 4 - exact spelling without a star`
+   - Expected: aop_predicate_specificity_v1("run") equals `4)  # oracle: 4 - exact spelling without a star`
+   - Expected: aop_predicate_specificity_v1("execution(i64 run()) # *") equals `1)  # oracle: 1 - the star is in the comment`
+   - Expected: aop_selector_id_v1("execution(i64 run()) # *") equals `aop_selector_id_v1("execution(i64 run())")`
+   - Expected: mir_order("execution(i64 run()) # *", "run", run) equals `z,m`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the specificity of four spellings of one selector and weave the commented one")
+# @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+val run = ProbeFn(name: "run", attrs: [])
+expect(aop_predicate_specificity_v1("execution(* run(..))")).to_equal(1)  # oracle: 1 - the spelling contains a star
+expect(aop_predicate_specificity_v1("execution(i64 run())")).to_equal(4)  # oracle: 4 - exact spelling without a star
+expect(aop_predicate_specificity_v1("run")).to_equal(4)  # oracle: 4 - exact spelling without a star
+expect(aop_predicate_specificity_v1("execution(i64 run()) # *")).to_equal(1)  # oracle: 1 - the star is in the comment
+expect(aop_selector_id_v1("execution(i64 run()) # *")).to_equal(aop_selector_id_v1("execution(i64 run())"))
+expect(mir_order("execution(i64 run()) # *", "run", run)).to_equal("z,m")
+```
+
+</details>
+
+#### orders every expressible predicate as its specificity predicts
+
+- Weave each expressible predicate against an equal-priority attribute rule on every probe function
+   - Exec capture: after_step
+   - Evidence: execution result verified by 3 expected checks
+   - Expected: order_mismatches(expressible_corpus()) equals `[]`
+   - Expected: mir_order("@inline", "run_fast", ProbeFn(name: "run_fast", attrs: ["inline"])) equals `z,m`
+   - Expected: mir_order("@inline", "run*", ProbeFn(name: "run_fast", attrs: ["inline"])) equals `m,z`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Weave each expressible predicate against an equal-priority attribute rule on every probe function")
+# @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+expect(order_mismatches(expressible_corpus())).to_equal([])
+expect(mir_order("@inline", "run_fast", ProbeFn(name: "run_fast", attrs: ["inline"]))).to_equal("z,m")
+expect(mir_order("@inline", "run*", ProbeFn(name: "run_fast", attrs: ["inline"]))).to_equal("m,z")
+```
+
+</details>
+
 ### The retired selector digest
 
-#### has no definition and no caller left in the compiler sources
+#### is gone from the file that defined it and from the file that called it
 
-- Read the two former owners and require the retired name to be absent
+- Read the former defining file and the former calling file and require the retired name to be absent
    - Exec capture: after_step
    - Evidence: execution result verified by 5 expected checks
    - Expected: keys contains `aop_selector_id_v1(predicate_text)`
@@ -389,7 +491,7 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Read the two former owners and require the retired name to be absent")
+step("Read the former defining file and the former calling file and require the retired name to be absent")
 # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
 val keys = file_read("src/compiler/85.mdsoc/aop_cache/aop_group_keys.spl") ?? ""
 val index = file_read("src/compiler/85.mdsoc/aop_index/reverse_index.spl") ?? ""
@@ -406,8 +508,8 @@ expect(index.contains("predicate_text.contains(")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -426,15 +528,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `3eab188cd7d041dc5e9f6e27338e7d5c88219fce63eee6d471a32094784c1f91`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `2147616017c68aee72abbb649d0d256d771456605ef01095934f0c35947f6830`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `3eab188cd7d041dc5e9f6e27338e7d5c88219fce63eee6d471a32094784c1f91`.
+Source SHA-256: `2147616017c68aee72abbb649d0d256d771456605ef01095934f0c35947f6830`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `3eab188cd7d041dc5e9f6e27338e7d5c88219fce63eee6d471a32094784c1f91`  
+Source SHA-256: `2147616017c68aee72abbb649d0d256d771456605ef01095934f0c35947f6830`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 

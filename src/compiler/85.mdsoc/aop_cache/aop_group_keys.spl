@@ -1,11 +1,13 @@
-use compiler.frontend.core.aop_selector_identity_v1.{aop_selector_id_v1}
+use compiler.frontend.core.aop_selector_identity_v1.{aop_selector_id_v1, aop_predicate_specificity_v1}
 
 # AOP cache group keys (Semantic Incremental Build v2, design §16.2).
 #
 # Built over what the tree ACTUALLY has today (plan §2b reality gaps):
 #   - Selector identity is the one PointcutSelectorId (aspect plan AW-3):
 #     10.frontend/core/aop_selector_identity_v1.spl lowers the predicate into
-#     the shard selector AST, or marks it unsupported. No second digest here.
+#     the shard selector AST, or marks it unsupported. The selection key folds
+#     that id with the specificity the matcher orders equal-priority advice
+#     by, because match-equivalent spellings can differ in woven order.
 #   - A join-point descriptor can only read JoinPointContext's real fields:
 #     function_name, module_path, signature, attributes, effects.
 #   - Weaving mutates MIR in place (50.mir/mir_aop_injection.spl); there is
@@ -136,11 +138,20 @@ fn aop_candidate_partition_key_digest(k: AopCandidatePartitionKey) -> text:
     inner.push(canon_field("descriptorSchema", canon_nat(k.descriptor_schema)))
     sha256_text(canon_field("simple/aop-candidate-partition-key/v1", canon_seq(inner)))
 
+# Query half of the selection key: the one PointcutSelectorId (what the
+# predicate matches) and its specificity (how the ordering policy ranks it).
+# Bare sha256 hex like every other digest of this key.
+fn aop_selection_query_digest(predicate_text: text) -> text:
+    var inner: [text] = []
+    inner.push(canon_field("selectorId", canon_str(aop_selector_id_v1(predicate_text))))
+    inner.push(canon_field("specificity", canon_nat(aop_predicate_specificity_v1(predicate_text))))
+    sha256_text(canon_field("simple/aop-selection-query/v1", canon_seq(inner)))
+
 # Selection key (§16.2). INVARIANT: contains advice_interface_root, NEVER any
 # advice implementation digest — advice-body-only changes must not move it.
 struct AopSelectionKey:
     pointcut_surface_digest: text        # sentinel until pointcuts exist
-    normalized_query_digest: text        # aop_selector_id_v1(predicate_text)
+    normalized_query_digest: text        # aop_selection_query_digest(predicate_text)
     matcher_schema_digest: text
     visible_aspect_catalog_digest: text  # loader-owned validated catalog digest
     candidate_partition_roots: [text]    # set; sorted at encode time
@@ -177,7 +188,7 @@ fn aop_selection_key_digest(k: AopSelectionKey) -> text:
 fn aop_selection_key_today(predicate_text: text, partition_roots: [text], advice_interface_digests: [text], visible_aspect_catalog_digest: text) -> AopSelectionKey:
     AopSelectionKey(
         pointcut_surface_digest: aop_empty_seq_sentinel(),
-        normalized_query_digest: aop_selector_id_v1(predicate_text),
+        normalized_query_digest: aop_selection_query_digest(predicate_text),
         matcher_schema_digest: aop_matcher_schema_digest(),
         visible_aspect_catalog_digest: visible_aspect_catalog_digest,
         candidate_partition_roots: partition_roots,

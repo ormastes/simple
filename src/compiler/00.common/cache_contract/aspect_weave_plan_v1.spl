@@ -22,7 +22,8 @@
 # Inputs this stage does not produce:
 #   - `WeavePlanJoinPointV1` is the projection of the `join-point|` row
 #     (`JoinPointFactV2`, stage AW-2): the v1 fact with a real
-#     `base_body_digest`, plus `signature_digest`.
+#     `base_body_digest`, plus `signature_digest`. It is replaced by that row
+#     type when AW-2 lands.
 #   - `WeavePlanAdviceV1` / `WeavePlanRuleV1` are rows of `effective_advice(dir)`
 #     (stages AW-1 and AW-7a), already filtered by scope: a rule row that is not
 #     passed for a file does not touch that file's digest.
@@ -53,6 +54,9 @@ pub struct WeavePlanJoinPointV1:
     signature_digest: text
 
 # One logical-family advice row. `facets.order` and `advice_id` give the plan order.
+# `advice_id` is the AW-1 AdviceId (`aspect_decl_advice_id_v1`), which hashes the
+# owning module, family, inventory index and handler name: it is the handler
+# identity of the key, so no separate handler name is folded.
 pub struct WeavePlanAdviceV1:
     advice_id: text
     selector: PointcutSelectorV1
@@ -61,12 +65,17 @@ pub struct WeavePlanAdviceV1:
 
 # One mir-family rule row or one ambient log rule row (log rules have no
 # handler signature or effects digest).
-# @allow(primitive_api) `priority` mirrors DirectoryAspectDeclarationV2.priority (i64)
+# `selector_digest` is the match identity only. `specificity` is the order
+# input the mir matcher derives from the predicate spelling
+# (`aop_predicate_specificity_v1`): equal-priority rules are woven by it, and
+# match-equivalent spellings can differ in it, so it is a key input of its own.
+# @allow(primitive_api) `priority` mirrors DirectoryAspectDeclarationV2.priority and `specificity` mirrors MatchedAdvice.specificity (i64)
 pub struct WeavePlanRuleV1:
     advice_id: text
     selector_digest: text
     form: text
     priority: i64
+    specificity: i64
     signature_digest: text
     effects_digest: text
     body_digest: text
@@ -152,7 +161,7 @@ fn _plan_rule_set_digest_v1(domain: text, rules: [WeavePlanRuleV1]) -> text:
     var rows: [text] = []
     for r in rules:
         rows.push(_plan_framed_v1("aop-rule/v1", [r.advice_id, r.selector_digest, r.form,
-            "{r.priority}", r.signature_digest, r.effects_digest,
+            "{r.priority}", "{r.specificity}", r.signature_digest, r.effects_digest,
             _plan_body_mark_v1(r.body_link, r.body_digest)]))
     _plan_h_v1(domain, _plan_sorted_texts_v1(rows))
 

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 29 | 29 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,6 +59,11 @@ A file that nothing reaches has one fixed digest, so its object key is the same
 as without aspects. A mir-family rule or a log rule changes the digest of every
 file it is effective for, matched or not, and of no other file.
 
+A rule row carries the selector id (what the predicate matches) and the
+specificity (how the matcher ranks it among equal-priority rules). Two
+spellings of one predicate can share the selector id and differ in
+specificity, which changes the woven order, so the digest covers both.
+
 **Fail closed.** `plan_digest` is empty, and must not be used as a key, when
 there is an order conflict, when a static advice row cannot be planned here
 (unsupported selector, or a mode other than before/after), or when an inline
@@ -67,7 +72,8 @@ on the registry path.
 
 ## Inputs produced by other stages
 The join-point rows are the `join-point|` rows of stage AW-2 (`JoinPointFactV2`:
-the fact, a real base body digest and a signature digest). The advice and rule
+the fact, a real base body digest and a signature digest); `WeavePlanJoinPointV1`
+is replaced by that row type when AW-2 lands. The advice and rule
 rows are `effective_advice(dir)` of stages AW-1 and AW-7a, already filtered by
 scope; these examples build both by hand.
 
@@ -739,6 +745,88 @@ expect(aspect_mir_rule_set_digest_v1([first]) == aspect_mir_rule_set_digest_v1([
 
 </details>
 
+#### changes the digest when a respelling keeps the selector id but changes the rank
+
+- Respell one of two equal-priority rules from an exact name to a star form of the same selector
+   - Exec capture: after_step
+   - Evidence: execution result verified by 2 expected checks
+   - Expected: starred.selector_digest equals `exact.selector_digest`
+   - Expected: aspect_mir_rule_set_digest_v1([other, starred]) == aspect_mir_rule_set_digest_v1([other, exact]) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Respell one of two equal-priority rules from an exact name to a star form of the same selector")
+# @req: REQ-ASPECT-AW5-WEAVE-PLAN
+val other = spelled_rule("guard", "run", 10)
+val exact = spelled_rule("probe", "execution(i64 run())", 10)
+val starred = spelled_rule("probe", "execution(* run(..))", 10)
+expect(starred.selector_digest).to_equal(exact.selector_digest)
+expect(aspect_mir_rule_set_digest_v1([other, starred]) == aspect_mir_rule_set_digest_v1([other, exact])).to_equal(false)
+expect(aspect_weave_plan_v1([], [], [other, starred], []).plan_digest ==
+    aspect_weave_plan_v1([], [], [other, exact], []).plan_digest).to_equal(false)
+```
+
+</details>
+
+#### changes the digest when only a star in a trailing comment changes the rank
+
+- Add a trailing comment that contains a star to one of two equal-priority rules
+   - Exec capture: after_step
+   - Evidence: execution result verified by 2 expected checks
+   - Expected: commented.selector_digest equals `plain.selector_digest`
+   - Expected: aspect_log_config_digest_v1([commented]) == aspect_log_config_digest_v1([plain]) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Add a trailing comment that contains a star to one of two equal-priority rules")
+# @req: REQ-ASPECT-AW5-WEAVE-PLAN
+val other = spelled_rule("guard", "run", 10)
+val plain = spelled_rule("probe", "execution(i64 run())", 10)
+val commented = spelled_rule("probe", "execution(i64 run()) # *", 10)
+expect(commented.selector_digest).to_equal(plain.selector_digest)
+expect(aspect_weave_plan_v1([], [], [other, commented], []).plan_digest ==
+    aspect_weave_plan_v1([], [], [other, plain], []).plan_digest).to_equal(false)
+expect(aspect_log_config_digest_v1([commented]) == aspect_log_config_digest_v1([plain])).to_equal(false)
+```
+
+</details>
+
+#### keeps the digest when a respelling changes neither the selector id nor the rank
+
+- Respell a rule with other whitespace and another concrete return type
+   - Exec capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Respell a rule with other whitespace and another concrete return type")
+# @req: REQ-ASPECT-AW5-WEAVE-PLAN
+val other = spelled_rule("guard", "run", 10)
+val first = spelled_rule("probe", "execution(i64 run())", 10)
+val second = spelled_rule("probe", "execution ( text run ( ) )", 10)
+expect(aspect_weave_plan_v1([], [], [other, second], []).plan_digest).to_equal(
+    aspect_weave_plan_v1([], [], [other, first], []).plan_digest)
+```
+
+</details>
+
 ### Rows that cannot be planned here
 
 #### does not plan advice that is activated through the registry
@@ -856,8 +944,8 @@ expect(p.plan_digest).to_equal("")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 29 |
+| Active scenarios | 29 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -876,15 +964,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `0d47baa132bf515647086957553fa4973d1d0835a1462c56699d15edcb0f494c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `06932b89607b31975262af01abea8310176a4dce33489b37da8dff6094c44dd7`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `0d47baa132bf515647086957553fa4973d1d0835a1462c56699d15edcb0f494c`.
+Source SHA-256: `06932b89607b31975262af01abea8310176a4dce33489b37da8dff6094c44dd7`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `0d47baa132bf515647086957553fa4973d1d0835a1462c56699d15edcb0f494c`  
+Source SHA-256: `06932b89607b31975262af01abea8310176a4dce33489b37da8dff6094c44dd7`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 

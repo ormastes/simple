@@ -35,10 +35,24 @@ its consumers can be named.
 Equality with the mir matcher is stated for `forward` join-point facts whose
 `symbol` is the function name and whose `attrs` are its attributes.
 
+## Match identity is not order identity
+The selector id says which functions a predicate matches, nothing more. The mir
+matcher also ranks equal-priority advice by `predicate_specificity`, which is
+read from the spelling: `execution(* run(..))` ranks 1 (it contains a `*`),
+`execution(i64 run())` and `run` rank 4, and a `*` in a trailing comment lowers
+the rank to 1 as well. These spellings share one selector id and can still be
+woven in a different order. `aop_predicate_specificity_v1` returns that rank;
+every key that covers woven order (the mdsoc selection key, the mir rule set
+digest of the weave plan) folds it next to the selector id.
+
 ## Retired identity
 `aop_selector_digest` and its substring read-set are deleted. The mdsoc
-selection key and reverse index use `aop_selector_id_v1`; the read-set is
-derived from the atoms of the lowered selector.
+selection key folds `aop_selector_id_v1` with the specificity; the reverse index
+uses the selector id, and its read-set is derived from the atoms of the lowered
+selector. The example below reads the file that defined the retired digest and
+the file that called it. That no other caller is left under `src`, `test` and
+`scripts` is the `git grep` evidence recorded with the change, not something
+this spec scans for.
 
 ## Decision inventory (aop_selector_identity_v1.spl)
 
@@ -75,7 +89,8 @@ use compiler.frontend.core.aop.{JoinPoint, JoinPointContext, JoinPointKind, Weav
     WeavingRule, AdviceForm, match_advice_for_join_point}
 use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
     directory_join_point_facts_v1, pointcut_selector_parse_v1, pointcut_match_shard_compute_v1}
-use compiler.frontend.core.aop_selector_identity_v1.{aop_predicate_lower_v1, aop_selector_id_v1}
+use compiler.frontend.core.aop_selector_identity_v1.{aop_predicate_lower_v1, aop_selector_id_v1,
+    aop_predicate_specificity_v1}
 
 struct ProbeFn:
     name: text
@@ -99,6 +114,35 @@ fn mir_matches(predicate: text, probe: ProbeFn) -> bool:
     val config = WeavingConfig.from_rules([WeavingRule(predicate_text: predicate,
         advice_function: "advice", form: AdviceForm.Before, priority: 1)])
     match_advice_for_join_point(config, join_point).matched.len() == 1
+
+# The mir matcher with two equal-priority rules on one execution join point:
+# advice `m` under `first`, advice `z` under `second`. Returns the woven order.
+fn mir_order(first: text, second: text, probe: ProbeFn) -> text:
+    val context = JoinPointContext(function_name: probe.name, module_path: "app.core",
+        signature: "* {probe.name}(...)", attributes: probe.attrs, effects: ["io"])
+    val join_point = JoinPoint(JoinPointKind.Execution, probe.name, context.signature, "", "", 0, 0, context)
+    val config = WeavingConfig.from_rules([
+        WeavingRule(predicate_text: first, advice_function: "m", form: AdviceForm.Before, priority: 1),
+        WeavingRule(predicate_text: second, advice_function: "z", form: AdviceForm.Before, priority: 1)])
+    var names: [text] = []
+    for matched in match_advice_for_join_point(config, join_point).matched:
+        names.push(matched.advice_function)
+    names.join(",")
+
+# Every (predicate, function) pair whose woven order against the rank-2 rule
+# `@inline` is not the order its specificity predicts: a higher rank goes first,
+# an equal or lower rank goes after `m`.
+fn order_mismatches(predicates: [text]) -> [text]:
+    var out: [text] = []
+    for predicate in predicates:
+        for probe in probe_functions():
+            if probe.attrs.contains("inline") and mir_matches(predicate, probe):
+                var expected = "m,z"
+                if aop_predicate_specificity_v1(predicate) > aop_predicate_specificity_v1("@inline"):
+                    expected = "z,m"
+                if mir_order("@inline", predicate, probe) != expected:
+                    out.push("{predicate} on {probe.name}")
+    out
 
 # The shard matcher over the one forward fact of the same function.
 fn shard_matches(predicate: text, probe: ProbeFn) -> bool:
@@ -214,7 +258,7 @@ describe "Lowering a mir-family predicate into the shard selector":
         expect(aop_predicate_lower_v1("execution(run_fast)").supported).to_equal(false)
 
 describe "Equivalent spellings share one PointcutSelectorId":
-    it "gives the mir spellings of one function the logical selector's digest":
+    it "gives match-equivalent mir spellings of one function the logical selector digest":
         # @capture(exec): the compared match results and digests
         step("Compare the ids of four spellings with the logical-family selector digest")
         # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
@@ -261,10 +305,40 @@ describe "Equivalent spellings share one PointcutSelectorId":
         expect(aop_selector_id_v1("module:app.*") == aop_selector_id_v1("effect:app.*")).to_equal(false)
         expect(aop_selector_id_v1("execution(* app.run(..))") == aop_selector_id_v1("execution(* app.stop(..))")).to_equal(false)
 
+describe "Selector identity does not cover weave order":
+    it "lets a respelling with the same selector id flip equal-priority advice":
+        # @capture(exec): selector ids and woven order of both spellings
+        step("Weave two equal-priority rules on run, with the first rule spelled with and without a star")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        val run = ProbeFn(name: "run", attrs: [])
+        expect(aop_selector_id_v1("execution(* run(..))")).to_equal(aop_selector_id_v1("execution(i64 run())"))
+        expect(mir_order("execution(* run(..))", "run", run)).to_equal("z,m")
+        expect(mir_order("execution(i64 run())", "run", run)).to_equal("m,z")
+
+    it "reports the rank that decides that order, also for a star in a trailing comment":
+        # @capture(exec): specificity of each spelling and the woven order
+        step("Read the specificity of four spellings of one selector and weave the commented one")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        val run = ProbeFn(name: "run", attrs: [])
+        expect(aop_predicate_specificity_v1("execution(* run(..))")).to_equal(1)  # oracle: 1 - the spelling contains a star
+        expect(aop_predicate_specificity_v1("execution(i64 run())")).to_equal(4)  # oracle: 4 - exact spelling without a star
+        expect(aop_predicate_specificity_v1("run")).to_equal(4)  # oracle: 4 - exact spelling without a star
+        expect(aop_predicate_specificity_v1("execution(i64 run()) # *")).to_equal(1)  # oracle: 1 - the star is in the comment
+        expect(aop_selector_id_v1("execution(i64 run()) # *")).to_equal(aop_selector_id_v1("execution(i64 run())"))
+        expect(mir_order("execution(i64 run()) # *", "run", run)).to_equal("z,m")
+
+    it "orders every expressible predicate as its specificity predicts":
+        # @capture(exec): predicates whose woven order differs from the predicted one
+        step("Weave each expressible predicate against an equal-priority attribute rule on every probe function")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        expect(order_mismatches(expressible_corpus())).to_equal([])
+        expect(mir_order("@inline", "run_fast", ProbeFn(name: "run_fast", attrs: ["inline"]))).to_equal("z,m")
+        expect(mir_order("@inline", "run*", ProbeFn(name: "run_fast", attrs: ["inline"]))).to_equal("m,z")
+
 describe "The retired selector digest":
-    it "has no definition and no caller left in the compiler sources":
+    it "is gone from the file that defined it and from the file that called it":
         # @capture(exec): the compared match results and digests
-        step("Read the two former owners and require the retired name to be absent")
+        step("Read the former defining file and the former calling file and require the retired name to be absent")
         # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
         val keys = file_read("src/compiler/85.mdsoc/aop_cache/aop_group_keys.spl") ?? ""
         val index = file_read("src/compiler/85.mdsoc/aop_index/reverse_index.spl") ?? ""
