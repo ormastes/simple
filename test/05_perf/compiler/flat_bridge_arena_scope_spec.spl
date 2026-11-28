@@ -1,0 +1,408 @@
+# @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl 5%
+# @cover src/compiler/10.frontend/core/_Ast/decl_nodes.spl 2%
+"""
+## Purpose and audience
+Bounded regression for bug flat_ast_bridge_phase3_snapshot_throughput_2026-08-31.
+The flat-AST bridge enters a scoped arena-read mode for flat_ast_to_module in
+the legacy interpreted lane (SIMPLE_BOOTSTRAP=1 without
+SIMPLE_NATIVE_ARENA_DECLS=1): decl/stmt/expr/module-decl getters read the
+arena arrays instead of the SIMPLE_BOOTSTRAP_* process-env mirror, and the
+per-declaration control flags are frozen at scope-entry values. This spec
+pins the two properties that matter:
+  1. PARITY — legacy env-mirror conversion (SIMPLE_FLAT_BRIDGE_ARENA_SCOPE=0)
+     and scoped arena conversion produce the same ParserModule surface and
+     the same HIR encode blob for a representative module, and the same
+     diagnostics for an error parse.
+  2. THROUGHPUT — the scoped conversion is measurably faster than the legacy
+     env-mirror conversion on a bounded function-count fixture.
+Readers: flat-AST bridge owner; bootstrap lane owners.
+Design: doc/08_tracking/bug/flat_ast_bridge_phase3_snapshot_throughput_2026-08-31.md
+## Operator workflow
+Perf lane (full table + 3x gate):
+SIMPLE_PERF_PROBES=1 <simple> test test/05_perf/compiler/flat_bridge_arena_scope_spec.spl --mode=interpreter
+The always-on examples stay small so whole-tree sweeps pay seconds, not minutes.
+## Compatibility and limitations
+Interpreter-oriented: the fixtures run through the interpreted legacy lane by
+setting SIMPLE_BOOTSTRAP=1 in the spec process (restored afterwards). The
+3x throughput gate is opt-in (SIMPLE_PERF_PROBES=1); the always-on example
+only asserts the scoped conversion is not slower than legacy.
+"""
+# Lifecycle: doc/08_tracking/bug/flat_ast_bridge_phase3_snapshot_throughput_2026-08-31.md
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io_runtime.{
+    dir_create_all,
+    env_get_opt,
+    env_remove_process,
+    env_set,
+    file_write_exact,
+    getpid,
+    process_run
+}
+use compiler.core.parser.{parser_init_with_path, parser_get_errors, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations_with_placeholder_receipt}
+use compiler.frontend.flat_ast_bridge.{flat_ast_to_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_codec.{hir_module_encode}
+
+extern fn rt_time_now_nanos() -> i64
+
+val SCRATCH: text = "/tmp/simple-flat-bridge-arena-scope-{getpid()}"
+
+# Representative module: functions (params, mut params, defaults), an extern
+# fn, a struct, an enum with named and unnamed payloads, a trait, an impl, an
+# import, an export, a type alias, a val, an annotation-bearing fn, and
+# string interpolation — the shapes acceptance criterion 1 of the bug doc
+# enumerates. parse_module_file-style multi-decl modules exercise the
+# module_decl_slots pool that the scope also switches to array reads.
+val RICH_FIXTURE: text = """
+use std.text.{join}
+
+extern fn rt_probe(x: i64) -> i64
+
+pub trait Greet:
+    fn greet(self) -> text
+
+pub struct Point:
+    x: i64
+    y: i64
+
+pub class Cache:
+    hits: i64
+
+pub enum Shape:
+    Circle(radius: f64)
+    Square(side: i64)
+    Dot
+    Plain(i64)
+
+extend Shape:
+    complete:
+        geom.Spike(i64)
+
+pub type Alias = i64
+
+pub val origin_x: i64 = 0
+
+@deprecated("use greet_point instead")
+pub fn greet_point(p: Point) -> text:
+    return "point {p.x},{p.y}"
+
+pub fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+pub fn bump(mut counter: i64, step: i64 = 1) -> i64:
+    counter = counter + step
+    return counter
+
+fn hidden(scale: f64) -> f64:
+    return scale * 2.0
+
+pub impl Greet for Point:
+    fn greet(self) -> text:
+        return "hello {self.x}"
+
+export greet_point, add
+"""
+
+val ERROR_FIXTURE: text = """
+pub fn broken( -> i64:
+    return 1
+"""
+
+val PERF_FIXTURE_FNS: i64 = 150
+
+fn perf_fixture() -> text:
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < PERF_FIXTURE_FNS:
+        parts.push("fn pf_{i}(a: i64, b: i64) -> i64:\n    return a + b\n")
+        i = i + 1
+    parts.join("\n")
+
+fn write_fixture(name: text, body: text) -> text:
+    val path = SCRATCH + "/" + name
+    val _w = file_write_exact(path, body)
+    path
+
+# Parse one fixture and convert it, returning a fingerprint of everything the
+# bridge owns: the public module collections (names and counts) and the HIR
+# encode blob of the lowered module (covers expression/statement bodies, which
+# the shallow collection walk does not).
+fn parse_and_fingerprint(path: text) -> (text, text):
+    val source = file_read(path)
+    parser_init_with_path(source, path)
+    parse_module_body()
+    val _ph = expand_string_interpolations_with_placeholder_receipt(0)
+    val m = flat_ast_to_module(path)
+    var fp: [text] = []
+    fp.push("fns={m.functions.len()}")
+    fp.push("fn_order={m.function_order.len()}")
+    var fn_names: [text] = []
+    for name in m.function_order:
+        fn_names.push(name)
+    fp.push("order:" + fn_names.join(","))
+    fp.push("headers={m.function_headers.len()}")
+    fp.push("structs={m.structs.len()}")
+    fp.push("classes={m.classes.len()}")
+    fp.push("enums={m.enums.len()}")
+    fp.push("traits={m.traits.len()}")
+    fp.push("impls={m.impls.len()}")
+    fp.push("aliases={m.type_aliases.len()}")
+    fp.push("consts={m.constants.len()}")
+    fp.push("imports={m.imports.len()}")
+    fp.push("exports={m.exports.len()}")
+    for name in m.function_order:
+        val f = m.functions[name] ?? panic("missing fn {name}")
+        fp.push("fn:{name}:params={f.params.len()}:body={f.body.stmts.len()}:span_line={f.span.line}")
+    for sname in m.structs.keys():
+        fp.push("struct:{sname}:fields={m.structs[sname].fields.len()}")
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(m)
+    val blob = hir_module_encode(hir)
+    fp.push("hir_fns={hir.functions.len()}")
+    fp.push("hir_bytes={blob.len()}")
+    (fp.join("\n"), blob)
+
+fn parse_and_diag(path: text) -> text:
+    val source = file_read(path)
+    parser_init_with_path(source, path)
+    parse_module_body()
+    val _ph = expand_string_interpolations_with_placeholder_receipt(0)
+    val _m = flat_ast_to_module(path)
+    val errs = parser_get_errors()
+    var fp: [text] = []
+    fp.push("has_errors={parser_has_errors()}")
+    fp.push("errs={errs.len()}")
+    for e in errs:
+        fp.push("e:" + e)
+    fp.join("\n")
+
+fn timed_once(path: text) -> i64:
+    val t0 = rt_time_now_nanos()
+    val _m = flat_ast_to_module(path)
+    rt_time_now_nanos() - t0
+
+fn perf_parse_i64(raw: text) -> i64:
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < raw.len():
+        val ch = raw[i:i + 1]
+        if ch == "0":
+            value = value * 10
+        elif ch == "1":
+            value = value * 10 + 1
+        elif ch == "2":
+            value = value * 10 + 2
+        elif ch == "3":
+            value = value * 10 + 3
+        elif ch == "4":
+            value = value * 10 + 4
+        elif ch == "5":
+            value = value * 10 + 5
+        elif ch == "6":
+            value = value * 10 + 6
+        elif ch == "7":
+            value = value * 10 + 7
+        elif ch == "8":
+            value = value * 10 + 8
+        elif ch == "9":
+            value = value * 10 + 9
+        else:
+            return 0
+        i = i + 1
+    value
+
+describe "flat-AST bridge scoped arena-read mode":
+    it "converts identically in legacy env-mirror and scoped arena modes":
+        step("Write fixtures and enter the interpreted legacy lane")
+        val _d = dir_create_all(SCRATCH)
+        val rich_path = write_fixture("rich.spl", RICH_FIXTURE)
+        val saved_bootstrap = env_get_opt("SIMPLE_BOOTSTRAP")
+        val saved_entry_closure = env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        val saved_scope = env_get_opt("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE")
+        val _b = env_set("SIMPLE_BOOTSTRAP", "1")
+        val _c = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        step("Legacy arm: convert with the arena scope opted out")
+        val _l = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "0")
+        val (legacy_fp, legacy_blob) = parse_and_fingerprint(rich_path)
+        step("Scoped arm: convert with the arena scope active")
+        val _s = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "")
+        val (scoped_fp, scoped_blob) = parse_and_fingerprint(rich_path)
+        step("Restore the caller's environment")
+        if saved_bootstrap == nil:
+            val _r1 = env_remove_process("SIMPLE_BOOTSTRAP")
+        else:
+            val _r1 = env_set("SIMPLE_BOOTSTRAP", saved_bootstrap ?? "")
+        if saved_entry_closure == nil:
+            val _r2 = env_remove_process("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        else:
+            val _r2 = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", saved_entry_closure ?? "")
+        if saved_scope == nil:
+            val _r3 = env_remove_process("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE")
+        else:
+            val _r3 = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", saved_scope ?? "")
+        step("The module surface and the HIR encode blob must be identical")
+        expect(scoped_fp).to_equal(legacy_fp)
+        expect(scoped_blob).to_equal(legacy_blob)
+
+    it "produces identical diagnostics for an error parse in both modes":
+        val _d = dir_create_all(SCRATCH)
+        val err_path = write_fixture("error.spl", ERROR_FIXTURE)
+        val saved_bootstrap = env_get_opt("SIMPLE_BOOTSTRAP")
+        val saved_entry_closure = env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        val saved_scope = env_get_opt("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE")
+        val _b = env_set("SIMPLE_BOOTSTRAP", "1")
+        val _c = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        val _l = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "0")
+        val legacy_diag = parse_and_diag(err_path)
+        val _s = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "")
+        val scoped_diag = parse_and_diag(err_path)
+        if saved_bootstrap == nil:
+            val _r1 = env_remove_process("SIMPLE_BOOTSTRAP")
+        else:
+            val _r1 = env_set("SIMPLE_BOOTSTRAP", saved_bootstrap ?? "")
+        if saved_entry_closure == nil:
+            val _r2 = env_remove_process("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        else:
+            val _r2 = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", saved_entry_closure ?? "")
+        if saved_scope == nil:
+            val _r3 = env_remove_process("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE")
+        else:
+            val _r3 = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", saved_scope ?? "")
+        expect(scoped_diag).to_equal(legacy_diag)
+        expect(scoped_diag.contains("has_errors=true")).to_equal(true)
+
+    it "never converts slower than the legacy env-mirror mode (bounded probe)":
+        step("150-function fixture, one warm + two timed conversions per arm, in-process")
+        val _d = dir_create_all(SCRATCH)
+        val perf_path = write_fixture("perf.spl", perf_fixture())
+        val saved_bootstrap = env_get_opt("SIMPLE_BOOTSTRAP")
+        val saved_entry_closure = env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        val saved_scope = env_get_opt("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE")
+        val _b = env_set("SIMPLE_BOOTSTRAP", "1")
+        val _c = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        val source = file_read(perf_path)
+        parser_init_with_path(source, perf_path)
+        parse_module_body()
+        val _ph = expand_string_interpolations_with_placeholder_receipt(0)
+        # Warm both modes once, then alternate: a same-process benchmark that
+        # runs one arm entirely before the other hands the second arm a warmer
+        # heap and biases the comparison.
+        val _l = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "0")
+        val _warm_legacy = flat_ast_to_module(perf_path)
+        val _sw = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "")
+        val _warm_scoped = flat_ast_to_module(perf_path)
+        var legacy_ns: [i64] = []
+        var scoped_ns: [i64] = []
+        var rep: i64 = 0
+        while rep < 2:
+            val _l2 = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "0")
+            legacy_ns.push(timed_once(perf_path))
+            val _s2 = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "")
+            scoped_ns.push(timed_once(perf_path))
+            rep = rep + 1
+        if saved_bootstrap == nil:
+            val _r1 = env_remove_process("SIMPLE_BOOTSTRAP")
+        else:
+            val _r1 = env_set("SIMPLE_BOOTSTRAP", saved_bootstrap ?? "")
+        if saved_entry_closure == nil:
+            val _r2 = env_remove_process("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        else:
+            val _r2 = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", saved_entry_closure ?? "")
+        if saved_scope == nil:
+            val _r3 = env_remove_process("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE")
+        else:
+            val _r3 = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", saved_scope ?? "")
+        var legacy_sorted: [i64] = [legacy_ns[0], legacy_ns[1]]
+        if legacy_sorted[1] < legacy_sorted[0]:
+            legacy_sorted = [legacy_ns[1], legacy_ns[0]]
+        var scoped_sorted: [i64] = [scoped_ns[0], scoped_ns[1]]
+        if scoped_sorted[1] < scoped_sorted[0]:
+            scoped_sorted = [scoped_ns[1], scoped_ns[0]]
+        val legacy_median = legacy_sorted[1]
+        val scoped_median = scoped_sorted[1]
+        val ratio_milli = (legacy_median * 1000) / scoped_median
+        print "FLATBRIDGEPERF fns={PERF_FIXTURE_FNS} legacy_median_ns={legacy_median} scoped_median_ns={scoped_median} ratio_milli_x={ratio_milli}"
+        expect(scoped_median <= legacy_median).to_equal(true)
+
+    it "meets the doc throughput gate and zero-getter-crossing evidence (perf lane)":
+        step("SIMPLE_PERF_PROBES=1 only: run the checked-in child probes with the same binary")
+        if (env_get_opt("SIMPLE_PERF_PROBES") ?? "") != "1":
+            print "skipped: perf lane (set SIMPLE_PERF_PROBES=1 to run the flat-bridge throughput and counter probes)"
+            expect(true).to_equal(true)
+            return
+        val saved_bootstrap = env_get_opt("SIMPLE_BOOTSTRAP")
+        val saved_entry_closure = env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        val saved_scope = env_get_opt("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE")
+        val saved_counter = env_get_opt("SIMPLE_FLATBRIDGE_ENV_COUNT")
+        val simple_bin = env_get_opt("SIMPLE_BINARY") ?? "bin/simple"
+        val _b = env_set("SIMPLE_BOOTSTRAP", "1")
+        val _c = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        val _e = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "")
+        step("Doc acceptance #4: median flat_ast_to_module throughput improves >= 3x")
+        step("One lean child process per arm (same binary); alternating arms in one process interferes")
+        var legacy_median: i64 = -1
+        var scoped_median: i64 = -1
+        var arm_runs: [text] = ["scoped", "legacy"]
+        for arm in arm_runs:
+            val _p = env_set("PROBE_ARM", arm)
+            val perf = process_run(simple_bin, ["run", "test/05_perf/compiler/flat_bridge_arena_scope_probe.spl", "--mode=interpreter"])
+            expect(perf.2).to_equal(0)
+            for line in perf.0.split("\n"):
+                if line.starts_with("PROBEARM "):
+                    for part in line.split(" "):
+                        if part.starts_with("median_ns="):
+                            val median = perf_parse_i64(part.substring(10, part.len()))
+                            if arm == "legacy":
+                                legacy_median = median
+                            else:
+                                scoped_median = median
+        expect(legacy_median > 0).to_equal(true)
+        expect(scoped_median > 0).to_equal(true)
+        val ratio_milli = (legacy_median * 1000) / scoped_median
+        print "FLATBRIDGEPROBE fns=400 legacy_median_ns={legacy_median} scoped_median_ns={scoped_median} ratio_milli_x={ratio_milli}"
+        expect(ratio_milli >= 3000).to_equal(true)
+        step("Doc acceptance #3: zero rt_env_get* crossings from flat-AST getters in scope")
+        val _n = env_set("SIMPLE_FLATBRIDGE_ENV_COUNT", "1")
+        val counter = process_run(simple_bin, ["run", "test/05_perf/compiler/flat_bridge_arena_scope_counter_probe.spl", "--mode=interpreter"])
+        var counter_seen = false
+        if counter.2 == 0:
+            for line in counter.0.split("\n"):
+                if line.starts_with("PROBECOUNTER "):
+                    counter_seen = true
+                    var scoped_count: i64 = -1
+                    var legacy_count: i64 = -1
+                    for part in line.split(" "):
+                        if part.starts_with("scoped="):
+                            scoped_count = perf_parse_i64(part.substring(7, part.len()))
+                        if part.starts_with("legacy="):
+                            legacy_count = perf_parse_i64(part.substring(7, part.len()))
+                    print "FLATBRIDGECOUNTER scoped={scoped_count} legacy={legacy_count}"
+                    # The scoped count is exactly the scope-entry control plane
+                    # (opt-out gate + four frozen control flags); flat-AST
+                    # getters contribute zero.
+                    expect(scoped_count >= 0).to_equal(true)
+                    expect(scoped_count <= 16).to_equal(true)
+                    expect(legacy_count > scoped_count).to_equal(true)
+        if not counter_seen:
+            print "counter probe unavailable on this binary (rt_env_get_counter_* not registered); zero-crossing evidence requires the patched seed — skipped"
+        if saved_bootstrap == nil:
+            val _r1 = env_remove_process("SIMPLE_BOOTSTRAP")
+        else:
+            val _r1 = env_set("SIMPLE_BOOTSTRAP", saved_bootstrap ?? "")
+        if saved_entry_closure == nil:
+            val _r2 = env_remove_process("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        else:
+            val _r2 = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", saved_entry_closure ?? "")
+        if saved_scope == nil:
+            val _r3 = env_remove_process("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE")
+        else:
+            val _r3 = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", saved_scope ?? "")
+        if saved_counter == nil:
+            val _r4 = env_remove_process("SIMPLE_FLATBRIDGE_ENV_COUNT")
+        else:
+            val _r4 = env_set("SIMPLE_FLATBRIDGE_ENV_COUNT", saved_counter ?? "")

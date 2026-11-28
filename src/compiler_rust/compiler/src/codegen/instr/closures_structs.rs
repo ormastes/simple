@@ -648,6 +648,34 @@ pub(crate) fn compile_indirect_call<M: Module>(
     let closure_ptr = get_vreg_or_default(ctx, builder, &callee);
     let fn_ptr = call_runtime_1(ctx, builder, "rt_closure_func_ptr", closure_ptr);
 
+    // A NULL func pointer means the callee value is not a function or closure
+    // at all. Calling through it jumps to address zero and SIGSEGVs the
+    // process (exit 139): a non-callable scalar/text value can reach an
+    // indirect call even though the interpreter rejects the same program with
+    // a diagnostic — e.g. `pass(4)` parses as `()(4)` and `val n = 5; n(4)`
+    // keeps an i64 callee all the way down. Branch to a runtime refusal that
+    // prints the shared "value is not callable" diagnostic and exits
+    // EX_SOFTWARE, mirroring rt_function_not_found, instead of jumping.
+    // Bug: seed_jit_call_to_function_named_pass_segfaults_2026-11-28.
+    let call_block = builder.create_block();
+    let refuse_block = builder.create_block();
+    let merge_block = builder.create_block();
+    let fn_ptr_is_null =
+        builder
+            .ins()
+            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, fn_ptr, 0);
+    builder.ins().brif(fn_ptr_is_null, refuse_block, &[], call_block, &[]);
+
+    // Refuse path: loud runtime diagnostic, never returns.
+    builder.switch_to_block(refuse_block);
+    builder.seal_block(refuse_block);
+    call_runtime_1(ctx, builder, "rt_value_not_callable", closure_ptr);
+    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(14));
+
+    // Call path: the existing boxed-entry indirect call.
+    builder.switch_to_block(call_block);
+    builder.seal_block(call_block);
+
     let mut sig = Signature::new(ctx.module.isa().default_call_conv());
     sig.params.push(AbiParam::new(types::I64));
     for _ in param_types {
@@ -665,14 +693,29 @@ pub(crate) fn compile_indirect_call<M: Module>(
     }
 
     let call = builder.ins().call_indirect(sig_ref, fn_ptr, &call_args);
-    if let Some(d) = dest {
+    let result = if dest.is_some() {
         let tagged = builder.inst_results(call)[0];
-        let raw = if return_type == TypeId::VOID {
+        if return_type == TypeId::VOID {
             tagged
         } else {
             unbox_from_closure_boundary(ctx, builder, tagged, return_type)
-        };
-        ctx.vreg_values.insert(*d, raw);
+        }
+    } else {
+        builder.inst_results(call)[0]
+    };
+    if dest.is_some() {
+        // The merge param takes the call result's ACTUAL type (e.g. f64 for a
+        // float-returning callee), not a fixed I64.
+        builder.append_block_param(merge_block, builder.func.dfg.value_type(result));
+        builder.ins().jump(merge_block, &[result]);
+    } else {
+        builder.ins().jump(merge_block, &[]);
+    }
+
+    builder.switch_to_block(merge_block);
+    builder.seal_block(merge_block);
+    if let Some(d) = dest {
+        ctx.vreg_values.insert(*d, builder.block_params(merge_block)[0]);
     }
 }
 

@@ -8,6 +8,7 @@ use std.nogc_sync_mut.io.file_ops.{file_exists}
 use app.io.env_ops.{env_get, env_set}
 use app.io.process_ops.{process_run_timeout}
 use app.io.cli_ops.{cli_current_exe_path}
+use app.io.time_ops.{time_now_micros}
 use std.cli.log_modes.{parse_log_options}
 use app.cli.check_options.{check_option_error, check_worker_args, check_presentation_args}
 use app.check.targets.{expand_check_targets}
@@ -273,11 +274,38 @@ fn run_worker(worker_bin: text, worker_args: [text], timeout_ms: i64) -> (text, 
         return process_run_timeout(fallback, worker_args, timeout_ms)
     (stdout, stderr, code)
 
-fn run_single_worker(worker_bin: text, args: [text], as_json: bool) -> i64:
+# Progress receipts for the composed command. The entry only observes whole
+# worker invocations (their output is captured until each returns), so it
+# reports around every spawn instead of inside one; the worker itself reports
+# per file/per phase on its own stderr. Receipts reuse the worker's
+# event=check_phase shape (see
+# doc/08_tracking/bug/full_compiler_check_no_progress_over_five_minutes_2026-08-21.md)
+# and go to stderr, so --json stdout stays machine-readable.
+fn check_progress_enabled(args: [text], as_json: bool) -> bool:
+    if as_json:
+        return false
+    parse_log_options(args).progress != "none"
+
+fn check_progress_mark(enabled: bool, phase: text, started_us: i64, done: i64, total: i64, current: text, terminal: text) -> i64:
+    if not enabled:
+        return started_us
+    val now_us = time_now_micros()
+    val elapsed_ms = (now_us - started_us) / 1000
+    eprint "event=check_phase phase={phase} elapsed_ms={elapsed_ms} done={done} total={total} current={current} terminal={terminal}"
+    now_us
+
+fn run_single_worker(worker_bin: text, args: [text], as_json: bool, receipts: bool, current: text) -> i64:
     var worker_args = ["run", worker_entry_path()]
     for arg in args:
         worker_args.push(arg)
+    var mark_us: i64 = 0
+    if receipts:
+        mark_us = time_now_micros()
+        val _start_mark = check_progress_mark(true, "file_start", mark_us, 0, 1, current, "running")
     val (stdout, stderr, code) = run_worker(worker_bin, worker_args, CHECK_WORKER_TIMEOUT_MS)
+    if receipts:
+        val terminal = if code == 0: "succeeded" else: "failed"
+        val _done_mark = check_progress_mark(true, "file_done", mark_us, 1, 1, current, terminal)
     print_bounded_stdout(stdout, as_json)
     if code != 0:
         print_worker_failure(worker_bin, code, stdout, stderr)
@@ -287,7 +315,10 @@ fn run_worker_chunk(
     worker_bin: text,
     args: [text],
     chunk: [text],
-    as_json: bool
+    as_json: bool,
+    receipts: bool,
+    checked: i64,
+    total: i64
 ) -> i64:
     var worker_args = ["run", worker_entry_path()]
     for file in chunk:
@@ -295,7 +326,15 @@ fn run_worker_chunk(
     for arg in check_presentation_args(args):
         worker_args.push(arg)
     var timeout_ms = CHECK_WORKER_TIMEOUT_MS + chunk.len() * CHECK_CHUNK_TIMEOUT_PER_FILE_MS
+    var mark_us: i64 = 0
+    if receipts:
+        mark_us = time_now_micros()
+        val _start_mark = check_progress_mark(true, "chunk_start", mark_us, checked, total, chunk[0], "running")
     val (stdout, stderr, code) = run_worker(worker_bin, worker_args, timeout_ms)
+    if receipts:
+        val terminal = if code == 0: "succeeded" else: "failed"
+        val done_now = if code == 0: checked + chunk.len() else: checked
+        val _done_mark = check_progress_mark(true, "chunk_done", mark_us, done_now, total, chunk[0], terminal)
     # A failing multi-file chunk is re-run one file at a time by the caller, so
     # printing here would duplicate every diagnostic. Single-file invocations
     # are terminal and always print.
@@ -322,19 +361,22 @@ fn main() -> i64:
         return 0
 
     val as_json = parse_log_options(args).log_mode == "json"
+    val receipts = check_progress_enabled(args, as_json)
     val files = check_files_from_args(args)
     val worker_bin = require_worker_binary()
     if worker_bin == "":
         return 1
     if files.len() == 0:
-        return run_single_worker(worker_bin, args, as_json)
+        return run_single_worker(worker_bin, args, as_json, receipts, "worker")
 
     val (expanded_files, empty_directories) = expand_check_targets(files)
     if expanded_files.len() == 1 and empty_directories.len() == 0:
         return run_single_worker(
             worker_bin,
             check_worker_args(args, expanded_files[0]),
-            as_json
+            as_json,
+            receipts,
+            expanded_files[0]
         )
 
     var checked = 0
@@ -351,7 +393,7 @@ fn main() -> i64:
             chunk.push(expanded_files[i])
             i = i + 1
         chunk_start = i
-        val chunk_code = run_worker_chunk(worker_bin, args, chunk, as_json)
+        val chunk_code = run_worker_chunk(worker_bin, args, chunk, as_json, receipts, checked, expanded_files.len())
         if chunk_code == 0:
             checked = checked + chunk.len()
         else:
@@ -359,7 +401,7 @@ fn main() -> i64:
             # members one at a time to recover per-file attribution and to
             # isolate a file that crashed or timed out the shared worker.
             for file in chunk:
-                val single_code = run_worker_chunk(worker_bin, args, [file], as_json)
+                val single_code = run_worker_chunk(worker_bin, args, [file], as_json, receipts, checked, expanded_files.len())
                 checked = checked + 1
                 if single_code != 0:
                     errors = errors + 1

@@ -1,0 +1,172 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Reproducing + class-detection spec for:
+#   doc/08_tracking/bug/db/seed_jit_call_to_function_named_pass_segfaults_2026-11-28.sdn
+#
+# ROW 1 (the filed repro):
+#   A call to a user function named `pass` segfaulted under the seed JIT
+#   (rc 139) while the interpreter rejected it with "value is not callable".
+#   Minimal: fn pass(o: i64) -> i64: o + 1 / fn main(): print(pass(4)).
+#   Two halves now cover it, both required by the record's fix direction:
+#   (a) parser/MIR (landed with the record): module-level `fn pass` is a
+#       compile error ("reserved keyword 'pass' cannot be used as a function
+#       name"), and a tuple/unit callee (`pass(4)` parses as `()(4)`) is a
+#       MIR lowering error ("value is not callable") — so the shape can never
+#       reach the JIT as an indirect call through a non-pointer.
+#   (b) JIT/codegen (this spec's fence): the Cranelift indirect-call lowering
+#       (src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs::
+#       compile_indirect_call) branches on `rt_closure_func_ptr` answering
+#       NULL and calls the runtime refusal `rt_value_not_callable`
+#       (src/compiler_rust/runtime/src/value/sffi/error_handling.rs), which
+#       prints the interpreter's wording and exits EX_SOFTWARE (70) — never
+#       jumping through address zero.
+#
+# ROW 2 (the open class member the JIT guard actually catches):
+#   A non-callable SCALAR callee still reached the JIT untouched
+#   (doc/08_tracking/bug/db/seed_jit_call_through_non_callable_scalar_segfaults_2026-11-28.sdn):
+#   `val n = 5; print(n(4))` and `val s = "x"; print(s(4))` SIGSEGV'd (rc 139)
+#   on the strict JIT lane while the interpreter diagnosed them. These are
+#   runtime refusals now: rc=70 + "value is not callable", on both strict and
+#   default JIT lanes.
+#
+# WHY A SUBPROCESS. Spec bodies run on the tree-walk interpreter, which is
+# CORRECT for every row here. An in-process example can never observe the JIT
+# lane at all, and the refusal path terminates the process. Each case is
+# driven as its own subprocess so that one unsupported construct cannot
+# demote the program off the JIT.
+#
+# Exit codes are captured from the command under test, never through a pipe.
+#
+# RE-VERIFICATION RECIPE (manual, against a scratch seed build of the tree):
+#   cd src/compiler_rust
+#   CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+#   CARGO_TARGET_DIR=$PWD/../../build/p3cache/passname/cargo-target \
+#     cargo build --release -p simple-driver
+#   BIN=$PWD/../../build/p3cache/passname/cargo-target/release/simple.exe
+#   printf 'fn pass(o: i64) -> i64: o + 1\n\nfn main():\n    print(pass(4))\n' > /tmp/repro.spl
+#   SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 "$BIN" run /tmp/repro.spl   # rc=1, reserved keyword
+#   printf 'fn main():\n    val n = 5\n    print(n(4))\n' > /tmp/repro.spl
+#   SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 "$BIN" run /tmp/repro.spl   # rc=70, "value is not callable" (was rc=139 SIGSEGV)
+#   SIMPLE_EXECUTION_MODE=interpreter "$BIN" run /tmp/repro.spl               # rc=1, clean diagnostic
+# Or run this spec (SIMPLE_BIN may point at the scratch build):
+#   SIMPLE_BIN="$BIN" "$BIN" test test/01_unit/compiler/codegen/jit_not_callable_callee_refusal_spec.spl
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+
+fn bin_path() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+# Returns "rc=<n>|<stdout+stderr>". `rc` is assigned on the line AFTER the
+# command so it is the compiler's status, not a pipeline member's.
+# `strict=1` adds SIMPLE_JIT_STRICT=1 (the lane from the filed repro).
+fn run_case(mode: text, src: text, strict: text) -> text:
+    val f = "/tmp/jit_not_callable_case.spl"
+    val write_cmd = "cat > " + f + " <<'SPLEOF'\n" + src + "\nSPLEOF"
+    process_run("sh", ["-c", write_cmd])
+    var strict_env = ""
+    if strict == "1":
+        strict_env = "SIMPLE_JIT_STRICT=1 "
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " + strict_env +
+        bin_path() + " run " + f + " > /tmp/jit_not_callable_case.out 2>&1\n" +
+        "rc=$?\n" +
+        "printf 'rc=%s|' \"$rc\"\n" +
+        "cat /tmp/jit_not_callable_case.out"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+val CONTROL: text = "fn add1(o: i64) -> i64: o + 1\n\nfn main():\n    print(add1(4))"
+val FN_PASS: text = "fn pass(o: i64) -> i64: o + 1\n\nfn main():\n    print(pass(4))"
+val BARE_PASS_CALL: text = "fn main():\n    print(pass(4))"
+val SCALAR_I64_CALLEE: text = "fn main():\n    val n = 5\n    print(n(4))"
+val SCALAR_TEXT_CALLEE: text = "fn main():\n    val s = \"x\"\n    print(s(4))"
+
+describe "the JIT refuses a non-callable callee instead of segfaulting":
+    # @manual scenario evidence
+    it "runs valid code on the JIT lane (non-vacuity control)":
+        # @req REQ-SSPEC-COMPILER
+        step("runs valid code on the JIT lane (non-vacuity control)")
+        step("A well-formed program must succeed on the JIT lane, proving the harness drives real execution")
+        expect(run_case("jit", CONTROL, "0")).to_contain("rc=0|")
+        expect(run_case("jit", CONTROL, "0")).to_contain("5")
+        expect(run_case("jit", CONTROL, "1")).to_contain("rc=0|")
+
+    it "never lets the filed pass-named repro near a JIT segfault":
+        # @req REQ-SSPEC-COMPILER
+        step("never lets the filed pass-named repro near a JIT segfault")
+        step("`fn pass` is reserved: the parser rejects the declaration before any codegen runs")
+        val jit = run_case("jit", FN_PASS, "1")
+
+        step("rc=139 is signal death; the correct verdict is a compile diagnostic")
+        expect(jit.contains("rc=139|")).to_equal(false)
+        expect(jit).to_contain("rc=1|")
+        expect(jit).to_contain("reserved keyword 'pass' cannot be used as a function name")
+
+        step("Both lanes agree; the interpreter is the reference verdict")
+        expect(run_case("interpreter", FN_PASS, "0")).to_contain("rc=1|")
+        expect(run_case("interpreter", FN_PASS, "0")).to_contain("reserved keyword 'pass'")
+
+    it "keeps a bare pass(4) call (parsed as ()(4)) a compile error, not a crash":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps a bare pass(4) call (parsed as ()(4)) a compile error, not a crash")
+        step("Without a declaration, `pass(4)` in expression position is a call of the unit literal")
+        val jit = run_case("jit", BARE_PASS_CALL, "1")
+
+        step("The MIR lowering refuses a tuple/unit callee with the interpreter's message")
+        expect(jit.contains("rc=139|")).to_equal(false)
+        expect(jit).to_contain("rc=1|")
+        expect(jit).to_contain("is not callable")
+
+        step("The interpreter reports the same class of verdict")
+        expect(run_case("interpreter", BARE_PASS_CALL, "0")).to_contain("rc=1|")
+
+    it "refuses a call through an i64 local on the JIT lane instead of jumping through it":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a call through an i64 local on the JIT lane instead of jumping through it")
+        step("`val n = 5; print(n(4))` SIGSEGV'd the strict JIT lane (rc 139) before the runtime refusal existed")
+        val jit = run_case("jit", SCALAR_I64_CALLEE, "1")
+
+        step("rc=139 is signal death; the JIT must now print the shared diagnostic and exit EX_SOFTWARE")
+        expect(jit.contains("rc=139|")).to_equal(false)
+        expect(jit).to_contain("rc=70|")
+        expect(jit).to_contain("value is not callable")
+
+        step("The default JIT lane takes the same runtime refusal")
+        val jit_default = run_case("jit", SCALAR_I64_CALLEE, "0")
+        expect(jit_default.contains("rc=139|")).to_equal(false)
+        expect(jit_default).to_contain("rc=70|")
+        expect(jit_default).to_contain("value is not callable")
+
+        step("The interpreter is the reference verdict: a clean diagnostic, never a crash")
+        val interp = run_case("interpreter", SCALAR_I64_CALLEE, "0")
+        expect(interp).to_contain("rc=1|")
+        expect(interp.contains("rc=139|")).to_equal(false)
+        expect(interp.contains("rc=0|")).to_equal(false)
+
+    it "refuses a call through a text local the same way":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a call through a text local the same way")
+        step("`val s = \"x\"; print(s(4))` was the second SIGSEGV shape in the same class")
+        val jit = run_case("jit", SCALAR_TEXT_CALLEE, "1")
+
+        step("Never signal death; the shared runtime refusal instead")
+        expect(jit.contains("rc=139|")).to_equal(false)
+        expect(jit).to_contain("rc=70|")
+        expect(jit).to_contain("value is not callable")
+
+        step("The interpreter diagnoses it cleanly too")
+        expect(run_case("interpreter", SCALAR_TEXT_CALLEE, "0")).to_contain("rc=1|")
+
+    it "never reports success for any member of the class":
+        # @req REQ-SSPEC-COMPILER
+        step("never reports success for any member of the class")
+        step("A wrong ANSWER (silent rc=0) is worse than a wrong error message — no non-callable-callee row may pass")
+        expect(run_case("jit", SCALAR_I64_CALLEE, "1").contains("rc=0|")).to_equal(false)
+        expect(run_case("jit", SCALAR_TEXT_CALLEE, "1").contains("rc=0|")).to_equal(false)
+        expect(run_case("jit", BARE_PASS_CALL, "1").contains("rc=0|")).to_equal(false)

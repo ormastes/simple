@@ -707,13 +707,79 @@ fn is_current_module_candidate(func: &Arc<FunctionDef>) -> bool {
     }
 }
 
+/// Runtime-tier library directories. Each runtime tier of the standard
+/// library re-declares its shim modules under its own family
+/// (`src/lib/<tier>/engine/render/shader.spl` and friends), and those
+/// per-tier declarations of one struct are intended to be interchangeable:
+/// a `gc_async_mut` value handed to a parameter typed by another tier's
+/// byte-identical shim is the same type, not a wrong-owner argument.
+const RUNTIME_TIER_DIRS: [&str; 9] = [
+    "gc_async_immut",
+    "gc_async_mut",
+    "gc_sync_immut",
+    "gc_sync_mut",
+    "nogc_async_immut",
+    "nogc_async_mut",
+    "nogc_async_mut_noalloc",
+    "nogc_sync_immut",
+    "nogc_sync_mut",
+];
+
+/// Whether the class registry owner path lives inside a runtime-tier library
+/// directory (the `src/lib/<tier>/` component of a normalized module path).
+fn is_runtime_tier_owner(owner: &str) -> bool {
+    // Anchored to a src/lib/<tier-family> prefix (normalized to '/'): any
+    // single path component must not qualify, or a user directory literally
+    // named `gc_async_mut` would satisfy the tier-owner leg of the
+    // tier-shim exemption.
+    let normalized = owner.replace('\\', "/");
+    let mut parts = normalized.split('/');
+    let src = parts.next() == Some("src") && parts.next() == Some("lib");
+    src && parts.next().is_some_and(|family| RUNTIME_TIER_DIRS.contains(&family))
+}
+
+/// Structural layout identity: same value/reference kind and the same field
+/// names in the same order with the same declared types.
+fn same_class_layout(a: &ClassDef, b: &ClassDef) -> bool {
+    a.is_value_type == b.is_value_type
+        && a.fields.len() == b.fields.len()
+        && a.fields.iter().zip(&b.fields).all(|(x, y)| x.name == y.name && x.ty == y.ty)
+}
+
+/// Tier-shim exemption predicate for `provable_class_rejection`. True when
+/// the value's class is one of a same-named family whose EVERY definition is
+/// declared inside runtime-tier shim directories and is layout-identical to
+/// the value's own definition. Same-name classes from anywhere else (user
+/// modules, test fixtures) never qualify: a genuinely different owner of an
+/// identically-laid-out class keeps its E1003 rejection. The value carries
+/// an owner-exact (`__spl_flat_...`) identity here: owner-exact matching can
+/// never succeed across tiers even though the shim declarations are
+/// byte-identical, so without the exemption every legitimate cross-tier
+/// call of the family reports a spurious "selects none of the overloads"
+/// (doc/08_tracking/bug/provable_class_rejection_rejects_tier_shim_structs_2026-11-28.md).
+fn tier_shim_family_equivalent(instance_class: &str) -> bool {
+    let source = crate::interpreter::flatten_owner_source_name(instance_class);
+    let defs = crate::interpreter::owned_class_candidates(source);
+    if defs.len() < 2 {
+        return false;
+    }
+    let Some((_, instance_def)) = defs.iter().find(|(_, def)| def.name == instance_class) else {
+        return false;
+    };
+    defs.iter()
+        .all(|(owner, def)| is_runtime_tier_owner(owner) && same_class_layout(def, instance_def))
+}
+
 /// A discriminating class-argument position where every arity-compatible
 /// candidate declares a typed parameter that rejects the value. Returns the
 /// demangled class name only when the mismatch is provable at runtime: the
 /// value carries a concrete class identity (an aggregate class, never an
 /// erased/untyped value) and no fallback dispatch could legitimately accept
 /// it. The per-candidate comparison mirrors `overload_score`'s owner-scoped
-/// walk, so a candidate can never disagree with the score that rejected it.
+/// walk, so a candidate can never disagree with the score that rejected it,
+/// except for the runtime-tier shim families above, whose owner-exact
+/// identity can never match across tiers (byte-identical per-tier
+/// re-declarations of one struct).
 /// Bug: interpreter_wrong_owner_arg_overload_fallthrough_2026_11_27.
 fn provable_class_rejection(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<String> {
     let owner_exact = crate::interpreter::renamed_classes_present()
@@ -730,7 +796,9 @@ fn provable_class_rejection(candidates: &[Arc<FunctionDef>], values: &[Value]) -
         let Some(class_name) = value.aggregate_class() else {
             continue;
         };
+        let value_source = crate::interpreter::flatten_owner_source_name(class_name);
         let mut saw_typed = false;
+        let mut saw_same_name = false;
         let mut accepted = false;
         for func in candidates {
             if !arity_ok(func) {
@@ -746,6 +814,11 @@ fn provable_class_rejection(candidates: &[Arc<FunctionDef>], values: &[Value]) -
                 break;
             };
             saw_typed = true;
+            if !saw_same_name {
+                if let Type::Simple(ty_name) | Type::Generic { name: ty_name, .. } = ty {
+                    saw_same_name = crate::interpreter::flatten_owner_source_name(ty_name) == value_source;
+                }
+            }
             let owner = self::core::function_exec::function_module_owner(func);
             let matched = if owner_exact {
                 crate::interpreter::with_exec_owner(owner, || value_matches_type(value, ty))
@@ -758,6 +831,14 @@ fn provable_class_rejection(candidates: &[Arc<FunctionDef>], values: &[Value]) -
             }
         }
         if saw_typed && !accepted {
+            // A discriminating parameter spelled with the value's own class
+            // name may still be a runtime-tier shim declaration: the
+            // owner-exact walk above can never match across tiers, so the
+            // fall-through dispatch (pre-2026-11-27 behavior) resolves the
+            // call instead of reporting a spurious rejection.
+            if owner_exact && saw_same_name && tier_shim_family_equivalent(class_name) {
+                continue;
+            }
             return Some(crate::interpreter::flatten_owner_source_name(class_name).to_string());
         }
     }
