@@ -1037,3 +1037,18 @@ integ25 Stage 2 -> Stage 3 (go-to-end) failed HIR on
 class statically. Details: [lib](../lib/skill.md) § "`std.io_runtime` facade
 imports" and
 `doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`.
+
+## Seed LLVM mangler: text builtin methods vs closure-wide free functions (2026-11-28)
+
+- `s.byte_len()` on a text reaches `mangle.rs` as `MethodCallStatic`
+  `str.byte_len`. The text-UFCS arm of `resolve_method_call_static` bound it to
+  the lone free `byte_len` in the closure-wide suffix index, imported or not;
+  `is_text_builtin_method_call` now keeps `byte_len` / `char_count` method calls
+  out of every closure-wide arm. Free calls (`MirInst::Call`) still bind
+  closure-wide by design (split-part facades have no use/import entry).
+- Reproduce on `--backend llvm` only: Cranelift and the JIT do not run
+  `mangle.rs`. A seed without `--features llvm` cannot show this class at all.
+- A small reproducer needs the Rust handler and a runtime archive:
+  `SIMPLE_NATIVE_BUILD_RUST=1 <seed> native-build --source src --entry
+  src/main.spl --backend llvm --runtime-path <dir with libsimple_runtime.a>`.
+- Bug: `doc/08_tracking/bug/seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28.md`.
