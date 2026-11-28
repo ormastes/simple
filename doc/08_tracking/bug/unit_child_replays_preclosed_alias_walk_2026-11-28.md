@@ -38,6 +38,22 @@ Binary: admitted Stage 2 compiler, sha256
 The walk did not finish under the cap, so its duration is "more than 63 s" here; the production log
 puts the whole load at 91-104 s, which leaves ~75 s for it. The cgroup figure is not process RSS.
 
+A smaller selection completes under the cap and isolates the walk (same binary, a 662-source
+entry closure, 762 rows in, 1059 out):
+
+| Point | Process time | Process RSS |
+|---|---|---|
+| `load_sources:preclosed:admitted` | +13.8 s | 0.81 GiB |
+| `load_sources:seeded` | +14.5 s | 0.88 GiB |
+| `load_sources:bulk:done` (alias walk finished) | +23.0 s | 2.29 GiB |
+| `load_sources ... complete` | +25.3 s | 2.47 GiB |
+
+The walk is 8.5 s and 1.4 GiB there, a third of the load and most of its memory. That child also
+spent 19 s of wall time before `compile:start`.
+
+A native probe that calls the new index code could not be built: its 662-module closure includes
+the compiler's HIR modules, and one unit's HIR lowering reached the 12 GiB cap (13 of 42 units done).
+
 Recipe: run the coordinator with `SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_PHASE_RSS=1` and its own
 `--cache-dir`, copy the first unit child's `/proc/<pid>/environ` and `cmdline`, stop the
 coordinator, drop `SIMPLE_NATIVE_WORKER_CHILD_PARENT_PID`, and re-run that child alone under
