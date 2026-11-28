@@ -21116,11 +21116,11 @@ int64_t rt_event_loop_poll(int64_t h, int64_t max_events, int64_t timeout_ms) {
 
 int64_t rt_event_loop_close(int64_t h) {
     RtEvLoop* lp = rt_ev_loop(h);
-    if (!lp) return -1;
+    if (!lp) return 0;
     int rc = close(lp->epfd);
     free(lp->regs);
     free(lp);
-    return (int64_t)rc;
+    return rc == 0 ? 1 : 0; /* bool ABI: Simple declares -> bool */
 }
 
 #elif defined(__APPLE__) || defined(__FreeBSD__)
@@ -21196,19 +21196,19 @@ int64_t rt_event_loop_poll(int64_t kqfd, int64_t max_events, int64_t timeout_ms)
 }
 
 int64_t rt_event_loop_close(int64_t kqfd) {
-    return (int64_t)close((int)kqfd);
+    return close((int)kqfd) == 0 ? 1 : 0; /* bool ABI */
 }
 
 #else
 
 int64_t rt_event_loop_create(void) { return -1; }
-int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode, int64_t token, int64_t edge) { (void)h; (void)fd; (void)mode; (void)token; (void)edge; return -1; }
-int64_t rt_event_loop_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
+int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode, int64_t token, int64_t edge) { (void)h; (void)fd; (void)mode; (void)token; (void)edge; return 0; }
+int64_t rt_event_loop_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return 0; }
 static int64_t poll_results[256];
 static int64_t poll_ready[256];
 static int64_t poll_tokens[256];
 int64_t rt_event_loop_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
-int64_t rt_event_loop_close(int64_t h) { (void)h; return -1; }
+int64_t rt_event_loop_close(int64_t h) { (void)h; return 0; } /* bool ABI: false */
 
 #endif
 
