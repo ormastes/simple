@@ -22,9 +22,9 @@ use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, sosix_contain_start_v1, sosix_contain_poll_v1, sosix_contain_cancel_v1, sosix_contain_collect_v1, sosix_contain_qualify_v1, sosix_contain_memory_cap_evidence_v1, SosixContainMemoryProbeV1}
 use std.nogc_sync_mut.sosix.contained_write_v1.{sosix_fs_grant_contained_write_v1, sosix_fs_grant_contained_read_v1}
 use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
-use std.nogc_sync_mut.storage.storage_view_v1.{StorageViewV1, ViewBytesV1, ViewFlagV1, storage_view_v1_create, storage_view_v1_destroy}
+use std.nogc_sync_mut.storage.storage_view_v1.{StorageViewV1, ViewBytesV1}
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1, immutable_store_v1_root_head}
-use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
+use std.nogc_sync_mut.container.view_share_v1.{container_view_create_v1, container_view_remove_v1, container_view_stop_v1}
 use std.nogc_sync_mut.sosix.fs_v1.{is_dir, file_exists, dir_create_all, dir_create_new, dir_remove_all, dir_is_real_no_follow, file_read_regular_no_follow_bounded, sosix_fs_hardlink, sosix_fs_write_file, file_delete, sosix_fs_host_os, sosix_fs_host_arch}
 use std.nogc_sync_mut.sosix.host.{sosix_getpid}
 # Accepted by design: the reader ACE the read grant puts on store objects survives teardown.
@@ -329,11 +329,9 @@ fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
         Err(reason): return _rejected_v1(spec, unadmitted, reason)
     val refusal = sosix_contain_request_reason_v1(request, support)
     if refusal != "": return _rejected_v1(spec, unadmitted, refusal)
-    var head_generation = StoreGenerationV1(0)
     if spec.base_root != "":
         val head = immutable_store_v1_root_head(spec.store, spec.base_root)
         if head.status != "ok": return _rejected_v1(spec, unadmitted, "base-" + head.reason)
-        head_generation = head.generation
     # Never adopt a directory this call did not create: a live or earlier container may own it.
     if is_dir(layout.plan.attempt_root): return _rejected_v1(spec, unadmitted, "attempt-exists")
     if is_dir(layout.view_dir) or file_exists(layout.view_dir): return _rejected_v1(spec, unadmitted, "view-exists")
@@ -348,17 +346,25 @@ fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
     if claimed != "ok": return _rejected_v1(spec, unadmitted, "scratch-create-failed")
     for dir in [layout.plan.home, layout.plan.tmp, layout.plan.output]:
         if not dir_create_all(dir): return _fail_prepare_v1(session, "scratch-create-failed")
-    val created = storage_view_v1_create(spec.store, spec.view_root, spec.container_id, spec.base_root,
-        head_generation, spec.quota)
-    if created.status != "ok": return _fail_prepare_v1(_after_create_refused_v1(session, created.reason), "view-" + created.reason)
+    # container_view_create_v1 owns the view dir and the pin: create, link the base, seal it
+    # read-only. A failure after the view exists is cleaned up inside it; only a cleanup that
+    # itself failed hands the view back to teardown.
+    val created = container_view_create_v1(spec.store, spec.view_root, spec.container_id, spec.base_root, spec.quota)
+    if created.status != "ok":
+        if created.reason.starts_with("view-"):
+            val raw = created.reason.substring(5, created.reason.byte_len())
+            return _fail_prepare_v1(_after_create_refused_v1(session, raw), created.reason)
+        if created.reason.contains("cleanup-failed"):
+            session = PureContainerSessionV1(spec: spec, view: created.view, request: request, report: unadmitted,
+                life: session.life, view_dir: layout.view_dir, attempt_root: layout.plan.attempt_root,
+                stdout_path: request.stdout_path)
+        return _fail_prepare_v1(session, created.reason)
     session = PureContainerSessionV1(spec: spec, view: created.view, request: request, report: unadmitted,
         life: session.life, view_dir: created.view.view_root + "/" + created.view.view_id,
         attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
     if session.view_dir != layout.view_dir: return _fail_prepare_v1(session, "view-layout-mismatch")
-    val rootfs = rootfs_materialize_v1(created.view, ViewFlagV1(true))
-    if rootfs.status != "ok": return _fail_prepare_v1(session, "rootfs-" + rootfs.reason)
     var evidence = spec.evidence
-    evidence.base_fully_linked = ContainerCapabilityFlagV1(rootfs.copied.value == 0 and rootfs.linked.value > 0)
+    evidence.base_fully_linked = ContainerCapabilityFlagV1(created.copied.value == 0 and created.linked.value > 0)
     val report = pure_container_capability_report_v1(support, evidence)
     session = PureContainerSessionV1(spec: spec, view: created.view, request: request, report: report,
         life: session.life, view_dir: layout.view_dir, attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
@@ -479,6 +485,14 @@ fn _finish_v1(session: PureContainerSessionV1, running: PureLifecycleV1, lease: 
         return _exec_stopped_v1(session, final_life, "cleanup-unproven", "tree-not-empty", receipt.exit_code, receipt.peak_memory)
     _exec_stopped_v1(session, final_life, "exited", reason, receipt.exit_code, receipt.peak_memory)
 
+# Save the session's view (upper over the base) as this container's own root; "" = saved. The
+# caller does this only when the job is terminal and the action is a real stop (never destroy).
+fn _save_view_v1(session: PureContainerSessionV1) -> text:
+    if session.view.view_id == "": return "view-missing"
+    val saved = container_view_stop_v1(session.view)
+    if saved.status != "ok": return saved.reason
+    ""
+
 # Stop a running job: cancel the job object, wait for a terminal state, collect. A job whose
 # leader already exited on its own is finished with the leader-exit edge (nothing was stopped).
 fn _stop_v1(session: PureContainerSessionV1, running: PureLifecycleV1, lease: SosixContainLeaseV1) -> PureExecV1:
@@ -516,11 +530,8 @@ fn _execute_v1(session: PureContainerSessionV1) -> PureExecV1:
 fn _teardown_v1(session: PureContainerSessionV1) -> PureTeardownV1:
     var reason = ""
     if session.view.view_id != "":
-        reason = rootfs_dematerialize_v1(session.view)
-        if reason != "": reason = "teardown-dematerialize: " + reason
-        if reason == "":
-            val destroyed = storage_view_v1_destroy(session.view)
-            if destroyed.status != "ok": reason = "teardown-view-destroy: " + destroyed.reason
+        val removed = container_view_remove_v1(session.view)
+        if removed.status != "ok": reason = "teardown-" + removed.reason
     if reason == "" and session.view_dir != "" and is_dir(session.view_dir):
         if not dir_is_real_no_follow(session.view_dir) or not dir_remove_all(session.view_dir) or is_dir(session.view_dir):
             reason = "teardown-view-dir-remove-failed"
@@ -605,4 +616,4 @@ export PureContainerSpecV1, PureContainerRunV1, PureContainerQualifyV1
 export pure_container_qualify_v1, pure_container_run_v1
 export PureContainerSessionV1, PurePreparedV1, PureExecV1, PureTeardownV1
 export PureBeganV1
-export _prepare_v1, _execute_v1, _teardown_v1, _begin_v1, _stop_v1, _finish_v1
+export _prepare_v1, _execute_v1, _teardown_v1, _begin_v1, _stop_v1, _finish_v1, _save_view_v1

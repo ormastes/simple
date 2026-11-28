@@ -26,7 +26,7 @@ use std.common.contracts.sosix.containment_v1.{SosixContainLimitsV1, SosixContai
 use std.common.container_policy.attempt_dir_plan_v1.{ContainerAttemptNumberV1}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerSessionV1, pure_container_run_v1, _prepare_v1, _begin_v1, _stop_v1, _finish_v1, _teardown_v1}
+use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerSessionV1, pure_container_run_v1, _prepare_v1, _begin_v1, _stop_v1, _finish_v1, _teardown_v1, _save_view_v1}
 
 use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
 use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, sosix_contain_poll_v1}
@@ -74,6 +74,7 @@ struct PureRetainedV1:
     has_exit: bool
     session: Option<PureContainerSessionV1> = None
     lease: Option<SosixContainLeaseV1> = None
+    saved: bool = false          # the view was saved as the container root since its job ended
 
 fn _pure_line_ok_v1(value: text) -> bool:
     not value.contains("\n") and not value.contains("\r") and not value.contains("\0")
@@ -276,7 +277,9 @@ impl PureSimpleContainerAdapterV1:
         val record = self._refresh(key)
         if action == "wait" and record.phase != RUNTIME_PHASE_EXITED:
             return self._op(action, decoded, record, RUNTIME_STATUS_BLOCKED, "pure-container-not-exited")
-        self._op(action, decoded, record, RUNTIME_STATUS_OK, "")
+        var note = ""
+        if record.reason.starts_with("pure-container-stop-save-failed"): note = record.reason
+        self._op(action, decoded, record, RUNTIME_STATUS_OK, note)
 
     # Observe a held job: a child that exited on its own, or was killed at its wall limit by the poll
     # (the owner enforces the wall deadline only inside poll), moves RUNNING -> EXITED here. The job is
@@ -299,6 +302,12 @@ impl PureSimpleContainerAdapterV1:
         next.has_exit = true
         next.exit_code = done.exit_code.value
         next.reason = ""
+        # The job ended on its own: its view is saved now, so a later stop need not be the only save.
+        val save_failure = _save_view_v1(done.session)
+        if save_failure == "":
+            next.saved = true
+        else:
+            next.reason = "pure-container-stop-save-failed: " + save_failure
         self._set(key, next)
 
     fn _admission() -> text:
@@ -435,10 +444,22 @@ impl PureSimpleContainerAdapterV1:
                 next.phase = RUNTIME_PHASE_STOPPED
                 next.has_exit = false
                 next.reason = ""
-                return self._finish_held_tail(action, decoded, key, next)
-            next.phase = RUNTIME_PHASE_STOPPED
-            next.has_exit = stopped.reason == ""
-            next.exit_code = stopped.exit_code.value
+            else:
+                next.phase = RUNTIME_PHASE_STOPPED
+                next.has_exit = stopped.reason == ""
+                next.exit_code = stopped.exit_code.value
+                next.reason = ""
+        # A real stop saves the view once the job is terminal; destroy never does, nor does a
+        # container that was created but never started (its root would just duplicate the base). A failed save is
+        # surfaced and leaves the container stopped (upper/ kept), so the stop can be retried.
+        val never_started = current.phase == RUNTIME_PHASE_CREATED or current.phase == RUNTIME_PHASE_PREPARED
+        if action == "stop" and next.session.is_some() and not next.saved and not never_started:
+            val save_failure = _save_view_v1(next.session.unwrap())
+            if save_failure != "":
+                next.phase = if next.phase == RUNTIME_PHASE_EXITED: RUNTIME_PHASE_EXITED else: RUNTIME_PHASE_STOPPED
+                next.reason = "pure-container-stop-save-failed: " + save_failure
+                return self._op(action, decoded, self._set(key, next), RUNTIME_STATUS_BLOCKED, next.reason)
+            next.saved = true
             next.reason = ""
         self._finish_held_tail(action, decoded, key, next)
 
