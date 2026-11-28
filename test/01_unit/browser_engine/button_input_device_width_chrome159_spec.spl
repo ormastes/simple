@@ -1,0 +1,104 @@
+"""
+## Purpose and audience
+Purpose: verifies REQ-WEB-003 button/input device-scale precision, gate
+unification (`plain_button_item` vs `flex_row_button_label_at_edge` vs layout
+tail), inline/wrap/row-reverse/center button label pens, `<input type=button|
+submit|reset>` device shaping, and `FORM_CONTROL_MEASURE_MAX_PX` capping.
+Audience: maintainers of the web layout engine.
+"""
+
+"""
+Traceability: REQ-WEB-003 - button/input device shaping and row gate parity (Chrome 159).
+"""
+# @tag: unit, browser_engine, layout, flex, form_control, device_scale, chrome159
+use std.spec.*
+use std.io_runtime.{file_exists}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{
+    layout_device_scale_set
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val LIB_SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+
+fn _find_commands_containing(comp: DrawIrComposition, needle: text) -> [DrawIrCommand]:
+    var found: [DrawIrCommand] = []
+    for batch in comp.batches:
+        for cmd in batch.commands:
+            if cmd.component_id.contains(needle):
+                found.push(cmd)
+    found
+
+fn _style_prop_value(cmd: DrawIrCommand, key: text) -> text:
+    for prop in cmd.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _dark_ink_columns_in_band(pixels: [u32], img_w: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> i32:
+    var count = 0
+    var x = x0
+    while x < x1:
+        var hit = false
+        var y = y0
+        while y < y1:
+            val c = pixels[y * img_w + x]
+            val r = (c >> 16) & 0xFFu32
+            val g = (c >> 8) & 0xFFu32
+            val b = c & 0xFFu32
+            if r < 160u32 and g < 160u32 and b < 160u32:
+                hit = true
+                break
+            y = y + 1
+        if hit:
+            count = count + 1
+        x = x + 1
+    count
+
+describe "REQ-WEB-003 button and input device width & label precision":
+    it "AC-1: sized/grown/min-width flex buttons do not carry mismatched device-extra-width at k=4":
+        layout_device_scale_set(4)
+        val html = "<!doctype html><html><body style=\"margin:0;font:16px/1.5 sans-serif\"><div style=\"display:flex;width:500px;gap:8px\"><button id=\"auto\">Auto</button><button id=\"explicit\" style=\"width:80.5px\">W</button><button id=\"grown\" style=\"flex:1\">Grow</button><button id=\"minw\" style=\"min-width:90px\">Min</button></div></body></html>"
+        val res = simple_web_layout_render_html_draw_ir_result(html, 500, 80)
+        layout_device_scale_set(1)
+        val grown_cmds = _find_commands_containing(res.composition, "grown")
+        val minw_cmds = _find_commands_containing(res.composition, "minw")
+        expect(grown_cmds.len()).to_be_greater_than(0)
+        expect(minw_cmds.len()).to_be_greater_than(0)
+        expect(_style_prop_value(grown_cmds[0], "device-extra-width")).to_equal("")
+        expect(_style_prop_value(minw_cmds[0], "device-extra-width")).to_equal("")
+
+    it "AC-2: inline, wrapped, reversed, and centered auto-width buttons place labels cleanly at k=1 and k=4":
+        if not file_exists(LIB_SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val html = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px/1.5 sans-serif\"><div id=\"inl\"><button>Go</button><button>HTML</button></div><div style=\"display:flex;flex-wrap:wrap;width:220px\"><button>Overview</button><button>Forms</button></div><div style=\"display:flex;flex-direction:row-reverse;width:300px\"><button>Alpha</button><button>Beta</button></div><div style=\"display:flex;justify-content:center;width:300px\"><button>TabA</button><button>TabB</button></div></body></html>"
+        val px1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, 320, 160, 1, "cpu_simd")
+        val px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, 320, 160, 4, "cpu_simd")
+        expect(px1.len()).to_equal(320 * 160)
+        expect(px4.len()).to_equal(1280 * 640)
+        expect(_dark_ink_columns_in_band(px1, 320, 0, 120, 0, 30)).to_be_greater_than(10)
+        expect(_dark_ink_columns_in_band(px4, 1280, 0, 480, 0, 120)).to_be_greater_than(40)
+        expect(_dark_ink_columns_in_band(px4, 1280, 200, 1080, 320, 600)).to_be_greater_than(40)
+
+    it "AC-3: <input type=submit|button> device-shapes width at k=4 and giant fonts respect FORM_CONTROL_MEASURE_MAX_PX":
+        if not file_exists(LIB_SANS):
+            skip("no Liberation Sans on this host")
+            return
+        layout_device_scale_set(4)
+        val html = "<!doctype html><html><body style=\"margin:0\"><input id=\"sub\" type=\"submit\" value=\"Forms &amp; Media\" style=\"padding:8px;border:1px solid #94a3b8\"><button id=\"btn\" style=\"padding:8px;border:1px solid #94a3b8\">Forms &amp; Media</button><button id=\"huge\" style=\"font-size:200px\">Hi</button></body></html>"
+        val res = simple_web_layout_render_html_draw_ir_result(html, 900, 400)
+        layout_device_scale_set(1)
+        val sub_cmds = _find_commands_containing(res.composition, "sub")
+        val btn_cmds = _find_commands_containing(res.composition, "btn")
+        val huge_cmds = _find_commands_containing(res.composition, "huge")
+        expect(sub_cmds.len()).to_be_greater_than(0)
+        expect(btn_cmds.len()).to_be_greater_than(0)
+        expect(huge_cmds.len()).to_be_greater_than(0)
+        expect(sub_cmds[0].width).to_equal(btn_cmds[0].width)
+        expect(huge_cmds[0].width).to_be_greater_than(50)

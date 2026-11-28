@@ -36,7 +36,10 @@
 # second place to edit and nothing to un-delete.
 
 use std.io_runtime.{env_get}
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{
+    render_html_to_pixel_array,
+    render_html_to_pixel_array_at_scroll
+}
 use std.blink.lane.html_pixels.{blink_render_html_to_pixel_array}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 
@@ -101,16 +104,7 @@ class BrowserVulkanFrame:
     backend: text
     reason: text
 
-pub fn browser_render_html_vulkan(html: text, width: i32, height: i32) -> BrowserVulkanFrame:
-    """Render `html` on the live CPU engine, then present the frame through
-    the engine2d VulkanBackend and return the DEVICE readback.
-
-    Fail-closed provenance: when Vulkan cannot initialize on the running
-    binary (e.g. a seed built without the vulkan feature), or the readback is
-    not a device readback, the CPU frame is returned with backend="software"
-    and a non-empty reason — this function never labels software pixels as
-    "vulkan"."""
-    val page = render_html_to_pixel_array(html, width, height)
+fn _browser_vulkan_present_pixels(page: [u32], width: i32, height: i32) -> BrowserVulkanFrame:
     var b = VulkanBackend.create()
     if not b.init(width, height):
         return BrowserVulkanFrame(pixels: page, backend: "software",
@@ -123,23 +117,52 @@ pub fn browser_render_html_vulkan(html: text, width: i32, height: i32) -> Browse
                                   reason: "readback source was '{rb.source}', not device_readback")
     BrowserVulkanFrame(pixels: rb.pixels, backend: "vulkan", reason: "")
 
+pub fn browser_render_html_vulkan(html: text, width: i32, height: i32) -> BrowserVulkanFrame:
+    """Render `html` on the live CPU engine, then present the frame through
+    the engine2d VulkanBackend and return the DEVICE readback.
+
+    Fail-closed provenance: when Vulkan cannot initialize on the running
+    binary (e.g. a seed built without the vulkan feature), or the readback is
+    not a device readback, the CPU frame is returned with backend="software"
+    and a non-empty reason — this function never labels software pixels as
+    "vulkan"."""
+    val page = render_html_to_pixel_array(html, width, height)
+    _browser_vulkan_present_pixels(page, width, height)
+
 pub fn browser_render_html_frame_via(lane: text, html: text,
                                      width: i32, height: i32) -> BrowserVulkanFrame:
     """Render through `lane` and keep the provenance: `backend` is "vulkan"
     only for a real device readback, "software" for a Vulkan fallback (with
     the reason), and "cpu" / "blink-cpu" for the CPU-only lanes."""
+    browser_render_html_frame_via_at_scroll(lane, html, width, height, 0)
+
+# reason: mirrors sibling browser_render_html_frame_via(lane, html, width, height) viewport API
+# @allow(primitive_api)
+pub fn browser_render_html_frame_via_at_scroll(lane: text, html: text,
+                                               width: i32, height: i32,
+                                               scroll_y: i32) -> BrowserVulkanFrame:
     if lane == BROWSER_RENDER_LANE_BLINK:
         BrowserVulkanFrame(pixels: blink_render_html_to_pixel_array(html, width, height),
                            backend: "blink-cpu", reason: "")
     elif lane == BROWSER_RENDER_LANE_VULKAN:
-        browser_render_html_vulkan(html, width, height)
+        val page = render_html_to_pixel_array_at_scroll(html, width, height, scroll_y)
+        _browser_vulkan_present_pixels(page, width, height)
     else:
-        BrowserVulkanFrame(pixels: render_html_to_pixel_array(html, width, height),
+        BrowserVulkanFrame(pixels: render_html_to_pixel_array_at_scroll(html, width, height, scroll_y),
                            backend: "cpu", reason: "")
 
 pub fn browser_render_html_frame(html: text, width: i32, height: i32) -> BrowserVulkanFrame:
     """`browser_render_html_frame_via` on the lane this process selected."""
     browser_render_html_frame_via(browser_render_lane_selected(), html, width, height)
+
+# reason: mirrors sibling browser_render_html_frame(html, width, height) viewport API
+# @allow(primitive_api)
+pub fn browser_render_html_frame_at_scroll(html: text, width: i32, height: i32,
+                                           scroll_y: i32) -> BrowserVulkanFrame:
+    """Scrolled variant of `browser_render_html_frame`."""
+    browser_render_html_frame_via_at_scroll(
+        browser_render_lane_selected(), html, width, height, scroll_y
+    )
 
 pub fn browser_render_html_to_pixel_array(html: text, width: i32,
                                           height: i32) -> [u32]:
@@ -199,4 +222,5 @@ export BROWSER_RENDER_LANE_DEFAULT, BROWSER_RENDER_LANE_ENV
 export browser_render_lane_is_known, browser_render_lane_selected
 export render_html_to_pixel_array_via, browser_render_html_to_pixel_array
 export BrowserVulkanFrame, browser_render_html_vulkan
-export browser_render_html_frame_via, browser_render_html_frame
+export browser_render_html_frame_via, browser_render_html_frame_via_at_scroll
+export browser_render_html_frame, browser_render_html_frame_at_scroll
