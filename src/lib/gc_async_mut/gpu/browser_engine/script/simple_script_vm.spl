@@ -115,6 +115,7 @@ class SimpleScriptExecFrame:
     ret_val: SimpleScriptVal
     names: [text]
     values: [SimpleScriptVal]
+    is_top_level: bool
 
 fn _ss_css_name(name: text) -> text:
     if name == "cssFloat":
@@ -604,6 +605,11 @@ pub class SimpleScriptDomVm:
     current_key: text
     current_code: text
     current_data: text
+    current_delta_x: f64
+    current_delta_y: f64
+    current_delta_mode: i32
+    scroll_x: i64
+    scroll_y: i64
     next_alloc_id: i64
     error: text
 
@@ -637,6 +643,11 @@ impl SimpleScriptDomVm:
             current_key: "",
             current_code: "",
             current_data: "",
+            current_delta_x: 0.0,
+            current_delta_y: 0.0,
+            current_delta_mode: 0,
+            scroll_x: 0,
+            scroll_y: 0,
             next_alloc_id: 100000,
             error: ""
         )
@@ -661,6 +672,8 @@ impl SimpleScriptDomVm:
             self.data_transfer_keys = []
             self.data_transfer_vals = []
             self.logs = []
+            self.scroll_x = 0
+            self.scroll_y = 0
             self.error = ""
 
     me _log(msg: text):
@@ -681,7 +694,7 @@ impl SimpleScriptDomVm:
         None
 
     me _set_var(mut frame: SimpleScriptExecFrame, name: text, value: SimpleScriptVal, declare_local: bool):
-        if declare_local:
+        if declare_local and not frame.is_top_level:
             var i: i64 = 0
             while i < frame.names.len():
                 if frame.names[i] == name:
@@ -691,12 +704,13 @@ impl SimpleScriptDomVm:
             frame.names.push(name)
             frame.values.push(value)
             return
-        var li = frame.names.len() - 1
-        while li >= 0:
-            if frame.names[li] == name:
-                frame.values[li] = value
-                return
-            li = li - 1
+        if not frame.is_top_level:
+            var li = frame.names.len() - 1
+            while li >= 0:
+                if frame.names[li] == name:
+                    frame.values[li] = value
+                    return
+                li = li - 1
         var gi = self.var_names.len() - 1
         while gi >= 0:
             if self.var_names[gi] == name:
@@ -877,7 +891,7 @@ impl SimpleScriptDomVm:
             return SimpleScriptVal.none()
         for f in self.fns:
             if f.name == fn_name:
-                var sub = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [])
+                var sub = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [], is_top_level: false)
                 var pi: i64 = 0
                 while pi < f.params.len():
                     val arg = if pi < args.len(): args[pi] else: SimpleScriptVal.none()
@@ -919,6 +933,51 @@ impl SimpleScriptDomVm:
                 val created = BeDomNode.text_node(nid, args[0].as_text())
                 self.staged_nodes.push(created)
                 return SimpleScriptVal.dom(nid)
+            if method == "addEventListener" and args.len() >= 2:
+                val ev_type = args[0].as_text().trim().lower()
+                val cb_name = if args[1].kind == "fn": args[1].text_val else: arg_exprs[1].trim()
+                val capture = if args.len() >= 3: args[2].is_truthy() else: false
+                self.listeners.push(SimpleScriptDomListener(
+                    node_id: -1,
+                    event_type: ev_type,
+                    fn_name: cb_name,
+                    inline_params: [],
+                    inline_lines: [],
+                    inline_indents: [],
+                    capture: capture,
+                    once: false
+                ))
+                return SimpleScriptVal.none()
+            return SimpleScriptVal.none()
+
+        if recv.kind == "global_window":
+            if method == "addEventListener" and args.len() >= 2:
+                val ev_type = args[0].as_text().trim().lower()
+                val cb_name = if args[1].kind == "fn": args[1].text_val else: arg_exprs[1].trim()
+                val capture = if args.len() >= 3: args[2].is_truthy() else: false
+                self.listeners.push(SimpleScriptDomListener(
+                    node_id: -2,
+                    event_type: ev_type,
+                    fn_name: cb_name,
+                    inline_params: [],
+                    inline_lines: [],
+                    inline_indents: [],
+                    capture: capture,
+                    once: false
+                ))
+                return SimpleScriptVal.none()
+            if method == "scrollTo" and args.len() >= 2:
+                val nx = args[0].as_int()
+                val ny = args[1].as_int()
+                self.scroll_x = if nx < 0: 0 else: nx
+                self.scroll_y = if ny < 0: 0 else: ny
+                return SimpleScriptVal.none()
+            if method == "scrollBy" and args.len() >= 2:
+                val nx = self.scroll_x + args[0].as_int()
+                val ny = self.scroll_y + args[1].as_int()
+                self.scroll_x = if nx < 0: 0 else: nx
+                self.scroll_y = if ny < 0: 0 else: ny
+                return SimpleScriptVal.none()
             return SimpleScriptVal.none()
 
         if recv.kind == "global_console":
@@ -1016,6 +1075,34 @@ impl SimpleScriptDomVm:
                 if val Some(n) = self._find_node(nid):
                     var next = n
                     next.set_attr("data-focused", "true")
+                    self._commit_node(next)
+                return SimpleScriptVal.none()
+            if method == "scrollTo" and args.len() >= 2:
+                if val Some(n) = self._find_node(nid):
+                    val nx = args[0].as_int()
+                    val ny = args[1].as_int()
+                    val cx = if nx < 0: 0 else: nx
+                    var cy = if ny < 0: 0 else: ny
+                    val max_st = self._max_scroll_top(n)
+                    if max_st >= 0 and cy > max_st: cy = max_st
+                    var next = n
+                    next.set_attr("data-scroll-left", "{cx}")
+                    next.set_attr("data-scroll-top", "{cy}")
+                    self._commit_node(next)
+                return SimpleScriptVal.none()
+            if method == "scrollBy" and args.len() >= 2:
+                if val Some(n) = self._find_node(nid):
+                    val cur_x = (be_dom_get_attr(n, "data-scroll-left").trim().parse_i64()) ?? 0
+                    val cur_y = (be_dom_get_attr(n, "data-scroll-top").trim().parse_i64()) ?? 0
+                    val nx = cur_x + args[0].as_int()
+                    var cy = cur_y + args[1].as_int()
+                    val cx = if nx < 0: 0 else: nx
+                    if cy < 0: cy = 0
+                    val max_st = self._max_scroll_top(n)
+                    if max_st >= 0 and cy > max_st: cy = max_st
+                    var next = n
+                    next.set_attr("data-scroll-left", "{cx}")
+                    next.set_attr("data-scroll-top", "{cy}")
                     self._commit_node(next)
                 return SimpleScriptVal.none()
             return SimpleScriptVal.none()
@@ -1164,7 +1251,24 @@ impl SimpleScriptDomVm:
 
         SimpleScriptVal.none()
 
+    fn _max_scroll_top(n: BeDomNode) -> i64:
+        val sh = (be_dom_get_attr(n, "data-scroll-height").trim().parse_i64()) ?? -1
+        val ch = (be_dom_get_attr(n, "data-client-height").trim().parse_i64()) ?? -1
+        if sh >= 0 and ch >= 0:
+            val m = sh - ch
+            return if m > 0: m else: 0
+        -1
+
     me _get_prop(recv: SimpleScriptVal, prop: text) -> SimpleScriptVal:
+        if recv.kind == "global_window":
+            if prop == "scrollX" or prop == "pageXOffset":
+                return SimpleScriptVal.from_int(self.scroll_x)
+            if prop == "scrollY" or prop == "pageYOffset":
+                return SimpleScriptVal.from_int(self.scroll_y)
+            if prop == "document":
+                return SimpleScriptVal.obj("global_document", -1)
+            return SimpleScriptVal.none()
+
         if recv.kind == "global_document":
             if prop == "title":
                 return SimpleScriptVal.from_text(self.title)
@@ -1190,6 +1294,18 @@ impl SimpleScriptDomVm:
                 if prop == "disabled": return SimpleScriptVal.from_bool(be_dom_has_attr(n, "disabled"))
                 if prop == "selected": return SimpleScriptVal.from_bool(be_dom_has_attr(n, "selected"))
                 if prop == "selectedIndex": return SimpleScriptVal.from_int(_ss_select_index(n))
+                if prop == "scrollTop":
+                    val raw_st = be_dom_get_attr(n, "data-scroll-top").trim()
+                    return SimpleScriptVal.from_int(raw_st.parse_i64() ?? 0)
+                if prop == "scrollLeft":
+                    val raw_sl = be_dom_get_attr(n, "data-scroll-left").trim()
+                    return SimpleScriptVal.from_int(raw_sl.parse_i64() ?? 0)
+                if prop == "scrollHeight":
+                    val raw_sh = be_dom_get_attr(n, "data-scroll-height").trim()
+                    return SimpleScriptVal.from_int(raw_sh.parse_i64() ?? 0)
+                if prop == "clientHeight":
+                    val raw_ch = be_dom_get_attr(n, "data-client-height").trim()
+                    return SimpleScriptVal.from_int(raw_ch.parse_i64() ?? 0)
                 if prop == "textContent" or prop == "innerText": return SimpleScriptVal.from_text(be_dom_get_text_content(n))
                 if prop == "innerHTML": return SimpleScriptVal.from_text(be_dom_serialize_children(n))
                 if prop == "style": return SimpleScriptVal.obj("style", n.node_id)
@@ -1224,6 +1340,9 @@ impl SimpleScriptDomVm:
             if prop == "key": return SimpleScriptVal.from_text(self.current_key)
             if prop == "code": return SimpleScriptVal.from_text(self.current_code)
             if prop == "data": return SimpleScriptVal.from_text(self.current_data)
+            if prop == "deltaX": return SimpleScriptVal.from_float(self.current_delta_x)
+            if prop == "deltaY": return SimpleScriptVal.from_float(self.current_delta_y)
+            if prop == "deltaMode": return SimpleScriptVal.from_int(self.current_delta_mode.to_i64())
             if prop == "defaultPrevented": return SimpleScriptVal.from_bool(self.event_prevent_default)
             if prop == "dataTransfer": return SimpleScriptVal.obj("datatransfer", -1)
             return SimpleScriptVal.none()
@@ -1251,15 +1370,34 @@ impl SimpleScriptDomVm:
                     self._set_element_inner_html(n.node_id, value.as_text())
                     return
                 if prop == "selectedIndex" and n.tag_name == "select":
-                    val next = _ss_select_by_index(n, value.as_int())
+                    var next = _ss_select_by_index(n, value.as_int())
+                    val next_val = browser_select_value(next)
+                    if next_val != "":
+                        next.set_attr("value", next_val)
                     self._commit_node(next)
                     return
                 if prop == "value" and n.tag_name == "select":
                     val upd = browser_select_update(n, value.as_text())
                     if upd.found:
-                        self._commit_node(upd.node)
+                        var next_sel = upd.node
+                        next_sel.set_attr("value", browser_select_value(next_sel))
+                        self._commit_node(next_sel)
                     return
                 var next = n
+                if prop == "scrollTop":
+                    var st = value.as_int()
+                    if st < 0: st = 0
+                    val max_st = self._max_scroll_top(n)
+                    if max_st >= 0 and st > max_st: st = max_st
+                    next.set_attr("data-scroll-top", "{st}")
+                    self._commit_node(next)
+                    return
+                if prop == "scrollLeft":
+                    var sl = value.as_int()
+                    if sl < 0: sl = 0
+                    next.set_attr("data-scroll-left", "{sl}")
+                    self._commit_node(next)
+                    return
                 if prop == "id":
                     val s = value.as_text()
                     if s == "": next.remove_attr("id") else: next.set_attr("id", s)
@@ -1414,6 +1552,7 @@ impl SimpleScriptDomVm:
         if expr == "false": return SimpleScriptVal.from_bool(false)
         if expr == "nil" or expr == "null" or expr == "undefined": return SimpleScriptVal.none()
         if expr == "document": return SimpleScriptVal.obj("global_document", -1)
+        if expr == "window" or expr == "self" or expr == "globalThis": return SimpleScriptVal.obj("global_window", -2)
         if expr == "console": return SimpleScriptVal.obj("global_console", -1)
         if expr == "Math": return SimpleScriptVal.obj("global_math", -1)
         if expr == "event" or expr == "ev": return SimpleScriptVal.obj("event", -1)
@@ -1597,9 +1736,10 @@ impl SimpleScriptDomVm:
                             b_lines.push(lines[body_end])
                             b_indents.push(indents[body_end])
                             body_end = body_end + 1
-                        if recv.kind == "dom" and recv.node_id >= 0:
+                        if (recv.kind == "dom" and recv.node_id >= 0) or recv.kind == "global_document" or recv.kind == "global_window":
+                            val target_nid = if recv.kind == "global_document": -1 elif recv.kind == "global_window": -2 else: recv.node_id
                             self.listeners.push(SimpleScriptDomListener(
-                                node_id: recv.node_id,
+                                node_id: target_nid,
                                 event_type: evt_name,
                                 fn_name: "",
                                 inline_params: p_list,
@@ -1720,7 +1860,7 @@ impl SimpleScriptDomVm:
                 continue
             lines.push(trimmed)
             indents.push(_ss_count_indent(cleaned))
-        var frame = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [])
+        var frame = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [], is_top_level: true)
         self._exec_block(lines, indents, 0, lines.len(), frame, 0)
         true
 
@@ -1748,7 +1888,12 @@ impl SimpleScriptDomVm:
 
         var phases_nodes: [i64] = []
         var phases_capture: [bool] = []
-        # Capture phase (ancestors outer -> parent)
+        # Capture phase (window -> document -> ancestors outer -> parent)
+        if target_node_id >= 0:
+            phases_nodes.push(-2)
+            phases_capture.push(true)
+            phases_nodes.push(-1)
+            phases_capture.push(true)
         var ci: i64 = 0
         while ci < path_node_ids.len() - 1:
             phases_nodes.push(path_node_ids[ci])
@@ -1757,13 +1902,18 @@ impl SimpleScriptDomVm:
         # Target phase
         phases_nodes.push(target_node_id)
         phases_capture.push(false)
-        # Bubble phase (parent -> outer)
+        # Bubble phase (parent -> outer -> document -> window)
         if bubbles:
             var bi: i64 = path_node_ids.len() - 2
             while bi >= 0:
                 phases_nodes.push(path_node_ids[bi])
                 phases_capture.push(false)
                 bi = bi - 1
+            if target_node_id >= 0:
+                phases_nodes.push(-1)
+                phases_capture.push(false)
+                phases_nodes.push(-2)
+                phases_capture.push(false)
 
         var pi: i64 = 0
         while pi < phases_nodes.len() and not self.event_stop_prop:
@@ -1778,7 +1928,7 @@ impl SimpleScriptDomVm:
                     if listener.fn_name != "":
                         val _ = self._call_user_fn(listener.fn_name, [ev_val], 0)
                     else:
-                        var sub = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [])
+                        var sub = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [], is_top_level: false)
                         if listener.inline_params.len() >= 1:
                             sub.names.push(listener.inline_params[0])
                             sub.values.push(ev_val)

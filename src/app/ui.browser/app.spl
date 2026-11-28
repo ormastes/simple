@@ -11,7 +11,7 @@ use nogc_sync_mut.ui.session.{UISession}
 use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
 use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiWindowEvent, GUI_EVT_NONE, GUI_EVT_RESIZED, GUI_EVT_MOUSE_WHEEL}
 use app.ui.browser.backend.{BrowserBackend}
-use app.ui.browser.event_bridge.{translate_key_event, translate_browser_key_event, translate_mouse_event}
+use app.ui.browser.event_bridge.{translate_key_event, translate_browser_key_event, translate_mouse_event, translate_wheel_event, has_active_pointer_drag}
 use std.io_runtime.{env_get, file_exists, get_args, read_file, thread_sleep, time_now_unix_micros}
 use std.diag.{dbg_stage}
 use lazy common.window_protocol.geometry.{Size}
@@ -344,16 +344,77 @@ class BrowserApp:
                 else:
                     self.handle_ui_event(UIEvent.NormalMode)
 
+    me _scroll_offsets_signature() -> text:
+        var out = ""
+        for wid in self.session.current_tree().root_node().collect_ids():
+            if wid != "":
+                if val Some(wn) = self.session.current_tree().find_widget(wid):
+                    if wn.kind_name() == "scroll":
+                        out = "{out}{wid}:{wn.get_prop(\"scroll_offset\")};"
+        out
+
     me handle_host_mouse_click(x: i32, y: i32) -> bool:
-        """Route a left mouse press at (x, y) using real CSS layout hit boxes."""
+        """Route a left mouse press at (x, y) through pointer capture, widgets, and CSS hit boxes."""
         self.last_mouse_x = x
         self.last_mouse_y = y
+        val prev_focus = self.session.focused_widget()
         val hit_id = self.backend.find_widget_at(x, y)
-        self._clear_all_ui_focus()
-        if hit_id.starts_with("ui_action_"):
-            self.handle_ui_event(UIEvent.Action(name: hit_id[10:]))
+        self.handle_ui_event(UIEvent.TouchPress(x: x, y: y))
+
+        val root = self.session.current_tree().root_node()
+        val drag_id = root.get_prop("ui_drag_node_id")
+        val cap_id = root.get_prop("ui_captured_id")
+        if drag_id != "":
             return true
+
+        if hit_id.starts_with("ui_action_"):
+            self._clear_all_ui_focus()
+            self.handle_ui_event(UIEvent.Action(name: hit_id.substring(10, hit_id.byte_len())))
+            return true
+
+        if cap_id != "":
+            if val Some(cnode) = self.session.current_tree().find_widget(cap_id):
+                val ckind = cnode.kind_name()
+                if ckind == "button":
+                    val action_name = cnode.get_prop("action")
+                    if action_name != "":
+                        self.handle_ui_event(UIEvent.Action(name: action_name))
+                elif ckind == "input" or ckind == "textfield" or ckind == "textarea":
+                    self._clear_all_ui_focus()
+                    cnode.set_prop("ui_focus", "true")
+                    self.handle_ui_event(UIEvent.InsertMode)
+                elif prev_focus != cap_id:
+                    self.handle_ui_event(UIEvent.NormalMode)
+            return true
+
+        self._clear_all_ui_focus()
         if hit_id != "":
+            val win_id = if hit_id.ends_with("_titlebar"): hit_id.substring(0, hit_id.byte_len() - 9) else: hit_id
+            if val Some(wnode) = self.session.current_tree().find_widget(win_id):
+                if wnode.kind_name() == "dialog" and wnode.get_prop("internal_window") == "true" and wnode.get_prop("draggable") == "true":
+                    val fx = wnode.get_prop("x").to_int() ?? 40
+                    val fy = wnode.get_prop("y").to_int() ?? 40
+                    if hit_id.ends_with("_titlebar") or y <= fy.to_i32() + 28:
+                        root.set_prop("ui_drag_node_id", wnode.id)
+                        root.set_prop("ui_drag_offset_x", "{x - fx.to_i32()}")
+                        root.set_prop("ui_drag_offset_y", "{y - fy.to_i32()}")
+                        root.set_prop("ui_captured_id", wnode.id)
+                        wnode.set_prop("ui_pressed", "true")
+                        return true
+            for dd_id in root.collect_ids():
+                if dd_id != "":
+                    if val Some(dd) = self.session.current_tree().find_widget(dd_id):
+                        if dd.kind_name() == "dropdown" and dd.get_prop("open") == "true":
+                            var oi: i32 = 0
+                            for ch in dd.children():
+                                if ch.id == hit_id:
+                                    dd.set_prop("selected_index", "{oi}")
+                                    dd.set_prop("value", ch.get_prop("label"))
+                                    dd.set_prop("open", "false")
+                                    dd.set_prop("hovered_index", "-1")
+                                    root.set_prop("ui_captured_id", hit_id)
+                                    return true
+                                oi = oi + 1
             if val Some(node) = self.session.current_tree().find_widget(hit_id):
                 val kind = node.kind_name()
                 if kind == "input" or kind == "textfield" or kind == "textarea":
@@ -362,11 +423,22 @@ class BrowserApp:
                     self.handle_ui_event(UIEvent.InsertMode)
                     return true
                 elif kind == "button":
+                    val prev_count = node.get_prop("click_count").to_int() ?? 0
+                    node.set_prop("click_count", "{prev_count + 1}")
+                    node.set_prop("ui_pressed", "true")
                     node.set_prop("ui_action_pending", "true")
+                    root.set_prop("last_clicked", hit_id)
+                    root.set_prop("ui_captured_id", hit_id)
                     self.handle_ui_event(UIEvent.FocusEvent(target_id: hit_id, kind: "focus"))
                     val action_name = node.get_prop("action")
                     if action_name != "":
                         self.handle_ui_event(UIEvent.Action(name: action_name))
+                    return true
+                elif kind == "dropdown":
+                    val is_open = node.get_prop("open") == "true"
+                    node.set_prop("open", if is_open: "false" else: "true")
+                    node.set_prop("hovered_index", "-1")
+                    self.handle_ui_event(UIEvent.FocusEvent(target_id: hit_id, kind: "focus"))
                     return true
                 elif kind == "checkbox" or kind == "switch":
                     val next_checked = if node.get_prop("checked") == "true": "false" else: "true"
@@ -463,9 +535,26 @@ class BrowserApp:
         val dy = if dy_i32 == 0 and delta_y > 0.0: -24 elif dy_i32 == 0 and delta_y < 0.0: 24 else: dy_i32
         if dy == 0:
             return false
-        val scrolled = self.backend.scroll_by(dy)
-        self.handle_ui_event(UIEvent.ScrollEvent(self.last_mouse_x.to_f64(), self.last_mouse_y.to_f64(), 0.0, dy.to_f64()))
-        scrolled or true
+        val before_sig = self._scroll_offsets_signature()
+        self.handle_ui_event(translate_wheel_event(self.last_mouse_x, self.last_mouse_y, 0.0, dy.to_f64()))
+        val after_sig = self._scroll_offsets_signature()
+        if after_sig != before_sig:
+            return true
+        self.backend.scroll_by(dy)
+
+    me handle_host_mouse_move(x: i32, y: i32) -> bool:
+        """Route pointer movement, forcing TouchMove updates whenever a drag or capture is active."""
+        self.last_mouse_x = x
+        self.last_mouse_y = y
+        val hover_id = self.backend.find_widget_at(x, y)
+        val hover_changed = hover_id != self.last_hover_id
+        self.last_hover_id = hover_id
+        val active_drag = has_active_pointer_drag(self.session.current_tree().root_node())
+        if hover_changed or active_drag:
+            val translated = translate_mouse_event(x, y, 0, "move")
+            if val Some(mv) = translated:
+                self.handle_ui_event(mv)
+        hover_changed or active_drag
 
     me handle_host_event(ev: i64):
         val _dirty = self._handle_host_event_dirty(ev)
@@ -484,21 +573,10 @@ class BrowserApp:
 
         if event_type == EVT_MOUSE_MOVED:
             val (mouse_x, mouse_y) = browser_winit_event_mouse_moved(ev)
-            self.last_mouse_x = mouse_x.to_i32() / BROWSER_WINDOW_SCALE
-            self.last_mouse_y = mouse_y.to_i32() / BROWSER_WINDOW_SCALE
-            val hover_id = self.backend.find_widget_at(self.last_mouse_x, self.last_mouse_y)
-            val hover_changed = hover_id != self.last_hover_id
-            self.last_hover_id = hover_id
-            if hover_changed:
-                val translated = translate_mouse_event(
-                    self.last_mouse_x,
-                    self.last_mouse_y,
-                    0,
-                    "move"
-                )
-                if val Some(mv) = translated:
-                    self.handle_ui_event(mv)
-            return hover_changed
+            return self.handle_host_mouse_move(
+                mouse_x.to_i32() / BROWSER_WINDOW_SCALE,
+                mouse_y.to_i32() / BROWSER_WINDOW_SCALE
+            )
 
         if event_type == EVT_MOUSE_BUTTON:
             val (button_code, pressed) = browser_winit_event_mouse_button(ev)
