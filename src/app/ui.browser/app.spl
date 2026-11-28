@@ -12,7 +12,7 @@ use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
 use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiWindowEvent, GUI_EVT_NONE, GUI_EVT_RESIZED, GUI_EVT_MOUSE_WHEEL}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.browser.event_bridge.{translate_key_event, translate_browser_key_event, translate_mouse_event}
-use std.io_runtime.{file_exists, get_args, read_file, thread_sleep, time_now_unix_micros}
+use std.io_runtime.{env_get, file_exists, get_args, read_file, thread_sleep, time_now_unix_micros}
 use std.diag.{dbg_stage}
 use lazy common.window_protocol.geometry.{Size}
 use lazy os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
@@ -81,6 +81,33 @@ val HOST_WINDOW_TITLE: text = "Simple Browser"
 val BROWSER_WINDOW_SCALE: i32 = 1
 val FILE_CHANGE_POLL_INTERVAL_TICKS: i32 = 15
 
+fn _browser_parse_positive_i32(raw: text, default_val: i32) -> i32:
+    val trimmed = raw.trim()
+    if trimmed == "":
+        return default_val
+    val parsed = trimmed.to_int() ?? 0
+    if parsed > 0:
+        return parsed.to_i32()
+    return default_val
+
+pub fn format_browser_window_title(app_title: text, web_engine: text, gpu_backend: text) -> text:
+    """Format the host window title so the active web/GPU backend is always visible."""
+    val trimmed = app_title.trim()
+    val base = if trimmed != "": trimmed else: HOST_WINDOW_TITLE
+    val gpu = if gpu_backend.trim() != "": gpu_backend.trim() else: "auto"
+    if web_engine == "pure_simple":
+        if base.contains("[Pure-Simple"):
+            return base
+        return "{base} — [Pure-Simple Base | engine=pure_simple | gpu={gpu}]"
+    if web_engine == "chromium":
+        if base.contains("[Chromium"):
+            return base
+        return "{base} — [Chromium Offscreen Base | engine=chromium | gpu={gpu}]"
+    val engine = if web_engine.trim() != "": web_engine.trim() else: "pure_simple"
+    if base.contains("["):
+        return base
+    return "{base} — [engine={engine} | gpu={gpu}]"
+
 fn browser_file_change_poll_next(had_event: bool, ticks: i32, interval: i32) -> (bool, i32):
     if had_event:
         return (true, 0)
@@ -126,8 +153,8 @@ class BrowserApp:
                     val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "browser")
                     if store.is_some():
                         session.attach_access_store(store)
-                val width: i32 = 960
-                val height: i32 = 640
+                val width: i32 = _browser_parse_positive_i32(env_get("SIMPLE_BROWSER_WIDTH"), 960)
+                val height: i32 = _browser_parse_positive_i32(env_get("SIMPLE_BROWSER_HEIGHT"), 640)
                 session.dispatch(UIEvent.Resize(width, height))
                 dbg_stage("browser", "backend_create_start")
                 val backend_result = BrowserBackend.create(width, height, gpu_backend, web_engine)
@@ -178,7 +205,10 @@ class BrowserApp:
             self.backend.shutdown()
             return false
 
-        val window = browser_winit_window_new(event_loop, width, height, HOST_WINDOW_TITLE)
+        val env_title = env_get("SIMPLE_BROWSER_TITLE")
+        val raw_title = if env_title != "": env_title else: self.session.current_tree().title_text()
+        val window_title = format_browser_window_title(raw_title, self.backend.web_render_engine, self.backend.gpu_backend_name)
+        val window = browser_winit_window_new(event_loop, width, height, window_title)
         if window == 0:
             print "Error: failed to create host browser window"
             browser_winit_event_loop_free(event_loop)
@@ -195,6 +225,14 @@ class BrowserApp:
             browser_winit_event_loop_free(event_loop)
             self.backend.shutdown()
             return false
+
+        val capture_path = env_get("SIMPLE_BROWSER_CAPTURE_AND_QUIT_PATH")
+        if capture_path != "":
+            val captured = self.backend.snapshot_ppm(capture_path)
+            browser_winit_window_free(window)
+            browser_winit_event_loop_free(event_loop)
+            self.backend.shutdown()
+            return captured
 
         while self.running:
             var dirty = false
