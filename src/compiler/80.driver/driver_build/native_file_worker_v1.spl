@@ -266,10 +266,17 @@ fn _native_file_worker_spec_count_v1(spec: text) -> i64:
 #   * explicit env (> 0) always wins;
 #   * small/unknown closures (<= 32 modules) keep 1 so multi-round overlap specs
 #     and tiny incremental fixtures retain single-module granularity;
-#   * large closures scale to `clamp(closure_modules / (max(workers, 1) * 4), 1, 16)`,
-#     cutting 4,231 unit child process spawns down to ~265 bounded batches while
-#     keeping per-unit HIR/MIR residency safely under 3 GiB.
-pub const NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1: i64 = 16
+#   * large closures scale to `clamp(closure_modules / (max(workers, 1) * 4), 1, 64)`.
+# The cap must stay large enough to amortize the per-child frontend: every unit
+# child re-runs load_sources and the whole-inventory HIR walk (~450-550 s fixed
+# on the 4,207-module CLI unit), so the old cap of 16 forced 263 full-frontend
+# children (~52 h projected; compiler_cli_build row never fit its budget -- see
+# doc/08_tracking/bug/compiler_cli_build_row_repeated_full_unit_passes_2026-11-28.md).
+# At 64 the same unit needs 66 children (~6 h at 2 workers). Per-unit RSS is
+# dominated by the closure HIR decode, not the batch (6.6-10 GiB at batch 8-32,
+# P4-v8 / file_worker_batch_setup_dominates_self_build_2026-11-24.md), and the
+# RSS watchdog stays the authoritative cap.
+pub const NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1: i64 = 64
 pub const NATIVE_FILE_WORKER_LOW_MEM_BATCH_MAX_V1: i64 = 4
 pub const NATIVE_FILE_WORKER_LOW_MEM_HOST_KIB_V1: i64 = 25165824
 
