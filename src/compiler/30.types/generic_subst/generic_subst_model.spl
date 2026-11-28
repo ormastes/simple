@@ -407,8 +407,6 @@ fn mi_infer(gamma: [text], params: [MType], ret: MType, explicit: [MType],
         if not acc.mapping.has(gn):
             return MInfer.Unresolved(MI_NO_EVIDENCE)
         val bound: MType = acc.mapping[gn]
-        if not mt_is_closed(bound):
-            return MInfer.Unresolved(MI_NO_EVIDENCE)
         out = out.push(bound)
     MInfer.Resolved(out)
 
@@ -623,23 +621,22 @@ fn mf_step(kind: text, inputs: [MType], decl_params: [text]) -> MFlow:
         if not mt_struct_eq(mf_result(param), b):
             return MFlow.Ill("mismatch")
         return mf_app_arg(a, MT_FN, 2, 1)
+    if inputs.len() < 3:
+        return MFlow.Ill("unknown_kind")
     val c: MType = inputs[2]
     if kind == MF_FIELD_WRITE:
         val field = mf_field_type(a, b, decl_params)
         if not mf_is_ok(field):
             return field
         return mf_same(mf_result(field), c)
-    if kind == MF_DICT_WRITE:
-        val wkey = mf_app_arg(a, MT_DICT, 2, 0)
-        if not mf_is_ok(wkey):
-            return wkey
-        if not mt_struct_eq(mf_result(wkey), b):
-            return MFlow.Ill("mismatch")
-        val wvalue = mf_app_arg(a, MT_DICT, 2, 1)
-        if not mf_is_ok(wvalue):
-            return wvalue
-        return mf_same(mf_result(wvalue), c)
-    MFlow.Ill("unknown_kind")
+    # Only MF_DICT_WRITE has arity 3 besides MF_FIELD_WRITE.
+    val wkey = mf_app_arg(a, MT_DICT, 2, 0)
+    if not mf_is_ok(wkey):
+        return wkey
+    if not mt_struct_eq(mf_result(wkey), b):
+        return MFlow.Ill("mismatch")
+    # A key slot that decoded means `a` is a two-argument Dict, so slot 1 is Ok.
+    mf_same(mf_result(mf_app_arg(a, MT_DICT, 2, 1)), c)
 
 fn mf_substitute_inputs(kind: text, s: MSubst, inputs: [MType]) -> [MType]:
     """Apply the substitution of the enclosing FUNCTION to the inputs of a
