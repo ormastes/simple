@@ -11,10 +11,13 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{S
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{chrome_checkable_spans, chrome_frame_spans}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
     fb_border_sides_styled_clip, fb_select_chevron_clip, fb_textarea_grip_clip, fb_chrome_spans_clip, fb_rounded_rect_corners_opacity_clip,
-    fb_text_ttf_available, fb_text_ttf_ascent_px, fb_text_ttf_line_baseline_y,
-    fb_text_ttf_aa_clip_range_adv, radial_gradient_box_paintable, canvas_background_extent,
+    radial_gradient_box_paintable, canvas_background_extent,
     canvas_gradient_source, canvas_gradient_layers,
     background_gradient_layers_paintable, background_gradient_layers, fb_gradient_layers_clip
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_gradients_text.{
+    ttf_available, ttf_ascent_px_milli, ttf_line_baseline_y_milli,
+    ttf_measure_text_px_milli, ttf_paint_text_aa_clip_range_adv
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{web_bitmap_paint_lane}
 export use std.gc_async_mut.gpu.browser_engine.layout_insets.{ancestor_bottom_inset}
@@ -1785,12 +1788,12 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                     nd, st, x, y, w, h, paint_clip_at(clip_cache, i)
                 )
                 if plan.text_value != "" and plan.baseline_y < fbh:
-                    val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and fb_text_ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)
+                    val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)
                     if use_ttf:
                         val ttf_content_y = y + st.border_t + st.pad_t
                         val ttf_content_h = h - st.border_t - st.border_b - st.pad_t - st.pad_b
-                        val ttf_base_y = fb_text_ttf_line_baseline_y(
-                            ttf_content_y, ttf_content_h, st.font_size,
+                        val ttf_base_y = ttf_line_baseline_y_milli(
+                            ttf_content_y, ttf_content_h, st.font_size, st.font_size_milli,
                             st.resolved_font_identity, st.font_family,
                             st.bold, st.font_style_italic
                         )
@@ -1801,7 +1804,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                             input_real_w = input_real_w + byte_advance
                         val ttf_x = input_value_vector_x(plan, x + st.border_l + st.pad_l, content_w, input_real_w)
                         if st.text_shadow_color != 0u32:
-                            out = fb_text_ttf_aa_clip_range_adv(
+                            out = ttf_paint_text_aa_clip_range_adv(
                                 out, fbw, fbh,
                                 ttf_x + st.text_shadow_x_px,
                                 ttf_base_y + st.text_shadow_y_px,
@@ -1810,7 +1813,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                                 st.resolved_font_identity, st.font_family,
                                 st.font_style_italic, st.bold, plan.clip, input_by, st.font_size_milli
                             )
-                        out = fb_text_ttf_aa_clip_range_adv(
+                        out = ttf_paint_text_aa_clip_range_adv(
                             out, fbw, fbh, ttf_x, ttf_base_y,
                             plan.text_value, 0, plan.text_value.byte_len(),
                             plan.color, st.font_size,
@@ -1853,8 +1856,8 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                         val scale = web_glyph_scale(st.font_size)
                         val adv = style_text_advance(st)
                         val space_adv = style_space_advance(st)
-                        val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and fb_text_ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)
-                        val text_x = x + text_ink_x_offset(st.font_size)
+                        val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)
+                        val text_x = if use_ttf: x else: (x + text_ink_x_offset(st.font_size))
                         var ly = if use_ttf: y else: (y + text_ink_y_offset(st.font_size))
                         if line_count > 0:
                             val clip = paint_clip_at(clip_cache, i)
@@ -1863,7 +1866,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                             # both the aligned-width call and the glyph walk
                             # below so the two cannot disagree.
                             val txt_by = style_run_byte_advances(st, txt)
-                            val ttf_asc = if use_ttf: fb_text_ttf_ascent_px(st.font_size, st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic) else: 0
+                            val ttf_asc = if use_ttf: ttf_ascent_px_milli(st.font_size, st.font_size_milli, st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic) else: 0
                             var line_i = 0
                             # cpu-lane-loop-ok: per-wrapped-line glyph emission for one #text node on the normal path; bound is line_count from the wrap cache and it stops early at ly >= fbh; scale/adv/space_adv are already hoisted above the loop
                             while line_i < line_count and ly < fbh:
@@ -1874,13 +1877,14 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                                 val line_base_x = if line_i == 0: text_x + st.text_indent_px + line_dx else: text_x + line_dx
                                 val line_box_w = text_line_box_w(wrap_cache.first_line_dx, wrap_cache.line_boxes, i, line_i, w) - (if line_i == 0: st.text_indent_px else: 0)
                                 val line_by = if st.text_overflow_ellipsis and line_i == 0: [] else: txt_by
-                                val line_w = if text_line_needs_paint_width(st, line_i, line_count): style_text_line_advance_width_with(line_by, draw_txt, draw_start, draw_end, adv, space_adv) else: 0
+                                val use_ttf_line_measure = use_ttf and line_by.is_empty()
+                                val line_w = if text_line_needs_paint_width(st, line_i, line_count): (if use_ttf_line_measure: ttf_measure_text_px_milli(draw_txt, draw_start, draw_end, st.font_size, st.font_size_milli, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold) else: style_text_line_advance_width_with(line_by, draw_txt, draw_start, draw_end, adv, space_adv)) else: 0
                                 val line_text_x = if line_count == 1 and text_rtl_run_starts_box(nodes[i], st, w, txt == transformed_txt): line_base_x else: text_line_aligned_x(line_base_x, line_box_w, line_w, st, line_i, line_count)
                                 if use_ttf:
                                     val base_y = ly + inline_line_strut_baseline_offset(st)
                                     if st.text_shadow_color != 0u32:
-                                        out = fb_text_ttf_aa_clip_range_adv(out, fbw, fbh, line_text_x + st.text_shadow_x_px, base_y + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, st.font_size, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold, clip, line_by, st.font_size_milli)
-                                    out = fb_text_ttf_aa_clip_range_adv(out, fbw, fbh, line_text_x, base_y, draw_txt, draw_start, draw_end, st.fg, st.font_size, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold, clip, line_by, st.font_size_milli)
+                                        out = ttf_paint_text_aa_clip_range_adv(out, fbw, fbh, line_text_x + st.text_shadow_x_px, base_y + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, st.font_size, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold, clip, line_by, st.font_size_milli)
+                                    out = ttf_paint_text_aa_clip_range_adv(out, fbw, fbh, line_text_x, base_y, draw_txt, draw_start, draw_end, st.fg, st.font_size, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold, clip, line_by, st.font_size_milli)
                                     if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
                                         val underline_w = line_w
                                         val ul_gap = if st.font_size / 10 > 1: st.font_size / 10 else: 1
