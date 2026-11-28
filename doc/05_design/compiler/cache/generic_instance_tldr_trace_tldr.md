@@ -15,5 +15,6 @@ Full design: `generic_instance_tldr_trace.md`. Addendum to
 - Remote: an instance task is a content-keyed action; inputs are template entry, body section, argument keys, read TLDRs, target, toolchain. Local and remote objects must be byte-identical.
 - Seed: syntactic only, stays erased, neither writes nor reads these sections (Q13 open).
 - Not landed and needed first: async stage functions, `CompileInvoker`, key record v2, write-once slots, `.sphb`/`.spmb`, ledger, concrete-view acquisition, `40.mono` substitution. `generic_instance_prelink_v1.md` describes deleted code.
-- Coverage: line % has no denominator in the seed's report; gate on per-file decision coverage (95 % unit, 70 % set) until line sites are registered.
-- Stages: `doc/03_plan/language/type_system/no_any_inference_plan.md` S3-F1..F10; wave slots in `doc/03_plan/compiler/cache/pseudo_immutable_cache_impl_plan.md` §5.
+- Coverage (decided): gate on per-file decision and condition coverage, 95 % unit and 70 % set; the seed report has no line denominator, so line % comes later.
+- Stages: `doc/03_plan/language/type_system/no_any_inference_plan.md` S3-F0..F10; wave slots in `doc/03_plan/compiler/cache/pseudo_immutable_cache_impl_plan.md` §5.
+- Decided 2026-11-28: one object per instance; engine first (the demand closure and the specialization task wait for the async steps; early start is S3-F0, F1, F2, F6 early half, F10); `generic_subst_model.spl` restored from `200a05f5bc8^` as the one substitution implementation.

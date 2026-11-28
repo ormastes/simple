@@ -76,7 +76,7 @@ source mode by file kind and config; syntactic checks only in the seed.
 | S3-C | Monomorphization baseline: record binary size, bootstrap time and compile time on the erased build; dry-run of the demand closure (S3-F3, no code generation) that reports instance counts for the 1,208 explicit generics | G1 | M | none |
 | S3-D | Self-hosted: **specialization query + output invariant** (reframed 2026-11-28; no `40.mono` stage or whole-program pass is restored). A reference to `Template<Args>` requests the instance through the single-flight reader; one async task builds concrete TLDR view, specialized body, MIR and object, each a set-once content-keyed artifact. "No type parameter, `Infer` or `Any` reaches MIR" is checked on every task's output. Remove the erased lowering for safe code. Sub-stages S3-F3, S3-F4 | G2 | L | S3-C, S2-C; pseudo-immutable PI-S1-1..PI-S1-3, PI-S2-1 |
 | S3-E | **Open (Q13).** Seed: monomorphize explicit generics; `type_resolver.rs:320-322` stops erasing `T` to `ANY`. Runs only if the owner decides the bootstrap-only seed must monomorphize | G2 | L | S3-C; **Q13** |
-| S3-F | Instance traceability through TLDR: needed-instance sections, cross-module dedup by `ConcreteTldrKey` (the single-flight slot), per-instance object keys, reverse references, invalidation, trace queries, remote action, coverage gates. Sub-stages S3-F1..F10 below | G3 | M | S3-D |
+| S3-F | Instance traceability through TLDR: needed-instance sections, cross-module dedup by `ConcreteTldrKey` (the single-flight slot), per-instance object keys, reverse references, invalidation, trace queries, remote action, coverage gates. Sub-stages S3-F0..F10 below | G3 | M | S3-D |
 | S3-G | Budget gates: instance-count, code-size, build-time and run-time benchmark checks against the S3-C baseline | G4 | M | S3-D, S3-E; Q11 |
 | S3-H | Retire the erased-model statements: `.claude/rules/language.md`, the 2026-10-31 generics plan header, any guard that assumes erasure, the guides | G5 | S | S3-D, S3-E |
 | S4-A | Self-hosted: resolve `source_mode` per unit (file kind, `simple.sdn`, CLI, header attribute), store it on the parsed and HIR module and in the cache key; replace the `CompileMode.Interpret` gates and the `parser_path_is_script` use | G0 | M | none |
@@ -126,7 +126,7 @@ source mode by file kind and config; syntactic checks only in the seed.
 | G5 | S3-H, S5-B, S8-I, S9-C | S3-G, S4-G, S5-A, S9-B landed |
 | G6 | S8-J | everything else |
 
-**Schedule note (2026-11-28).** S3-D is now a specialization query on the async engine, so G2 opens for S3-D only when the pseudo-immutable steps PI-S1-1..PI-S1-3 and PI-S2-1 have landed as well (none is in `src` today; see S3-F1..F10). Everything behind S3-D inherits that wait: S3-F, S3-G, S3-H, S6-F, S6-G. S3-C (baseline) and S3-F1, S3-F2, S3-F6, S3-F10 do not.
+**Schedule note (2026-11-28).** S3-D is now a specialization query on the async engine, so G2 opens for S3-D only when the pseudo-immutable steps PI-S1-1..PI-S1-3 and PI-S2-1 have landed as well (none is in `src` today; see S3-F1..F10). Everything behind S3-D inherits that wait: S3-F, S3-G, S3-H, S6-F, S6-G. S3-C (baseline) and the early-start set S3-F0, S3-F1, S3-F2, S3-F6 (early half), S3-F10 do not.
 
 Groups are a lower bound on waiting, not a schedule: a lane may start as soon
 as its own "Depends on" cell is satisfied. Four things are worth starting
@@ -242,9 +242,9 @@ count, which is why S3-C comes first.
 | S3-A | self-hosted `type_infer/generalization.spl`, `type_infer/generic_calls.spl`; one shared constant for the cap | a function called at 2 type vectors has 2 instances; the same vector from 5 call sites is 1 instance; `cap + 1` vectors refused with the call sites listed; a `var` binding is not generalized; an explicit `<T>` function is not capped |
 | S3-B | self-hosted: detection in the S2-E SCC module; `30.types/higher_rank_poly*.spl` | polymorphic recursion refused with both instantiations and locations; a parameter used at two types in one body refused; a body that dispatches on a runtime tag refused with "use an enum"; ordinary recursion still inferred |
 | S3-C | measurement scripts under `scripts/check/`; a collector-only pass over the typed HIR (no code generation); results recorded under `doc/10_metrics/` by the usual generator | recorded on a named binary identity: stage 2/3 binary size, bootstrap wall time per stage, compile time of the generic-heavy modules; instance count per generic and in total for `src/compiler` and `src/lib`; the top generics by instance count listed. No budget is proposed without these numbers |
-| S3-D | **No new stage directory.** Request point in the typed-HIR stage; the instance task in `80.driver/` on the shared scheduler; `generic_subst_model` as the one substitution implementation (see the note under S3-F1..F10: it is not in `src` today); `50.mir/_MirLowering/function_lowering.spl` (the `TypeParam` to tagged-`i64` lowering) (no generic-call refusal exists on this line: `20.hir/hir_lowering/_Items/declaration_lowering.spl:325` only mentions `E-GEN-001` in a comment). Design: `doc/05_design/compiler/cache/generic_instance_tldr_trace.md`. Historical only: `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md`, `doc/05_design/compiler/generics/generic_instantiation_model.md`, the deleted stage before `200a05f5bc8` | a generic called at `i64` and at `text` produces two function symbols; the `i64` instance contains no box, decode or tag operation (inspect MIR or IR); no `TypeParam`, `Infer` or `Any` reaches MIR from safe code (a task whose output holds one fails, shown by a fixture); generic types and their methods are instantiated too; interpreter, JIT and native agree on the differential fixtures; the bootstrap completes; no pass runs between HIR and MIR for a program with no generic use |
+| S3-D | **No new stage directory.** Request point in the typed-HIR stage; the instance task in `80.driver/` on the shared scheduler; `generic_subst_model` as the one substitution implementation (restored by S3-F0); `50.mir/_MirLowering/function_lowering.spl` (the `TypeParam` to tagged-`i64` lowering) (no generic-call refusal exists on this line: `20.hir/hir_lowering/_Items/declaration_lowering.spl:325` only mentions `E-GEN-001` in a comment). Design: `doc/05_design/compiler/cache/generic_instance_tldr_trace.md`. Historical only: `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md`, `doc/05_design/compiler/generics/generic_instantiation_model.md`, the deleted stage before `200a05f5bc8` | a generic called at `i64` and at `text` produces two function symbols; the `i64` instance contains no box, decode or tag operation (inspect MIR or IR); no `TypeParam`, `Infer` or `Any` reaches MIR from safe code (a task whose output holds one fails, shown by a fixture); generic types and their methods are instantiated too; interpreter, JIT and native agree on the differential fixtures; the bootstrap completes; no pass runs between HIR and MIR for a program with no generic use |
 | S3-E | **open (Q13); runs only if the owner decides the seed must monomorphize.** seed `compiler/src/hir/lower/type_resolver.rs` (lines 320-322 resolve a single-letter type name to `ANY`), a real pass behind `PipelineStage::Monomorphize` (`pipeline_parallel.rs`), MIR lowering and codegen for instances | the same two-symbol and no-tag-operation fixtures pass in the seed; the seed builds `src/compiler`; seed and self-hosted agree on instance keys for the shared corpus. Explicit generics only: the seed does not infer |
-| S3-F | see S3-F1..F10 below; `80.driver/driver_build/incremental.spl`, object keys, module interface data (`interface_digest_of`), TLDR companion sections | the same instance requested by two modules is emitted once; editing a generic body invalidates its instances and nothing else (consumer module objects stay); editing a private non-generic body still invalidates no importer |
+| S3-F | see S3-F0..F10 below; `80.driver/driver_build/incremental.spl`, object keys, module interface data (`interface_digest_of`), TLDR companion sections | the same instance requested by two modules is emitted once; editing a generic body invalidates its instances and nothing else (consumer module objects stay); editing a private non-generic body still invalidates no importer |
 | S3-G | checks under `scripts/check/` wired through `config/check/must_check_gates.sdn`; benchmark fixtures | a build over the size, time or instance budget fails with the offending generics named; a run-time benchmark set is recorded next to size, so a size win cannot hide a speed loss; the budget values are the ones the owner set (Q11) |
 | S3-H | `.claude/rules/language.md` ("Generics are erased"), the header of the 2026-10-31 generics plan, any guard under `scripts/check/` that assumes erasure, `doc/07_guide/language/type_system.md`, `doc/05_design/compiler/generics/generic_instantiation_model.md` | every statement that generics are erased is either removed or dated as historical; no guard still enforces an erased-model assumption. Lands only after S3-D and S3-E, never before: until then those statements are true |
 
@@ -257,7 +257,7 @@ that cannot fit any reasonable budget, stop and report before S3-D: the
 mitigation of sharing bodies between same-representation instances (design
 §6.3) would then be part of S3-D, not an afterthought.
 
-### S3-F1..F10: instances as async queries, traceable through TLDR (added 2026-11-28)
+### S3-F0..F10: instances as async queries, traceable through TLDR (added 2026-11-28)
 
 Design: `doc/05_design/compiler/cache/generic_instance_tldr_trace.md`
 (TLDR beside it). Owner directions of 2026-11-28: instance traceability goes
@@ -274,35 +274,60 @@ lower model, as in that plan. "Tests" says who may author the specs.
 
 | Stage | Work | Needs | Acceptance (one line) | Guide / Impl | Tests |
 |-------|------|-------|-----------------------|--------------|-------|
+| S3-F0 | Restore `generic_subst_model.spl` (706 lines; pure, no HIR dependency) from `200a05f5bc8^:src/compiler/40.mono/model/` as **the one substitution implementation**, in a non-pass location (not a `40.mono` directory), with its three specs from `test/01_unit/compiler/mono/model/` (laws, flow, refinement); state its correspondence to `src/verification/type_inference_compile/src/GenericSubstModel.lean` (`MType` var / con / app, substitution laws S1-S3, key laws K1-K2). `generic_effect_projection.spl` and `generic_subst_universe.spl` come back only if the specs need them | none | the restored laws spec passes with its universe sizes asserted (a vacuous sweep fails); each Lean theorem names the Simple law it mirrors, and each law the theorem; `mt_key_type` output equals the key text the projector writes for the same type | Fable / lower | sonnet (restore specs); opus (Lean correspondence table) |
 | S3-F1 | Provider: `open_needs` on `GenericTemplateEntryV1` (trailing field, section schema v3; not in any template fingerprint, it enters each instance key), filled once by the typed-HIR stage; `body_digest` re-documented | S2-C; PI-S3-1 (write-once slot) | editing a body so that it needs one more instance changes the decoded `open_needs` and the keys of that template's instances; a binder rename changes neither; a v2 reader misses | Fable / lower | sonnet (codec, MC/DC) |
 | S3-F2 | Consumer: `needed-instance\|` section codec and producer; concrete-view acquisition (`Concrete` only) | S3-F1; S2-C | module B using `Box<i64>` twice and `Box<text>` once writes two rows with three origins; a `Partial` view writes none and marks the set incomplete | Fable / lower | sonnet (codec); opus (acquisition) |
 | S3-F3 | Demand closure: `request_instance` through the single-flight reader, set-once slot per `ConcreteTldrKey`, quiescence rule, depth and budget limits; dry-run mode is S3-C's instance count | S3-F2; PI-S1-3, PI-S1-5; the five prerequisites of `tldr_caller_async_prerequisites_2026-10-30.md` | two modules requesting one key start one task; the instance set at quiescence is identical and identically ordered across 20 runs with shuffled task order; depth 33 fails naming the chain | Fable / Fable | opus (ordering, failure wake); Fable reviews |
 | S3-F4 | Specialization task (the body of S3-D): substitute with the one `generic_subst_model`, lower, emit; per-task invariant; erased lowering removed for safe code | S3-F3; PI-S1-1, PI-S1-2, PI-S2-1 | S3-D's row; plus a task whose output still holds a `TypeParam` fails its slot and every waiter sees the failure | Fable / Fable | Fable (invariant fixtures); sonnet (symbol-count fixtures) |
 | S3-F5 | Keys and artifacts: per-instance key record (view / HIR / object levels), target and toolchain fold, packed blobs, ledger accounting, `BuildSession` free after object emit | S3-F4; PI-S2-6, PI-S3-4..PI-S3-6; PI-A-1 until PI-P-1 | one instance, two targets: one concrete view key, two object keys; RSS after emit returns to the pre-instance level within the session bound | Fable / lower | sonnet |
-| S3-F6 | Reverse references: first producer for family `generic-specialization` (body / signature / bound -> instance; instance -> requester) | S3-F3 | after a build the rows for `Box<i64>` name its template facets and both requesting modules; a corrupt shard gives the existing fail-closed fallback | Fable / lower | sonnet (rows); opus (fallback) |
+| S3-F6 | Reverse references: first producer for family `generic-specialization` (body / signature / bound -> instance; instance -> requester). Early half: row shapes, read-manifest route and rows for a module's direct needs. Late half (with S3-F4): rows written by instance tasks | S3-F2 (early half); S3-F4 (late half) | after a build the rows for `Box<i64>` name its template facets and both requesting modules; a corrupt shard gives the existing fail-closed fallback | Fable / lower | sonnet (rows); opus (fallback) |
 | S3-F7 | **Invalidation**: the dirty-set table of design §7 as executable cases, each with its negative control; no-change build | S3-F5, S3-F6; PI-B-1..PI-B-3 | second identical build runs 0 instance tasks and 0 links; a body edit rebuilds exactly that template's instance objects and no consumer module object; an argument change, a needed-set change and a target change each dirty exactly the row's set | Fable / lower | opus (cases); Fable (negative controls) |
 | S3-F8 | Trace queries: who / why / from where / cost / dry-run impact, as facts for the one `TraceViewProjection` | S3-F6; the projection itself (extreme-typing lane, not implemented) | "who needs `Pair<i64,f64>`" lists every origin span and the `via` chain to a direct source use, with no file re-parsed (read counter) | Fable / lower | sonnet |
 | S3-F9 | Remote: instance task as a content-keyed action for the async local runner or the distributed scheduler | S3-F5; `doc/04_architecture/dist_build_scheduler.md` attempt leases and publication fences | the same instance built locally and remotely is byte-identical; a worker with a revoked fence cannot publish; the input manifest holds no full source file | Fable / lower | opus |
-| S3-F10 | Coverage gate and spec set: >= 95 % per touched unit module from unit specs, >= 70 % over the module set from unit + integration + system specs; first diagnose the red `generic_tldr_view_v1_mcdc_spec.spl` (26 of 59 failing under seed `simple-local-20261128f`; cause unknown: spec, seed or source) | none for the gate script; runs with every stage | the gate fails a module at 94 %, passes at 95 %, and reports ERROR (not pass) on a failing spec or an empty denominator | Fable / lower | sonnet (specs); opus (gate selftest) |
+| S3-F10 | Coverage gate and spec set, measured as **decision and condition coverage** (owner decision 2026-11-28; line % later): >= 95 % per touched unit module from unit specs, >= 70 % over the module set from unit + integration + system specs; first diagnose the red `generic_tldr_view_v1_mcdc_spec.spl` (26 of 59 failing under seed `simple-local-20261128f`; cause unknown: spec, seed or source) | none for the gate script; runs with every stage | the gate fails a module at 94 %, passes at 95 %, and reports ERROR (not pass) on a failing spec or an empty denominator | Fable / lower | sonnet (specs); opus (gate selftest) |
 
-Order: F1, F2, then F3; F4 and F6 in parallel after F3; F5 after F4; F7 after
-F5 and F6; F8, F9 after their inputs; F10 from the start. F1, F2, F6 and the
-codec half of F10 need nothing unlanded from the pseudo-immutable plan except
-the write-once slot (PI-S3-1), which they can precede by writing the field at
-publication time.
+**Owner decisions, 2026-11-28.** (1) Coverage is gated on decision and
+condition coverage; line % later. (2) One object per instance. (3) **Engine
+first:** S3-F3, S3-F4 and everything behind them start only after the
+pseudo-immutable async steps land; the mono exclusion in
+`tldr_async_owner_integration_2026-10-30.md` stays as written until then, and
+no instance request runs on the existing FileFiber / `TldrTableV1` path.
+(4) `generic_subst_model.spl` is restored from history as the one substitution
+implementation (S3-F0). Q13 unchanged.
+
+**Early-start set (no engine step needed):** S3-F0, S3-F1, S3-F2, the early
+half of S3-F6, S3-F10. S3-F1 and S3-F2 may precede the write-once slot
+(PI-S3-1) by writing their fields at publication time.
+
+**Critical path: which engine step gates which stage.**
+
+| Stage | Gated by (pseudo-immutable plan) | In `src` today? |
+|-------|----------------------------------|-----------------|
+| S3-F3 demand closure | PI-S1-3 (`read_tldr_async`), PI-S1-5 (wake-on-publish), and the five caller prerequisites | no / no / no |
+| S3-F4 specialization task | S3-F3; PI-S1-1, PI-S1-2 (async stage nodes), PI-S2-1 (`CompileInvoker`) | no |
+| S3-F5 keys and artifacts | S3-F4; PI-S2-6 (key record), PI-S3-4 (`.sphb`), PI-S3-5 (ledger), PI-S3-6 (mmap writer); PI-A-1 until PI-P-1 | no |
+| S3-F6 late half | S3-F4 | - |
+| S3-F7 invalidation | S3-F5, S3-F6; PI-B-1..PI-B-3 (no-change build), PI-S3-7 | no |
+| S3-F8 trace queries | S3-F6; `TraceViewProjection` (extreme-typing lane) | no |
+| S3-F9 remote action | S3-F5; PI-S2-2, PI-S2-4 | no |
+
+So the shortest route to the first instance object is PI-S1-1, PI-S1-2,
+PI-S1-3, PI-S1-5, then PI-S2-1, with S3-F0..F2 done meanwhile. Order behind
+the gate: F3; F4; F5 and F6-late; F7; F8 and F9.
 
 Notes for the lanes.
 
-- **`generic_subst_model` is not in `src`.** It was
+- **`generic_subst_model` is not in `src` until S3-F0.** It was
   `40.mono/model/generic_subst_model.spl`, deleted with the stage; what remains
-  is its Lean model (`src/verification/type_inference_compile/src/GenericSubstModel.lean`)
-  and the `mt_key_type` key encoding. S3-F4 restores that one file from history
-  (before `200a05f5bc8`) into a non-pass location; it does not restore the
-  stage. `10.frontend/core/type_subst.spl` (global mutable tables, AST level) is
-  not a second implementation to grow.
-- **Coverage measurement today.** The seed's report has no line denominator
-  (hit lines only), so the gate measures per-file **decision** coverage until
-  line sites are registered at load (design §14).
+  is its Lean model and the `mt_key_type` key encoding. S3-F0 restores the
+  file, not the stage. `10.frontend/core/type_subst.spl` (global mutable
+  tables, AST level) is not a second implementation to grow.
+- **Coverage measurement.** The seed's report has no line denominator (hit
+  lines only) but registers every decision and condition site at load, which is
+  why the gate uses those (design §14). Known blind spot: a branch-free
+  function that is never called has no decision; the gate therefore also
+  requires every exported function of a touched module to appear in the
+  report's `functions` table.
 - **S3-H additions (edit when S3-F4 lands, not before):** the header comment of
   `src/compiler/00.common/cache_contract/generic_tldr_view_v1.spl:44-47` and the
   `body_digest` comment at `:90` ("single erased body"), and the docstring of

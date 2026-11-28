@@ -63,12 +63,13 @@ model unless marked. In this section `S3-F1`..`S3-F10` are stages of the no-any 
 
 | Generic stage | Wave slot here | Depends on (this plan) | Why |
 |---|---|---|---|
+| S3-F0 restore `generic_subst_model.spl` | now (early start) | none | the one substitution implementation; restored from `200a05f5bc8^`, not the stage |
 | S3-F1 template `open_needs` | alongside step 3 | S3-1 write-once slot (may precede it by writing at publication) | the field is absent after parse and set once by typed HIR |
 | S3-F2 `needed-instance\|` section | alongside step 3 | S3-1; A-2 digest gate | a second set-once slot on the module TLDR record; the section crosses the trust boundary |
 | S3-F3 demand closure | end of step 1 | S1-3 `read_tldr_async`, S1-5 wake-on-publish | requests are lazy `(module_id, decl_id)` pointer fills; waiters must be woken on terminal failure |
 | S3-F4 specialization task (Impl = Fable) | step 2 | S1-1, S1-2 async stage nodes; S2-1 `CompileInvoker` | the task is `compile(task)` for a different task kind, written once |
 | S3-F5 keys and artifacts | alongside step 2, then step 3 | S2-6 key record; S3-4 `.sphb`, S3-5 ledger, S3-6 mmap writer; A-1 then P-1 | per-instance key record; packed blobs; target stays out of view and HIR keys |
-| S3-F6 reverse-reference rows | after S3-F3 | none | producer for an existing family |
+| S3-F6 reverse-reference rows | early half now; late half after S3-F4 | none | producer for an existing family |
 | S3-F7 invalidation | after Wave B and S3-F5 | B-1..B-3 no-change build; S3-7 invalidation inputs | zero instance tasks on an identical build |
 | S3-F8 trace queries | after S3-F6 | none here | projection owned by the extreme-typing lane |
 | S3-F9 remote action | after step 2 | S2-2 `ProcessInvoker`, S2-4 | same action key locally and remotely |
@@ -87,3 +88,12 @@ cannot start before them. The target-neutral flag in code is
 `tldr_async_owner_integration_2026-10-30.md` excludes mono semantics from its
 slice and `tldr_caller_async_prerequisites_2026-10-30.md` lists five blocking
 prerequisites for a real async caller; S3-F3 is such a caller.
+
+**Owner decision 2026-11-28: engine first.** S3-F3, S3-F4 and everything behind
+them wait for this plan's async steps; the mono exclusion in
+`tldr_async_owner_integration_2026-10-30.md` stays until then. That makes S1-1,
+S1-2, S1-3, S1-5 and S2-1 the critical path to the first instance object, with
+S2-6 and S3-4..S3-6 gating instance artifacts and B-1..B-3 gating the
+invalidation stage. Early-start set meanwhile: S3-F0, S3-F1, S3-F2, S3-F6
+(early half), S3-F10. One object per instance. Coverage is gated on decision
+and condition coverage.

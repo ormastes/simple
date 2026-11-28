@@ -219,7 +219,7 @@ argument keys are enough. That is what "through TLDR" means here.
 
 ## 6. Ownership, dedup, keys, artifacts
 
-**Owner [PROP].** An instance is owned by **itself**: one `InstanceTask`, one
+**Owner (decided 2026-11-28: one object per instance).** An instance is owned by **itself**: one `InstanceTask`, one
 object, named by its key. No consumer object embeds an instance body, and no
 consumer module is "the" owner. The single-flight slot is the cross-module
 dedup; two modules, or two processes through the daemon reader, that request
@@ -369,15 +369,15 @@ document status.
 | Daemon usage ledger | **no** | S3-5 |
 | Concrete-view acquisition (`acquire_concrete_tldr`) | **no** (doc only) | F2 below |
 | `TraceViewProjection` | **no** (doc only) | extreme-typing lane |
-| `generic_subst_model` (the one substitution implementation) | **no**: it was `40.mono/model/generic_subst_model.spl`, deleted with the stage; only its Lean model and the `mt_key_type` encoding remain | S3-F4 restores that one file, not the stage |
+| `generic_subst_model` (the one substitution implementation) | **no**: it was `40.mono/model/generic_subst_model.spl` (706 lines, pure, no HIR dependency), deleted with the stage; its Lean model and the `mt_key_type` encoding remain | S3-F0 restores that file and its three specs from `200a05f5bc8^` (owner decision), not the stage |
 | Instance naming, per-task output invariant | **no** | S3-F4 |
 
 Conflicts to resolve before implementation:
 
 1. `doc/03_plan/compiler/cache/tldr_async_owner_integration_2026-10-30.md`
    forbids editing "mono semantics" in that slice and its runtime evidence is
-   UNRUN. Instance requests extend that table's key space; the slice's API is
-   reused, its exclusion needs lifting by its owner.
+   UNRUN. Instance requests extend that table's key space. **Decided 2026-11-28:**
+   the exclusion stays; S3-F3 and S3-F4 wait until the engine's async steps land.
 2. `tldr_caller_async_prerequisites_2026-10-30.md` lists five blocking
    prerequisites for any real async caller (carrier token adapter, cumulative
    bounds, terminal shutdown, preserved result, worker retention). Instance
@@ -390,7 +390,7 @@ Conflicts to resolve before implementation:
 ## 13. Sub-stages
 
 Listed with dependencies and acceptance in
-`doc/03_plan/language/type_system/no_any_inference_plan.md` (S3-F1..F10) and
+`doc/03_plan/language/type_system/no_any_inference_plan.md` (S3-F0..F10, with the early-start set and the engine steps that gate each stage) and
 slotted into the waves of
 `doc/03_plan/compiler/cache/pseudo_immutable_cache_impl_plan.md` §5.
 
@@ -420,15 +420,17 @@ the run works and writes an SDN report. Findings:
 - `bin/simple test --coverage` cannot be used under the seed (needs the
   self-hosted child APK receipt, `doc/07_guide/infra/testing/coverage.md`).
 
-Smallest gate that works today [PROP]: one script modelled on
+Gate (owner decision 2026-11-28: decision and condition coverage now, line %
+later): one script modelled on
 `scripts/check/check-hash-algos-coverage.shs` that runs the listed specs with
-`SIMPLE_COVERAGE=1`, and per target file computes **decision coverage** from the
+`SIMPLE_COVERAGE=1`, and per target file computes **decision and condition coverage** from the
 SDN (`covered / total`, both-outcomes rule), failing below 95 % for a unit
 module and below 70 % for the set total; a spec failure or an empty denominator
-is an ERROR, not a pass. Decision coverage is a **different** measure, not a
+is an ERROR, not a pass. This is a **different** measure from line coverage, not a
 stricter one: a branch-free function that is never called has no decision and
-passes. So the recommended fix is to gate on **lines** as the owner wrote it: the interpreter
-must register line sites with zero counts at module load, as it already does
-for decisions (`interpreter/coverage_sites.rs`): a small seed change, listed as
-an owner decision. The script and the module list are shared with the sibling
+passes. The gate therefore also requires every exported function of a touched
+module to appear in the report's `functions` table. Line % becomes possible when the interpreter
+registers line sites with zero counts at module load, as it already does
+for decisions (`interpreter/coverage_sites.rs`); that is deferred.
+The script and the module list are shared with the sibling
 aspect lane; neither lane forks them.
