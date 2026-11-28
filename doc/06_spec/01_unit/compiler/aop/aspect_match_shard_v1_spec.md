@@ -358,10 +358,10 @@ expect(no_new.reuse).to_equal([])
 
 </details>
 
-#### selector digest excludes advice body while apply key includes it
+#### match shard takes no advice input, so only the apply key sees advice and base body edits
 
 - Derive apply keys that differ only in advice body or only in base body
-- The selector digest and match key ignore the advice body; each body change yields a distinct apply key
+- Recompute the shard from the same selector and facts: its digests cannot see advice; each body change yields a distinct apply key
    - Exec capture: after_step
    - Evidence: execution result verified by 4 expected checks
    - Expected: shard_x.selector_digest equals `shard_y.selector_digest`
@@ -382,7 +382,7 @@ step("Derive apply keys that differ only in advice body or only in base body")
 val a = advice_apply_key_v1("m", advice("x"), "b1")
 val b = advice_apply_key_v1("m", advice("y"), "b1")
 val c = advice_apply_key_v1("m", advice("x"), "b9")
-step("The selector digest and match key ignore the advice body; each body change yields a distinct apply key")
+step("Recompute the shard from the same selector and facts: its digests cannot see advice; each body change yields a distinct apply key")
 val sel = pointcut_selector_parse_v1("attr(logged)")
 val facts = dir_a([])
 val shard_x = pointcut_match_shard_compute_v1(sel, facts)
@@ -1432,15 +1432,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `2d8158cbb6ed0e855a3e86087fb72835f65bb534f3b940d27b310bc3da23dd53`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `d4df70e726fc39cc4a04861a2b66a3c0ddfcf5d157cda4ae8e1db29a0b5ca7c2`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `2d8158cbb6ed0e855a3e86087fb72835f65bb534f3b940d27b310bc3da23dd53`.
+Source SHA-256: `d4df70e726fc39cc4a04861a2b66a3c0ddfcf5d157cda4ae8e1db29a0b5ca7c2`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `2d8158cbb6ed0e855a3e86087fb72835f65bb534f3b940d27b310bc3da23dd53`  
+Source SHA-256: `d4df70e726fc39cc4a04861a2b66a3c0ddfcf5d157cda4ae8e1db29a0b5ca7c2`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
