@@ -72,6 +72,7 @@ mod conditional_empty_array_tests;
 mod trait_builtin_named_method_tests;
 mod enum_import_scope_tests;
 mod enum_discriminant_owner_tests;
+mod option_non_option_tests;
 mod fn_alias_import_scope_tests;
 mod same_named_trait_default_tests;
 mod same_named_type_self_tests;

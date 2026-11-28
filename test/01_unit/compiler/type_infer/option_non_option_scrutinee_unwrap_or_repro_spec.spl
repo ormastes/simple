@@ -1,0 +1,192 @@
+# Purpose and audience: executable reproducer specification for Option pattern
+# scrutinees and Option method receiver/default checks in HM inference.
+# @req REQ-SSPEC-UNIT
+# Reproducing spec for
+# doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
+
+use std.spec.*
+use std.spec.step
+use compiler.types.dim_constraints_types.*
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.inference_control.*
+use compiler.types.type_infer.inference_expr_calls.*
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+
+fn mk_option_pattern_ctx() -> HmInferContext:
+    var ctx = HmInferContext.new()
+    val sp = Span.empty()
+    val i_ty = HirType(kind: HirTypeKind.Int(64, true), span: sp)
+    val opt_ty = HirType(kind: HirTypeKind.Optional(i_ty), span: sp)
+    val str_ty = HirType(kind: HirTypeKind.Str, span: sp)
+    val res_ty = HirType(kind: HirTypeKind.Result(i_ty, str_ty), span: sp)
+    val pt_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 101), []), span: sp)
+    val box_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 104), []), span: sp)
+    val color_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 105), []), span: sp)
+    val wrap_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 106), []), span: sp)
+    val ext_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 107), []), span: sp)
+    ctx.bind_mono("o", opt_ty)
+    ctx.bind_mono("n", i_ty)
+    ctx.bind_mono("r", res_ty)
+    ctx.bind_mono("1", opt_ty)
+    ctx.bind_mono("2", i_ty)
+    ctx.bind_mono("3", res_ty)
+    ctx.bind_mono("pt", pt_ty)
+    ctx.bind_mono("10", pt_ty)
+    ctx.bind_mono("bx", box_ty)
+    ctx.bind_mono("11", box_ty)
+    ctx.bind_mono("col", color_ty)
+    ctx.bind_mono("12", color_ty)
+    ctx.bind_mono("wr", wrap_ty)
+    ctx.bind_mono("13", wrap_ty)
+    ctx.bind_mono("ex", ext_ty)
+    ctx.bind_mono("14", ext_ty)
+    ctx.symbol_names[100] = "Option"
+    ctx.symbol_names[101] = "Point"
+    ctx.symbol_kinds[101] = "struct"
+    ctx.symbol_names[102] = "Result"
+    ctx.symbol_kinds[102] = "enum"
+    ctx.symbol_names[103] = "CustomOpt"
+    ctx.symbol_kinds[103] = "enum"
+    ctx.symbol_names[104] = "BoxCls"
+    ctx.symbol_kinds[104] = "class"
+    ctx.symbol_names[105] = "Color"
+    ctx.symbol_kinds[105] = "enum"
+    ctx.symbol_names[106] = "Wrap"
+    ctx.symbol_kinds[106] = "struct"
+    ctx.symbol_names[107] = "ImportedOpt"
+    ctx.symbol_kinds[107] = "struct"
+    ctx.external_type_symbols[107] = true
+    ctx.register_named_type_method_v1("Wrap", "unwrap")
+    ctx.register_named_type_method_v1("Wrap", "unwrap_or")
+    ctx
+
+describe "HM type inference Option pattern scrutinee and unwrap_or checks":
+    # @manual scenario evidence
+    it "rejects Option.Some, struct Some, Result Some, and scalar nil patterns":
+        # @req REQ-SSPEC-UNIT
+        step("reject scalar nil, Option.Some on i64, and Some on struct/Result scrutinees")
+        val ctx = mk_option_pattern_ctx()
+        val sp = Span.empty()
+        val i_ty = HirType(kind: HirTypeKind.Int(64, true), span: sp)
+        val opt_named = HirType(kind: HirTypeKind.Named(SymbolId(id: 100), [i_ty]), span: sp)
+        val pt_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 101), []), span: sp)
+        val res_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 102), [i_ty]), span: sp)
+
+        val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: i_ty, span: sp)
+        val nil_pat = HirPattern(kind: HirPatternKind.Literal(nil_expr), has_type_: false, type_: i_ty, span: sp)
+        match ctx.infer_pattern(nil_pat, i_ty):
+            case Err(e): expect(e.message()).to_contain("E-TYPE-NIL-COMPARE")
+            case Ok(_): expect("expected nil pattern error on i64").to_equal("")
+
+        val pat_opt_some = HirPattern(kind: HirPatternKind.Enum(opt_named, "Some", None), has_type_: false, type_: opt_named, span: sp)
+        match ctx.infer_pattern(pat_opt_some, i_ty):
+            case Err(e): expect(e.message()).to_contain("SPL-PAT-001")
+            case Ok(_): expect("expected Option.Some error on i64").to_equal("")
+
+        match ctx.infer_option_pattern("Some", None, pt_ty, sp):
+            case Err(e): expect(e.message()).to_contain("SPL-PAT-001")
+            case Ok(_): expect("expected Some error on Point struct").to_equal("")
+
+        match ctx.infer_option_pattern("Some", None, res_ty, sp):
+            case Err(e): expect(e.message()).to_contain("SPL-PAT-001")
+            case Ok(_): expect("expected Some error on Result enum").to_equal("")
+
+    it "rejects non-optional unwrap_or receivers and mismatched default arguments while keeping valid Option/Result calls":
+        # @req REQ-SSPEC-UNIT
+        step("check unwrap_or on i64, mismatched Option<i64>.unwrap_or(text), and Result.is_some")
+        val ctx = mk_option_pattern_ctx()
+        val sp = Span.empty()
+        val i_ty = HirType(kind: HirTypeKind.Int(64, true), span: sp)
+        val opt_ty = HirType(kind: HirTypeKind.Optional(i_ty), span: sp)
+        val str_ty = HirType(kind: HirTypeKind.Str, span: sp)
+        val res_ty = HirType(kind: HirTypeKind.Result(i_ty, str_ty), span: sp)
+        val custom_enum_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 103), []), span: sp)
+
+        val recv_o = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 1), "o"), has_type_: true, type_: opt_ty, span: sp)
+        val recv_n = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 2), "n"), has_type_: true, type_: i_ty, span: sp)
+        val recv_r = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 3), "r"), has_type_: true, type_: res_ty, span: sp)
+        val int_arg = HirCallArg(name: nil, value: HirExpr(kind: HirExprKind.IntLit(9, None), has_type_: true, type_: i_ty, span: sp), span: sp)
+        val str_arg = HirCallArg(name: nil, value: HirExpr(kind: HirExprKind.StringLit("oops", nil), has_type_: true, type_: str_ty, span: sp), span: sp)
+
+        match ctx.infer_method_call(recv_n, "unwrap_or", [int_arg], MethodResolution.Unresolved, sp):
+            case Err(e): expect(e.message()).to_contain("Option method 'unwrap_or' requires an optional receiver")
+            case Ok(_): expect("expected non-optional unwrap_or rejection").to_equal("")
+
+        match ctx.infer_method_call(recv_o, "unwrap_or", [str_arg], MethodResolution.Unresolved, sp):
+            case Err(e): expect(e.message()).to_contain("Option method 'unwrap_or' default argument type mismatch")
+            case Ok(_): expect("expected unwrap_or default mismatch").to_equal("")
+
+        match ctx.infer_method_call(recv_r, "is_some", [], MethodResolution.Unresolved, sp):
+            case Err(e): expect(e.message()).to_contain("Option method 'is_some' requires an optional receiver")
+            case Ok(_): expect("expected Result.is_some rejection").to_equal("")
+
+        match ctx.infer_method_call(recv_o, "unwrap_or", [int_arg], MethodResolution.Unresolved, sp):
+            case Ok(rt): expect("{rt.kind}").to_contain("Int")
+            case Err(e): expect("unexpected error for valid Option.unwrap_or: " + e.message()).to_equal("")
+
+        match ctx.infer_method_call(recv_r, "unwrap_or", [int_arg], MethodResolution.Unresolved, sp):
+            case Ok(rt): expect("{rt.kind}").to_contain("Int")
+            case Err(e): expect("unexpected error for valid Result.unwrap_or: " + e.message()).to_equal("")
+
+        var custom_enum_accepted = false
+        match ctx.infer_option_pattern("Some", None, custom_enum_ty, sp):
+            case Ok(_): custom_enum_accepted = true
+            case Err(e): expect("custom enum Some should stay allowed: " + e.message()).to_equal("")
+        expect(custom_enum_accepted).to_equal(true)
+
+    it "rejects Option methods on struct/class/enum receivers without custom methods while keeping custom and external receivers":
+        # @req REQ-SSPEC-UNIT
+        step("verify Point/BoxCls/Color without Option methods fail, Wrap.unwrap succeeds, Wrap.is_some fails, and external ImportedOpt.expect stays allowed")
+        val ctx = mk_option_pattern_ctx()
+        val sp = Span.empty()
+        val i_ty = HirType(kind: HirTypeKind.Int(64, true), span: sp)
+        val str_ty = HirType(kind: HirTypeKind.Str, span: sp)
+        val pt_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 101), []), span: sp)
+        val box_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 104), []), span: sp)
+        val color_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 105), []), span: sp)
+        val wrap_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 106), []), span: sp)
+        val ext_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 107), []), span: sp)
+
+        val recv_pt = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 10), "pt"), has_type_: true, type_: pt_ty, span: sp)
+        val recv_box = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 11), "bx"), has_type_: true, type_: box_ty, span: sp)
+        val recv_color = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 12), "col"), has_type_: true, type_: color_ty, span: sp)
+        val recv_wrap = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 13), "wr"), has_type_: true, type_: wrap_ty, span: sp)
+        val recv_ext = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 14), "ex"), has_type_: true, type_: ext_ty, span: sp)
+        val int_arg = HirCallArg(name: nil, value: HirExpr(kind: HirExprKind.IntLit(9, None), has_type_: true, type_: i_ty, span: sp), span: sp)
+        val str_arg = HirCallArg(name: nil, value: HirExpr(kind: HirExprKind.StringLit("msg", nil), has_type_: true, type_: str_ty, span: sp), span: sp)
+
+        match ctx.infer_method_call(recv_pt, "unwrap_or", [int_arg], MethodResolution.Unresolved, sp):
+            case Err(e): expect(e.message()).to_contain("Option method 'unwrap_or' requires an optional receiver")
+            case Ok(_): expect("expected Point.unwrap_or rejection").to_equal("")
+
+        match ctx.infer_method_call(recv_box, "is_some", [], MethodResolution.Unresolved, sp):
+            case Err(e): expect(e.message()).to_contain("Option method 'is_some' requires an optional receiver")
+            case Ok(_): expect("expected BoxCls.is_some rejection").to_equal("")
+
+        match ctx.infer_method_call(recv_color, "unwrap", [], MethodResolution.Unresolved, sp):
+            case Err(e): expect(e.message()).to_contain("Option method 'unwrap' requires an optional receiver")
+            case Ok(_): expect("expected Color.unwrap rejection").to_equal("")
+
+        var wrap_unwrap_ok = false
+        match ctx.infer_method_call(recv_wrap, "unwrap", [], MethodResolution.Unresolved, sp):
+            case Ok(_): wrap_unwrap_ok = true
+            case Err(e): expect("unexpected error for custom Wrap.unwrap: " + e.message()).to_equal("")
+        expect(wrap_unwrap_ok).to_equal(true)
+
+        var wrap_unwrap_or_ok = false
+        match ctx.infer_method_call(recv_wrap, "unwrap_or", [int_arg], MethodResolution.Unresolved, sp):
+            case Ok(_): wrap_unwrap_or_ok = true
+            case Err(e): expect("unexpected error for custom Wrap.unwrap_or: " + e.message()).to_equal("")
+        expect(wrap_unwrap_or_ok).to_equal(true)
+
+        match ctx.infer_method_call(recv_wrap, "is_some", [], MethodResolution.Unresolved, sp):
+            case Err(e): expect(e.message()).to_contain("Option method 'is_some' requires an optional receiver")
+            case Ok(_): expect("expected Wrap.is_some rejection").to_equal("")
+
+        var ext_expect_ok = false
+        match ctx.infer_method_call(recv_ext, "expect", [str_arg], MethodResolution.Unresolved, sp):
+            case Ok(_): ext_expect_ok = true
+            case Err(e): expect("unexpected error for external ImportedOpt.expect: " + e.message()).to_equal("")
+        expect(ext_expect_ok).to_equal(true)

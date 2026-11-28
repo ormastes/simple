@@ -281,11 +281,7 @@ impl Lowerer {
             {
                 return lowered;
             }
-            let optional_ty = self.module.types.register(HirType::Pointer {
-                kind: PointerKind::Shared,
-                capability: ast::ReferenceCapability::Shared,
-                inner: value,
-            });
+            let optional_ty = self.module.types.register_optional(value);
             return HirExpr {
                 kind: lowered.kind,
                 ty: optional_ty,
@@ -326,11 +322,7 @@ impl Lowerer {
         }
         let mut call_args = vec![(**receiver).clone()];
         call_args.extend(args.iter().cloned());
-        let optional_ty = self.module.types.register(HirType::Pointer {
-            kind: PointerKind::Shared,
-            capability: ast::ReferenceCapability::Shared,
-            inner: element,
-        });
+        let optional_ty = self.module.types.register_optional(element);
         let tagged_call = HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: rt_name.to_string(),

@@ -26,7 +26,21 @@ struct HirTypecheckReceiptV1:
     # Owned flat observations, never HIR/type/symbol roots or admission evidence.
     api_signatures: ApiSignatureFactsV1? = None
 
-export HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1
+enum OptionShapeSeverityVerdictV1:
+    MandatoryError
+    StandardSeverity
+
+pub fn option_shape_severity_verdict_v1(msg: text) -> OptionShapeSeverityVerdictV1:
+    """Option/nil pattern and Option method receiver/default mismatches are hard compile errors even under Advisory."""
+    val is_mandatory = (msg.contains("error[SPL-PAT-001]") or
+        msg.contains("Option method '") or
+        msg.contains("Option pattern '") or
+        msg.contains("Result method 'unwrap_or' default argument type mismatch"))
+    if is_mandatory:
+        return OptionShapeSeverityVerdictV1.MandatoryError
+    OptionShapeSeverityVerdictV1.StandardSeverity
+
+export HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1, OptionShapeSeverityVerdictV1, option_shape_severity_verdict_v1
 
 # Shared actual-body consumer. Policy is resolved by the caller outside scratch.
 # E-TYPE-FN-VALUE (bug typecheck_accepts_fn_value_for_text_param_2026-11-06).
@@ -86,6 +100,7 @@ pub fn collect_module_typecheck_receipt_v1(
     # script_mode (CompileMode.Interpret), where it is a warning.
     unit_profile_apply(env_get("SIMPLE_TYPECHECK_PROFILE"), script_mode)
     val _stale_unit = unit_profile_drain_diagnostics(name)
+    ictx.register_project_type_methods(project_modules)
     ictx.infer_module(m)
     for umsg in unit_profile_drain_diagnostics(name):
         out = out.push(umsg)
@@ -128,6 +143,13 @@ pub fn collect_module_typecheck_receipt_v1(
         val msg = "[typecheck] {name}: " +
             format_type_infer_error_v1(ierr)
         out = out.push(msg)
+        match option_shape_severity_verdict_v1(msg):
+            case OptionShapeSeverityVerdictV1.MandatoryError:
+                errors.push(msg)
+                e_idx = e_idx + 1
+                continue
+            case OptionShapeSeverityVerdictV1.StandardSeverity:
+                val _ = 0
         # E-TYPE-NIL-COMPARE rides this list at the pass's own severity:
         # a non-optional-vs-nil comparison was a unification ERROR here
         # before the rule named it, so under Deny it stays an error (an

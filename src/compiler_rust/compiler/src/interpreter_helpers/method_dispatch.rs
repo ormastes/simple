@@ -1114,16 +1114,59 @@ pub(crate) fn call_method_on_value_with_args(
     // Bare-payload Option/Result convention: a present Some(x)/Ok(x) is stored as
     // the bare value x. In a chained/nested call (e.g. `obj.get().unwrap()`), these
     // Option/Result methods on a present value reduce to the value itself or a
-    // constant, so they never need the (already-evaluated) args. None/Err is
-    // Value::Nil and is left to the generic path below.
-    // ponytail: covers payload-returning + predicate methods; map/and_then on an
-    // Option in nested position would need the AST closure arg — add only if a real
-    // case needs it.
+    // constant, so they never need the (already-evaluated) args. Absent `None` is
+    // `Value::Nil`, which mirrors `interpreter_method/mod.rs` directly below.
+    // ponytail: covers payload-returning + predicate methods; map/and_then on a
+    // present Option in nested position would need the AST closure arg — add only
+    // if a real case needs it.
     if !matches!(recv_val, Value::Nil) {
         match method {
             "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" => return Ok(recv_val),
             "is_some" | "is_ok" => return Ok(Value::Bool(true)),
             "is_none" | "is_err" => return Ok(Value::Bool(false)),
+            _ => {}
+        }
+    } else {
+        match method {
+            "map" | "and_then" | "flat_map" => return Ok(Value::Nil),
+            "unwrap_or" => return Ok(_args.first().cloned().unwrap_or(Value::Nil)),
+            "is_some" | "is_present" => return Ok(Value::Bool(false)),
+            "is_none" | "is_nil" | "is_null" => return Ok(Value::Bool(true)),
+            "ok_or" => return Ok(Value::err(_args.first().cloned().unwrap_or(Value::Nil))),
+            "unwrap" => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("use unwrap_or(default) or check with is_some() first");
+                return Err(CompileError::semantic_with_context(
+                    "called unwrap() on None/nil value".to_string(),
+                    ctx,
+                ));
+            }
+            "expect" => {
+                let msg = _args
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_else(|| "expected Some value".to_string());
+                let ctx = ErrorContext::new().with_code(codes::INVALID_OPERATION);
+                return Err(CompileError::semantic_with_context(
+                    format!("expect() failed: {msg}"),
+                    ctx,
+                ));
+            }
+            "or_else" | "unwrap_or_else" => {
+                if let Some(Value::Lambda {
+                    params: _,
+                    body,
+                    env: captured,
+                }) = _args.first()
+                {
+                    let _closure_origin =
+                        crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(captured);
+                    let mut local_env = Env::clone(captured);
+                    return evaluate_expr(body, &mut local_env, _functions, _classes, _enums, _impl_methods);
+                }
+                return Ok(Value::Nil);
+            }
             _ => {}
         }
     }
