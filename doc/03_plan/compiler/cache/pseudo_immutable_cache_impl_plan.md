@@ -59,7 +59,7 @@ Stage rows and acceptance: `doc/03_plan/language/type_system/no_any_inference_pl
 S3-F1..F10 (S3-D is reframed there as a specialization query, not a pass).
 Owner direction: generic specialization is an async task in this engine; it
 adds no scheduler, cache protocol or registry (R01). Guide = Fable, Impl = lower
-model unless marked.
+model unless marked. In this section `S3-F1`..`S3-F10` are stages of the no-any plan; bare `S1-n`, `S2-n`, `S3-n` are this plan's own steps.
 
 | Generic stage | Wave slot here | Depends on (this plan) | Why |
 |---|---|---|---|

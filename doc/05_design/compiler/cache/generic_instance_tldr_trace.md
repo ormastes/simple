@@ -39,7 +39,7 @@ span, so "who needs `Pair<i64,f64>`, why, from where" is a read, not a rebuild.
 | Frontend projector | `10.frontend/cache_artifact/generic_tldr_projector.spl:164` (`_project_generic_template_framed_v2`), inputs `GenericDeclInputV1` `:22-38` | projects struct/class/fn templates to `GenericTemplateEntryV1`; `body_digest` is an optional input | provider side (§3) |
 | TLDR companion writer | `80.driver/cache/module_artifacts_v1.spl:258-269` (`generic-template\|` section, `generic\|` / `inline\|` body sections); decls from `module_public_summary_facts_v1.spl:157-207` | template section + body text sections written; **no per-module used-instance section** | provider + consumer sections (§3, §4) |
 | HIR | `HirExprKind.Call(callee, args, type_args)` (`20.hir/generated/hir_codec.spl:3824-3848`) | explicit type args are kept on the call | request point for explicit instances |
-| Types | `30.types/type_infer/generic_calls.spl`, `generalization.spl` | infers type vectors; nothing persists them as instance keys | request point for inferred instances (needs plan S2-C write-back) |
+| Types | `30.types/type_infer/generic_calls.spl` (HM fresh variables, substitution and bounds for direct calls; header read only), `generalization.spl` (not inspected) | type vectors are inferred; no instance key is persisted (0 uses of `concrete_tldr_key_v1` outside its module) | request point for inferred instances (needs plan S2-C write-back) |
 | MIR lowering | `50.mir/_MirLowering/function_lowering.spl:1947-1957` | `TypeParam` -> `MirType.i64()` (one erased body) | lowers instance bodies; no `TypeParam` allowed in |
 | Driver / incremental | `80.driver/driver_build/incremental.spl:1521-1537` | a private-body edit already selects family `generic-specialization` | unchanged selection; rows now exist (§7) |
 | Reverse refs | `00.common/cache/reverse_reference_facts.spl:418-422`, `reverse_reference_key.spl:46`, `80.driver/cache/reverse_reference_projection_v2.spl:80`, `reverse_reference_receipt.spl:39,56`, `cache/reference/reverse_reference_coordinator_v1.spl:809-841` | family, key and exact planner exist; `reverse_reference_register_generic_specialization_v1` has **no caller in `src`** (specs only) | first real producer (§7) |
@@ -116,8 +116,10 @@ changes, both by trailing defaulted field (the seed fills positionally) [PROP]:
    the existing structural key (`mt_key_type` encoding) and may mention binder
    variables (`v<symbol>#<index>`). `cause` is one of `field`, `call`,
    `construct`, `bound-dispatch`. Sorted by `(TemplateId, arg keys, span)`,
-   unique. `open_needs` is folded into the `generic.body` fingerprint, so a body
-   edit that changes what the template needs is a body-facet change.
+   unique. `open_needs` is **not** part of any template fingerprint (it is filled
+   after the entry's digests exist); it enters each instance's key instead (§6).
+   The field rides in section schema `generic-template-section/v2`'s successor (v3):
+   older readers fail the decode and miss, as for every schema extension here.
 
 Substituting an instance's arguments into `open_needs` yields its concrete
 needs **without opening the body**. Bodies are opened only by the instance task
@@ -190,10 +192,13 @@ InstanceTask(key):
   distinct direct need) and `InstanceTask` (its substituted open needs). No
   other path creates an instance.
 - **Termination.** Each key has one slot, so a key is processed once. Keys grow
-  only through `open_needs`; `GENERIC_INSTANTIATION_DEPTH_LIMIT` (32) [OBS]
-  bounds `via` depth, and a session instance budget (count and bytes, through
-  the existing cache limits) bounds breadth. Either limit makes the slot a
-  terminal `Unresolved` failure naming the `via` chain.
+  only through `open_needs`. Depth is a property of the **key**, not of the path
+  that reached it: the nesting depth of its argument keys may not exceed
+  `GENERIC_INSTANTIATION_DEPTH_LIMIT` (32) [OBS], so the same key passes or fails
+  whoever asks; polymorphic recursion grows nesting and hits it. The session
+  instance budget (count and bytes, existing cache limits) is a **build-level**
+  verdict: crossing it fails the build, reporting templates by instance count in
+  sorted order, never one arbitrary slot.
 - **Determinism.** The needed set is the least fixed point of a monotone
   function of (direct needs, `open_needs`); it does not depend on request order
   or on which requester arrived first. Three rules make the artifacts
@@ -244,9 +249,12 @@ compare-and-rename, coordination is the scheduler's message passing
 
 ## 7. Reverse references and invalidation
 
-One family, `generic-specialization` [OBS], gains its first producer. Rows are
-written by the task that performed the read, through the existing
-`reverse_reference_register_generic_specialization_v1`:
+One family, `generic-specialization` [OBS], gains its first rows for instances.
+The route already exists: a recorded read whose producer kind is `tldr.concrete`
+or `generic.body` projects into this family (`reverse_reference_projection_v2.spl:80`),
+and `semantic_query_read_manifest_v1.spl:207` admits both kinds. Tasks record reads
+through that route; `reverse_reference_register_generic_specialization_v1` (no caller
+in `src`) is the direct form of the same row:
 
 | Row (definition -> consumer) | Written by | Meaning |
 |---|---|---|
@@ -265,7 +273,8 @@ the instance's symbol. So the exact dirty sets are:
 | nothing | nothing: zero instance tasks run, zero links | every instance object |
 | template body (same `open_needs`) | all instance objects of that template, for the targets built; relink | consumer module objects; instances of other templates |
 | template body, `open_needs` changed | the above + newly needed instances built; instances no longer needed leave the link set | their cached blobs stay valid until evicted |
-| template signature or bound | instances of that template + every consumer module with that edge (their `ConcreteTldrKey`s change through TemplateId) | unrelated templates |
+| template signature or bound | instances of that template + every consumer module with that edge (a signature change moves TemplateId and so every `ConcreteTldrKey`; a bound change moves the bound facet and the constraint root, not TemplateId) | unrelated templates |
+| template body, where a consumer **inlined** the instance (default for `FfiCodec<T>`) | additionally that consumer's object: an inlining consumer records a read of the instance's MIR blob, which is an RR row like any other | consumers that only call the symbol |
 | a consumer changes an argument (`Box<i64>` -> `Box<f64>`) | that consumer's object; the new key built on a miss, shared on a hit | the old instance object stays valid for other consumers |
 | needed set of a module changes, no template change | only instances whose key is new to the build; relink | every existing instance object |
 | target, toolchain or lane changes | MIR / object level of every instance | concrete views and (after P-1) HIR blobs |
@@ -303,7 +312,7 @@ this design adds no CLI or second query authority of its own.
   instance body after substitution (plan S3-D verifier), failing the slot.
 - `Partial` / `Unresolved` views are never codegen input; an `Unresolved`
   request is a diagnostic at its origin span.
-- Depth 32 on `via`; session instance budget; the T3 cap (plan S3-A) applies to
+- Argument nesting depth 32 per key; session instance budget; the T3 cap (plan S3-A) applies to
   implicit generics before a request is made.
 - An unknown digest algorithm, a foreign slot reference, or a corrupt section is
   a miss or a terminal failure, never a hit.
@@ -355,7 +364,8 @@ document status.
 | `read_tldr_async` | **no** | S1-3 |
 | `trait CompileInvoker`, `FiberInvoker` | **no** | S2-1 |
 | `KeyRecordV2` | **no** | S2-6 |
-| Write-once slot type, `.sphb`, `.spmb` | **no** (`.spab` only) | S3-1..S3-4 |
+| Write-once slot type | **not found** as a type (a grep for set_once, write_once or SetOnce matches one file, `10.frontend/core/flat_pool_packed_v1.spl`); `TldrTableV1` entries are set-once | S3-1 |
+| `.sphb`, `.spmb` | **no** (`.spab` only) | S3-2..S3-4 |
 | Daemon usage ledger | **no** | S3-5 |
 | Concrete-view acquisition (`acquire_concrete_tldr`) | **no** (doc only) | F2 below |
 | `TraceViewProjection` | **no** (doc only) | extreme-typing lane |
@@ -404,8 +414,9 @@ the run works and writes an SDN report. Findings:
   is registered at load): for `generic_tldr_view_v1.spl` this run shows 130
   decisions (24 covered) and 87 conditions (19 covered), with 131 hit lines.
 - The spec itself is **red under this seed: 26 of 59 examples fail** (for
-  example "expected unsupported entry schema to equal bad bound"), which is why
-  the covered counts are low. That is an existing defect to fix first (F10).
+  example "expected unsupported entry schema to equal bad bound"), so the covered
+  counts above are not that spec's real reach. Cause not diagnosed here (spec,
+  seed or source); F10 starts by finding out.
 - `bin/simple test --coverage` cannot be used under the seed (needs the
   self-hosted child APK receipt, `doc/07_guide/infra/testing/coverage.md`).
 
@@ -414,8 +425,9 @@ Smallest gate that works today [PROP]: one script modelled on
 `SIMPLE_COVERAGE=1`, and per target file computes **decision coverage** from the
 SDN (`covered / total`, both-outcomes rule), failing below 95 % for a unit
 module and below 70 % for the set total; a spec failure or an empty denominator
-is an ERROR, not a pass. Decision coverage is the stricter measure, so it is a
-safe stand-in. To gate on **lines** as the owner wrote it, the interpreter
+is an ERROR, not a pass. Decision coverage is a **different** measure, not a
+stricter one: a branch-free function that is never called has no decision and
+passes. So the recommended fix is to gate on **lines** as the owner wrote it: the interpreter
 must register line sites with zero counts at module load, as it already does
 for decisions (`interpreter/coverage_sites.rs`): a small seed change, listed as
 an owner decision. The script and the module list are shared with the sibling
