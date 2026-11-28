@@ -818,12 +818,20 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         # element down by (N-1)/2 lines — measured 12 px too low on a 3-line
         # `<li>`. Those runs keep the existing top placement until wrapped text
         # is modelled as real line boxes.
+        val node_st = styles[node_index]
+        val node_v_frame = if node_st.display == "inline" and not grid_item_is_replaced(html_nodes[node_index]):
+            node_st.pad_t + node_st.pad_b + node_st.border_t + node_st.border_b
+        else:
+            0
+        val node_inner_bh = bh[node_index] - node_v_frame
         val node_is_half_leaded = (
-            styles[node_index].display == "inline" and
-            styles[node_index].vertical_align == "baseline" and
+            node_st.display == "inline" and
+            node_st.vertical_align == "baseline" and
             not grid_item_is_replaced(html_nodes[node_index]) and
-            bh[node_index] > 0 and bh[node_index] < resolved_height and
-            resolved_height <= style_line_h(line_style)
+            (
+                (node_v_frame > 0 and node_inner_bh > 0 and node_inner_bh <= style_line_h(node_st)) or
+                (node_v_frame == 0 and bh[node_index] > 0 and bh[node_index] < resolved_height and resolved_height <= style_line_h(line_style))
+            )
         )
         # A bare #text run is painted from its box top, and its box is a whole
         # line-height tall (N line-heights when wrapped), so its glyphs need
@@ -874,9 +882,12 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         else:
             0
         val shift_y = if node_baseline_shift != 0:
-            aligned_line_y + ascent + node_baseline_shift - inline_content_area_ascent(styles[node_index]) - out_by[node_index]
+            aligned_line_y + ascent + node_baseline_shift - inline_content_area_ascent(node_st) - out_by[node_index]
         elif node_is_half_leaded:
-            aligned_line_y + ascent - inline_content_area_ascent(styles[node_index]) - (bh[node_index] - inline_content_area_height(styles[node_index])) / 2 - out_by[node_index]
+            if node_v_frame > 0:
+                aligned_line_y + ascent - inline_content_area_ascent(node_st) - node_st.border_t - node_st.pad_t - out_by[node_index]
+            else:
+                aligned_line_y + ascent - inline_content_area_ascent(node_st) - (bh[node_index] - inline_content_area_height(node_st)) / 2 - out_by[node_index]
         else:
             aligned_line_y + ascent - node_baseline_offset - out_by[node_index] + text_half_leading
         if shift_y != 0:
@@ -1829,6 +1840,8 @@ fn inline_replaced_width_is_exact(node: HNode, st: Style, bw: i32) -> bool:
         return false
     if st.pad_l != 0 or st.pad_r != 0 or st.border_l != 0 or st.border_r != 0:
         return false
+    if st.width_px > 0 and st.width_milli == 0 and st.width_px == bw:
+        return true
     val raw = attr_value(node.attrs_raw, "width").trim()
     if raw.len() == 0:
         return false
@@ -2373,6 +2386,11 @@ fn style_device_line_h_milli(st: Style, k: i32) -> i32:
     val size_milli = style_device_font_milli(st)
     if st.line_height_px > 0:
         return st.line_height_px * k * 1000
+    if st.line_height_px <= -10000 and not style_is_ua_control_font(st):
+        val mult100 = (0 - st.line_height_px) - 10000
+        val lh100 = size_milli * k * mult100 / 100
+        if lh100 > 0:
+            return lh100
     if st.line_height_px < 0 and not style_is_ua_control_font(st):
         val lh = size_milli * k * (0 - st.line_height_px) / 10
         if lh > 0:
