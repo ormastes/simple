@@ -169,6 +169,25 @@ fn _glyph_inked_width_for_paint(cp: i64, scale: i32) -> i32:
     if max_rx < 0:
         return 0
     (max_rx + 1) * scale
+# The px length a `width` / `height` attribute maps to. An `<svg>` keeps a
+# plain decimal (`width="40.5"` is 40.5px, Chrome 159); every other element
+# and form keeps the whole px.
+fn presentational_size_px(node: HNode, raw: text) -> text:
+    if node.tag == "svg":
+        var dots = 0
+        var plain = true
+        var i = 0
+        while i < raw.byte_len():  # cpu-lane-loop-ok: one pass over one attribute value
+            val ch = raw.substring(i, i + 1)
+            if ch == ".":
+                dots = dots + 1
+            elif ch < "0" or ch > "9":
+                plain = false
+            i = i + 1
+        if plain and dots == 1 and not raw.starts_with(".") and not raw.ends_with("."):
+            return raw + "px"
+    parse_int(raw).to_text() + "px"
+
 fn presentational_attr_decls(node: HNode) -> text:
     if node.attrs_raw.len() == 0:
         return ""
@@ -192,13 +211,13 @@ fn presentational_attr_decls(node: HNode) -> text:
         if w.ends_with("%"):
             out = out + "width:" + w + ";"
         elif parse_int(w) > 0:
-            out = out + "width:" + parse_int(w).to_text() + "px;"
+            out = out + "width:" + presentational_size_px(node, w) + ";"
     val h = attr_value_by_key(node.attrs_raw, "height=").trim()
     if h.len() > 0:
         if h.ends_with("%"):
             out = out + "height:" + h + ";"
         elif parse_int(h) > 0:
-            out = out + "height:" + parse_int(h).to_text() + "px;"
+            out = out + "height:" + presentational_size_px(node, h) + ";"
     val align = attr_value_by_key(node.attrs_raw, "align=").trim().lower()
     if align == "center" or align == "left" or align == "right":
         out = out + "text-align:" + align + ";"
