@@ -561,7 +561,11 @@ fn _browser_session_is_pointer_or_mouse_event(event_type: text) -> bool:
         normalized == "pointerdown" or normalized == "pointerup" or
         normalized == "pointermove" or normalized == "pointerenter" or
         normalized == "pointerleave" or normalized == "pointerover" or
-        normalized == "pointerout"
+        normalized == "pointerout" or normalized == "dragstart" or
+        normalized == "drag" or normalized == "dragenter" or
+        normalized == "dragover" or normalized == "dragleave" or
+        normalized == "drop" or normalized == "dragend" or
+        normalized == "wheel"
     )
 
 fn _browser_session_default_listener_control(
@@ -624,6 +628,9 @@ class BrowserDomEventExecutor:
     offset_y: i32
     button: i32
     buttons: i32
+    data_transfer_keys: [text]
+    data_transfer_vals: [text]
+    data_transfer_map_id: i64
     error: text
 
     fn route_for_object_id(object_id: i64) -> DomNodeRoute?:
@@ -732,6 +739,26 @@ class BrowserDomEventExecutor:
     me finish_event():
         if self.event_object_id < 0:
             return
+        if self.data_transfer_map_id >= 0:
+            val map_obj = self.runtime.get_host_object(self.data_transfer_map_id)
+            var next_keys: [text] = []
+            var next_vals: [text] = []
+            for prop in map_obj.properties:
+                if not prop.key.starts_with("__"):
+                    match prop.value:
+                        JsValue.String(s):
+                            next_keys.push(prop.key)
+                            next_vals.push(s)
+                        JsValue.Number(n):
+                            next_keys.push(prop.key)
+                            next_vals.push("{n}")
+                        JsValue.Boolean(b):
+                            next_keys.push(prop.key)
+                            next_vals.push(if b: "true" else: "false")
+                        _:
+                            pass_dn
+            self.data_transfer_keys = next_keys
+            self.data_transfer_vals = next_vals
         self.runtime.set_host_property(
             self.event_object_id, "currentTarget", JsValue.Null
         )
@@ -874,11 +901,26 @@ class BrowserDomEventExecutor:
             event_id, "stopImmediatePropagation",
             JsValue.Function(id: self.event_stop_immediate_propagation_fn_id)
         )
+        val dt_id = self.runtime.create_host_object()
+        val dt_map_id = self.runtime.create_host_object()
+        var dti: i64 = 0
+        while dti < self.data_transfer_keys.len() and dti < self.data_transfer_vals.len():
+            self.runtime.set_host_property(
+                dt_map_id, self.data_transfer_keys[dti],
+                JsValue.String(v: self.data_transfer_vals[dti])
+            )
+            dti = dti + 1
+        self.runtime.set_host_property(dt_id, "__map", JsValue.Object(id: dt_map_id))
+        self.runtime.set_host_property(dt_id, "dropEffect", JsValue.String(v: "move"))
+        self.runtime.set_host_property(dt_id, "effectAllowed", JsValue.String(v: "all"))
+        self.runtime.set_host_property(event_id, "dataTransfer", JsValue.Object(id: dt_id))
+        self.data_transfer_map_id = dt_map_id
         var interpreter = self.runtime.interpreter
         interpreter.define_global_value(
             "event", JsValue.Object(id: event_id)
         )
         self.runtime.interpreter = interpreter
+        val _ = self.runtime.eval("if (typeof window.__simple_bind_dt === 'function' && typeof event !== 'undefined' && event.dataTransfer) { window.__simple_bind_dt(event.dataTransfer); }")
         self.event_object_id = event_id
 
     me execute(
@@ -2010,6 +2052,91 @@ impl BrowserSession:
             client_x, client_y, offset_x, offset_y, 2, 2, true
         )
 
+    me dispatch_dom_hover_route(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        offset_x: i32, offset_y: i32
+    ) -> Result<bool, text>:
+        """Dispatch pointerover/mouseover/mouseenter hover events on route."""
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            route, "pointerover", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            route, "mouseover", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            route, "mouseenter", false, false,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0, false
+        )?
+        Ok(true)
+
+    me dispatch_dom_drag_and_drop_route(
+        source_route: DomNodeRoute, target_route: DomNodeRoute,
+        source_x: i32, source_y: i32, target_x: i32, target_y: i32
+    ) -> Result<bool, text>:
+        """Dispatch HTML5 dragstart -> dragenter -> dragover -> drop -> dragend carrying DataTransfer."""
+        self.drag_data_transfer_keys = []
+        self.drag_data_transfer_vals = []
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            source_route, "mousedown", true, true,
+            source_x, source_y, source_x, source_y,
+            source_x, source_y, 12, 12, 0, 1, true
+        )?
+        val drag_start = self.dispatch_dom_event_route_with_pointer(
+            source_route, "dragstart", true, true,
+            source_x, source_y, source_x, source_y,
+            source_x, source_y, 12, 12, 0, 1, false
+        )?
+        if drag_start.event.default_prevented:
+            return Ok(false)
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            target_route, "dragenter", true, true,
+            target_x, target_y, target_x, target_y,
+            target_x, target_y, 16, 16, 0, 1, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            target_route, "dragover", true, true,
+            target_x, target_y, target_x, target_y,
+            target_x, target_y, 16, 16, 0, 1, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            target_route, "drop", true, true,
+            target_x, target_y, target_x, target_y,
+            target_x, target_y, 16, 16, 0, 0, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            source_route, "dragend", true, false,
+            target_x, target_y, target_x, target_y,
+            target_x, target_y, 16, 16, 0, 0, false
+        )?
+        Ok(true)
+
+    me console_logs() -> [text]:
+        """Return captured console.log/warn/error entries from both SimpleScript and JS."""
+        var out: [text] = []
+        for l in self.simple_script_executor.dom_vm.logs:
+            out.push(l)
+        if val Some(state) = self.runtime_state:
+            var rt = state.runtime
+            val res = rt.eval("typeof window !== 'undefined' && window.__simple_console_logs ? window.__simple_console_logs.join('\\n') : ''")
+            match res:
+                Ok(v):
+                    match v:
+                        JsValue.String(s):
+                            if s != "":
+                                for line in s.split("\n"):
+                                    if line != "":
+                                        out.push(line)
+                        _:
+                            pass_dn
+                _:
+                    pass_dn
+        out
+
     me _dispatch_dom_input_event_route(
         route: DomNodeRoute, event_type: text, bubbles: bool,
         cancelable: bool, input_data: text?, input_type: text
@@ -2257,6 +2384,9 @@ impl BrowserSession:
                 offset_y: offset_y,
                 button: button,
                 buttons: buttons,
+                data_transfer_keys: self.drag_data_transfer_keys,
+                data_transfer_vals: self.drag_data_transfer_vals,
+                data_transfer_map_id: -1,
                 error: ""
             )
             dispatch = if input_type != "":
@@ -2289,6 +2419,8 @@ impl BrowserSession:
                 client_x, client_y, screen_x, screen_y, button, buttons
             )
             executor.finish_event()
+            self.drag_data_transfer_keys = executor.data_transfer_keys
+            self.drag_data_transfer_vals = executor.data_transfer_vals
             state.runtime = executor.runtime
             state.dom_callable_listeners = executor.listeners
             state.dom_listener_indices_by_target_event = (
@@ -2306,6 +2438,51 @@ impl BrowserSession:
                     executor.error == "DOM event dispatch budget exceeded"
                 )
             self._flush_runtime_side_effects_and_pump_history()?
+            if self.dom_generation.value != dispatch_generation.value:
+                return Ok(dispatch)
+
+        if self.simple_script_executor.dom_vm.listeners.len() > 0:
+            var path_ids: [i64] = []
+            for pnode in dispatch_path:
+                path_ids.push(pnode.node_id)
+            var vm = self.simple_script_executor.dom_vm
+            vm.install_document(self.current_dom, false)
+            vm.data_transfer_keys = self.drag_data_transfer_keys
+            vm.data_transfer_vals = self.drag_data_transfer_vals
+            val vm_ev_res = vm.dispatch_event(
+                normalized_event_type,
+                target.node_id,
+                path_ids,
+                bubbles,
+                if has_pointer_payload: client_x else: dispatch.event.client_x,
+                if has_pointer_payload: client_y else: dispatch.event.client_y,
+                if has_pointer_payload: offset_x else: 0,
+                if has_pointer_payload: offset_y else: 0,
+                key,
+                code,
+                input_data ?? "",
+                dispatch.event.default_prevented,
+                dispatch.event.propagation_stopped
+            )
+            if vm_ev_res.0:
+                dispatch.event.prevent_default()
+                dispatch.default_action_allowed = false
+            if vm_ev_res.1:
+                dispatch.event.stop_propagation()
+            self.drag_data_transfer_keys = vm.data_transfer_keys
+            self.drag_data_transfer_vals = vm.data_transfer_vals
+            if vm.title_dirty:
+                self.current_title = vm.title
+                vm.title_dirty = false
+            if vm.dom_dirty:
+                val next_vm_dom = vm.dom
+                val vm_structural = vm.structural_dirty
+                vm.dom_dirty = false
+                vm.structural_dirty = false
+                self.simple_script_executor.dom_vm = vm
+                val _ = self._publish_runtime_body_candidate(next_vm_dom, vm_structural)
+            else:
+                self.simple_script_executor.dom_vm = vm
             if self.dom_generation.value != dispatch_generation.value:
                 return Ok(dispatch)
 
@@ -3673,14 +3850,14 @@ impl BrowserSession:
                 )?
                 if state.adopt_host_body_bridge(candidate_dom, adopted_generation):
                     sync_index = Some(adopted_index)
-        # Attribute mutations (id/class/value/style) must publish even in the
-        # same task as a structural body.innerHTML/textContent write; the
-        # structural path only replaces body children, so sync_dom still has
-        # to apply per-element attribute diffs onto the candidate.
-        if dom_mutation_changed:
-            if val Some(index) = sync_index:
-                dom_sync = state.sync_dom(candidate_dom, index)
-                candidate_dom = dom_sync.root
+        # Attribute/property/child mutations (id/class/value/style/textContent/
+        # checked/disabled/selectedIndex/attrs/innerHTML) must always be checked
+        # after runtime script or event execution, even for properties not
+        # tracked by interpreter host_dom_mutation_dirty.
+        if val Some(index) = sync_index:
+            dom_sync = state.sync_dom(candidate_dom, index)
+            candidate_dom = dom_sync.root
+            if dom_mutation_changed:
                 var mutation_cleared = state.runtime.interpreter
                 mutation_cleared.host_dom_mutation_dirty = false
                 state.runtime.interpreter = mutation_cleared
