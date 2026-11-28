@@ -45,6 +45,10 @@
 #        check-extern-return-shape.shs --selftest
 # Verdict (last stdout line): PASS — exit 0 / FAIL — exit 1 / ERROR — nothing was checked, exit 2.
 set -u
+# Every sort/collation below must be byte order, never the caller's locale
+# (en_US puts i64? before Nom?; C puts Nom? first). See
+# doc/08_tracking/bug/2026-11-28_extern_shape_gate_selftest_locale_sort.md
+export LC_ALL=C
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$SELF_DIR/../.." && pwd)
@@ -170,20 +174,20 @@ selftest() {
     st=$(mktemp -d) || return 2
     r="$st/repo"; mkdir -p "$r/src/a" "$r/src/b" "$r/src/vendor/x"
     git -C "$r" init -q && git -C "$r" config core.autocrlf false && git -C "$r" config user.email t@t && git -C "$r" config user.name t
-    printf 'extern fn rt_one(x: i64) -> i64\nextern fn rt_gen<T>(t: i64) -> T?\nextern fn rt_dup(x: i64) -> i64\ntype Ptr = i64\nextern fn rt_al() -> Ptr?\ntype Amb = i64\nextern fn rt_amb() -> Amb\ntype Nom = i64\nextern fn rt_nom() -> Nom?\n' > "$r/src/a/m.spl"
-    printf 'val s = "extern fn rt_one(x: i64) -> bool"\n# extern fn rt_one(x: i64) -> text\nextern fn rt_gen<TElem>(t: i64) -> TElem?\nextern fn rt_dup(x: i64) -> text?\nextern fn rt_al() -> i64?\npub type Amb = u8\nextern fn rt_amb() -> i64\nstruct Nom:\n    x: i64\nextern fn rt_nom() -> i64?\n' > "$r/src/b/m.spl"
+    printf 'extern fn rt_one(x: i64) -> i64\nextern fn rt_gen<T>(t: i64) -> T?\nextern fn rt_dup(x: i64) -> i64\ntype Ptr = i64\nextern fn rt_al() -> Ptr?\ntype Amb = i64\nextern fn rt_amb() -> Amb\ntype Nom = i64\nextern fn rt_nom() -> Nom?\nextern fn rt_vec() -> Vec\n' >"$r/src/a/m.spl"
+    printf 'val s = "extern fn rt_one(x: i64) -> bool"\n# extern fn rt_one(x: i64) -> text\nextern fn rt_gen<TElem>(t: i64) -> TElem?\nextern fn rt_dup(x: i64) -> text?\nextern fn rt_al() -> i64?\npub type Amb = u8\nextern fn rt_amb() -> i64\nstruct Nom:\n    x: i64\nextern fn rt_nom() -> i64?\nextern fn rt_vec() -> vec\n' >"$r/src/b/m.spl"
     printf 'extern fn rt_one(x: i64) -> bool\n' > "$r/src/vendor/x/m.spl"
     git -C "$r" add -A && git -C "$r" commit -qm base
     fails=0
-    printf 'rt_amb\tAmb | i64\nrt_dup\ti64 | text?\nrt_nom\ti64? | Nom?\n' > "$st/base_ok"
-    out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^PASS' || { echo "selftest: clean fixture must PASS (comment, vendor, generic rename, unique alias resolved, ambiguous alias kept): $out"; fails=1; }
+    printf 'rt_amb\tAmb | i64\nrt_dup\ti64 | text?\nrt_nom\tNom? | i64?\nrt_vec\tVec | vec\n' > "$st/base_ok"
+    out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^PASS' || { echo "selftest: clean fixture must PASS (comment, vendor, generic rename, unique alias resolved, ambiguous alias kept, case-only shapes in byte order): $out"; fails=1; }
     printf 'extern fn rt_one(x: i64) -> u8\n' >> "$r/src/b/m.spl"; git -C "$r" commit -qam new
     out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^FAIL' && echo "$out" | grep -q 'NEW: rt_one' || { echo "selftest: new conflict must FAIL naming rt_one: $out"; fails=1; }
     git -C "$r" reset -q --hard HEAD~1
     mkdir -p "$r/examples/e"; printf 'extern fn rt_one(x: i64) -> u8\n' > "$r/examples/e/m.spl"; git -C "$r" add -A; git -C "$r" commit -qm ex
     out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^FAIL' && echo "$out" | grep -q 'NEW: rt_one' || { echo "selftest: conflict in examples/ must FAIL naming rt_one (examples/ scanned): $out"; fails=1; }
     git -C "$r" reset -q --hard HEAD~1
-    printf 'rt_amb\tAmb | i64\nrt_dup\ti64 | text?\nrt_nom\ti64? | Nom?\nrt_gone\ti64 | u8\n' > "$st/base_stale"
+    printf 'rt_amb\tAmb | i64\nrt_dup\ti64 | text?\nrt_nom\tNom? | i64?\nrt_vec\tVec | vec\nrt_gone\ti64 | u8\n' > "$st/base_stale"
     out=$(MODE=check run_check "$r" HEAD "$st/base_stale"); echo "$out" | grep -q 'STALE: rt_gone' || { echo "selftest: stale row must FAIL: $out"; fails=1; }
     e="$st/empty"; mkdir -p "$e/src"; git -C "$e" init -q; git -C "$e" config core.autocrlf false; git -C "$e" config user.email t@t; git -C "$e" config user.name t
     printf 'x\n' > "$e/src/n.spl"; git -C "$e" add -A; git -C "$e" commit -qm e
@@ -193,7 +197,7 @@ selftest() {
 }
 
 if ! selftest; then echo "FAIL — selftest failed"; exit 1; fi
-[ "$MODE" = selftest ] && { echo "PASS — selftest: 5 fixture(s) checked"; exit 0; }
+[ "$MODE" = selftest ] && { echo "PASS — selftest: 6 fixture(s) checked"; exit 0; }
 git -C "$ROOT" rev-parse -q --verify "$REV^{commit}" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (cannot resolve rev $REV)"; exit 2; }
 run_check "$ROOT" "$REV" "$BASELINE"
 exit $?

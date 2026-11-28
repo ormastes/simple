@@ -1,6 +1,6 @@
 # check-extern-return-shape.shs selftest depends on sort locale (2026-11-28)
 
-Status: open (observed while verifying PR #12418, Windows Git Bash)
+Status: verification-pending (fix: `export LC_ALL=C` at script top covers every sort/awk; selftest fixture `rt_vec` {Vec | vec} differs only by case; `rt_nom` fixture row now in byte order `Nom? | i64?`. Real baseline unchanged: 44 rows PASS under LC_ALL=C)
 
 `sh scripts/check/check-extern-return-shape.shs --root .` printed
 `selftest: clean fixture must PASS ...: CHANGED: rt_nom baseline {i64? | Nom?} now
