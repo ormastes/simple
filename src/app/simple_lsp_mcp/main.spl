@@ -19,6 +19,30 @@ use app.io.minimal_runtime_ops.{get_args, report_error}
 val SERVER_NAME = "simple-lsp-mcp"
 val SERVER_VERSION = "0.9.8"
 
+var _LSP_SHUTDOWN_REQUESTED: bool = false
+var _LSP_EXIT_REQUESTED: bool = false
+
+pub fn lsp_reset_lifecycle_state():
+    _LSP_SHUTDOWN_REQUESTED = false
+    _LSP_EXIT_REQUESTED = false
+
+# reason: JSON-RPC shutdown lifecycle predicate exposed for stdio loop and lifecycle regression specs
+@allow(primitive_api)
+pub fn lsp_shutdown_requested() -> bool:
+    _LSP_SHUTDOWN_REQUESTED
+
+# reason: JSON-RPC exit lifecycle predicate exposed for stdio loop and lifecycle regression specs
+@allow(primitive_api)
+pub fn lsp_exit_requested() -> bool:
+    _LSP_EXIT_REQUESTED
+
+# reason: process exit code (0/1) required by LSP/MCP shutdown-exit protocol semantics
+@allow(primitive_api)
+pub fn lsp_exit_code() -> i64:
+    if _LSP_EXIT_REQUESTED and not _LSP_SHUTDOWN_REQUESTED:
+        return 1
+    0
+
 fn print_usage():
     print "{SERVER_NAME} {SERVER_VERSION}"
     print ""
@@ -283,11 +307,21 @@ pub fn lsp_handle_message(msg: text) -> text:
     if not envelope.valid:
         val reason = if envelope.error_code == -32700: "Parse error" else: "Invalid Request"
         return jsonrpc_error(envelope.request_id_raw, envelope.error_code, reason)
+    val method = envelope.method
+    if method == "exit":
+        _LSP_EXIT_REQUESTED = true
+        if not envelope.has_id:
+            return ""
+        return jsonrpc_result(envelope.request_id_raw, "null")
     # Notifications have no correlation ID and must never produce a reply.
     if not envelope.has_id:
         return ""
     val id = envelope.request_id_raw
-    val method = envelope.method
+    if _LSP_SHUTDOWN_REQUESTED:
+        return jsonrpc_error(id, -32600, "Server is shutting down")
+    if method == "shutdown":
+        _LSP_SHUTDOWN_REQUESTED = true
+        return jsonrpc_result(id, "null")
     if method == "initialize":
         return lsp_initialize_result(id)
     if method == "tools/list":
@@ -310,7 +344,8 @@ pub fn lsp_handle_message(msg: text) -> text:
         return jsonrpc_result(id, LB() + RB())
     jsonrpc_error(id, -32601, "Method not found")
 
-fn lsp_serve_stdio():
+fn lsp_serve_stdio() -> i64:
+    lsp_reset_lifecycle_state()
     var running = true
     while running:
         val msg = read_stdin_message()
@@ -320,6 +355,9 @@ fn lsp_serve_stdio():
             val response = lsp_handle_message(msg)
             if response.len() > 0:
                 write_stdout_message(response)
+            if _LSP_EXIT_REQUESTED:
+                running = false
+    lsp_exit_code()
 
 fn main() -> i64:
     val raw_args = simple_lsp_mcp_get_args()
@@ -373,4 +411,3 @@ fn main() -> i64:
             return 0
 
     lsp_serve_stdio()
-    0
