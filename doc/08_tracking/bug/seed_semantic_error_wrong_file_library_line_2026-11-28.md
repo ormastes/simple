@@ -23,7 +23,7 @@ follows CURRENT_EXEC_MODULE; a closure inherits that from its invoker, so an
 cwd-relative with `/` separators (owner keys are `\\?\C:\...` on Windows; `\\?\UNC\srv\share` shows as `//srv/share`).
 
 ## Tests
-- Rust unit: `error::tests::semantic_with_context_uses_executing_module_file`
+- Rust unit: `error::tests::semantic_with_context_uses_lexical_module_file`
   (expects `decompress.spl:25:9`, not the spec path; fails on the old code).
 - Manual e2e probe (spec calling a library fn that iterates an Option) printed
   `test/01_unit/compiler/scratch_attr/attr_lib.spl:6:5` on the new seed.

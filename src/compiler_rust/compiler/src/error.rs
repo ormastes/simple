@@ -905,7 +905,7 @@ mod tests {
     /// the library's file, not the entry/spec file (the span is the library
     /// statement's). Bug: seed_semantic_error_wrong_file_library_line_2026-11-28.
     #[test]
-    fn semantic_with_context_uses_executing_module_file() {
+    fn semantic_with_context_uses_lexical_module_file() {
         let lib = "C:/repo/src/lib/x/decompress.spl";
         crate::interpreter::CURRENT_FILE
             .with(|c| *c.borrow_mut() = Some(std::path::PathBuf::from("C:/repo/test/di_spec.spl")));
