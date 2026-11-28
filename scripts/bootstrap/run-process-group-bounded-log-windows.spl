@@ -150,10 +150,13 @@ fn main():
     var start = -1
     var self_path = ""
     for k in 0..argv.len():
-        if start < 0 and argv[k].ends_with("run-process-group-bounded-log-windows.spl"):
+        if start < 0 and argv[k].ends_with(".spl"):
             start = k + 1
             self_path = argv[k]
-    if start < 0: usage("cannot locate helper path in argv")
+    # The interpreter's script argument is the first .spl entry; a later crafted
+    # argument cannot move the source root used by the pin location guard.
+    if start < 0 or not self_path.replace("\\", "/").ends_with("/scripts/bootstrap/run-process-group-bounded-log-windows.spl"):
+        usage("cannot locate helper path in argv")
     var opts: Dict<text, text> = {}
     var stage_pin = ""
     var command: [text] = []
@@ -280,7 +283,7 @@ fn main():
     if file_exists(log_path) or file_exists(receipt_path) or is_dir(log_path) or is_dir(receipt_path):
         bl_fail("output collision")
     val pid = getpid()
-    val log_tmp = parent + "/." + log_leaf + ".tmp.{pid}"
+    var log_tmp = parent + "/." + log_leaf + ".tmp.{pid}"
     val receipt_tmp = parent + "/." + receipt_leaf + ".tmp.{pid}"
     _temps = [log_tmp, receipt_tmp]
 
@@ -340,6 +343,10 @@ fn main():
                         while not _poll(lease).tree_empty:
                             if _now_ms() >= cleanup_deadline: bl_fail("root-exit job cleanup deadline")
                             sleep_ms(10)
+                        val native = p.exit_code
+                        reason = if (native / 1073741824) % 4 == 3: "child-native-status" else: "child-exit"
+                        raw_status = _native_map(native)
+                        running = false
                     elif p.terminal:
                         if native_status == "not-run": native_status = "{p.exit_code}"
                         val native = p.exit_code
@@ -372,14 +379,29 @@ fn main():
                         case Err(e): bl_fail(e)
                         case Ok(_): pass
         # Exact byte bound: keep the first max_bytes bytes.
+        # Copy the bounded prefix into a fresh file: on the reap-deadline path a
+        # live writer may still hold log_tmp, so it is never measured or hashed.
+        val bounded_tmp = log_tmp + ".bounded"
+        _temps = _temps.push(bounded_tmp)
         val size = file_size(log_tmp)
-        if size > max_bytes:
-            val kept = file_read_bytes_at(log_tmp, 0, max_bytes) ?? []
-            if kept.len() != max_bytes or not file_write_bytes(log_tmp, kept): bl_fail("truncate bounded log")
+        val keep = if size > max_bytes: max_bytes else: size
+        val kept = if keep > 0: (file_read_bytes_at(log_tmp, 0, keep) ?? []) else: []
+        if kept.len() != keep or not file_write_bytes(bounded_tmp, kept): bl_fail("truncate bounded log")
+        if cleanup_status != "deadline":
+            val _d = file_delete(log_tmp)
+        log_tmp = bounded_tmp
     captured = file_size(log_tmp)
     if captured < 0: bl_fail("read bounded log size")
     if file_hash_sha256_or_empty(self_path) != helper_sha:
         bl_fail("collector helper mutated during execution")
+    # Stage identity is re-checked BEFORE anything is published, so a failed
+    # recheck can never leave a complete receipt behind.
+    match verified_stage_pin_recheck(pin, linux, windows):
+        case Ok(_): pass
+        case Err(e):
+            _release()
+            eprint("FAIL: " + e)
+            exit(2)
     val log_sha = file_hash_sha256_or_empty(log_tmp)
     # ponytail: publication is check-then-rename under the held parent chain
     # (no MoveFileExW in the ABI); a collision still fails without replacing.
@@ -390,12 +412,6 @@ fn main():
     if not file_write_bytes(receipt_tmp, receipt.bytes()): bl_fail("write receipt temporary")
     if file_exists(receipt_path) or not file_rename(receipt_tmp, receipt_path): bl_fail("publish receipt without replacement")
     _temps = []
-    match verified_stage_pin_recheck(pin, linux, windows):
-        case Ok(_): pass
-        case Err(e):
-            _release()
-            eprint("FAIL: " + e)
-            exit(2)
     _release()
     exit(raw_status)
 
