@@ -1,0 +1,195 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @tag: unit, browser_engine, paint, raster, z_index, list_marker, border_radius, form_controls
+#
+# Software raster parity checks for:
+# 1. CSS 2.2 Appendix E overlay z-index stacking order (normal-flow text &
+#    controls paint before z >= 0 overlays; inner overlay text stays in its
+#    owning overlay layer; z < 0 overlays sit under normal flow; position:fixed
+#    and position:relative with non-zero z-index participate in overlay layers).
+# 2. <ul> (disc, circle, square, none) and <ol> ("1.", "2.") list markers.
+# 3. <img> border-radius corner clipping in _fb_paint_img_clip.
+# 4. <textarea> &#10; / &#x0a; / &#x0A; multiline rendering and <select> chevron.
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_result,
+    simple_web_layout_render_html_software_result_with_images,
+    SimpleOsHostGpuImageResource
+}
+
+fn _count_color_in_rect(fb: [u32], fbw: i32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32:
+    var count = 0
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            if fb[y * fbw + x] == color:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn _count_not_color_in_rect(fb: [u32], fbw: i32, x0: i32, y0: i32, x1: i32, y1: i32, bg: u32) -> i32:
+    var count = 0
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            if fb[y * fbw + x] != bg:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn _hex_rgb(v: u32) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var sh = 20
+    while sh >= 0:
+        val d = ((v >> (sh as u32)) & 15u32) as i32
+        out = out + digits.substring(d, d + 1)
+        sh = sh - 4
+    out
+
+describe "Software raster overlays, list markers, img radius, and form controls":
+
+    it "paints normal-flow text under z=0 and z>0 overlays without bleeding":
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("Render normal-flow text overlapped by .capbar (z=auto/0) and .float-banner (z=5)")
+        val html = (
+            "<html><head><style>" +
+            "body{{margin:0;background:#ffffff;font-size:16px;color:#000000}}" +
+            ".frame{{position:relative;width:200px;height:90px}}" +
+            ".capbar{{position:absolute;left:0;top:0;width:200px;height:40px;background:#ff0000;color:#ffffff}}" +
+            ".banner{{position:absolute;z-index:5;left:0;top:40px;width:200px;height:40px;background:#0000ff;color:#ffffff}}" +
+            "</style></head><body>" +
+            "<div class='frame'>Sunset Frame<br>Second Line<br>Third Line" +
+            "<div class='capbar'>Overlay</div>" +
+            "<div class='banner'><strong>Banner</strong></div>" +
+            "</div></body></html>"
+        )
+        val fb = simple_web_layout_render_html_software_result(html, 200, 90).pixels
+        # Normal-flow black pixels (#000000) must not paint over .capbar or .banner
+        expect(_count_color_in_rect(fb, 200, 0, 0, 200, 40, 0xFF000000u32)).to_equal(0)
+        expect(_count_color_in_rect(fb, 200, 0, 40, 200, 80, 0xFF000000u32)).to_equal(0)
+        # Overlay text (#ffffff) and strong child inside banner must render on their overlays
+        expect(_count_color_in_rect(fb, 200, 0, 0, 200, 40, 0xFFFFFFFFu32)).to_be_greater_than(0)
+        expect(_count_color_in_rect(fb, 200, 0, 40, 200, 80, 0xFFFFFFFFu32)).to_be_greater_than(0)
+
+    it "isolates inner text of lower-z overlays underneath higher-z overlays and honors relative/fixed z-index":
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("Render z=2 pill with black text overlapped by z=5 banner and z=3 relative span")
+        val html = (
+            "<html><head><style>" +
+            "body{{margin:0;background:#ffffff;font-size:16px;color:#000000}}" +
+            ".pill{{position:absolute;z-index:2;left:0;top:0;width:120px;height:30px;background:#00ff00;color:#000000}}" +
+            ".banner{{position:absolute;z-index:5;left:0;top:0;width:120px;height:30px;background:#0000ff;color:#ffffff}}" +
+            ".rel3{{position:relative;z-index:3;display:inline-block;width:60px;height:20px;background:#ff00ff;color:#ffffff}}" +
+            ".abs1{{position:absolute;z-index:1;left:0;top:40px;width:60px;height:20px;background:#ffff00;color:#000000}}" +
+            ".under{{position:absolute;z-index:-1;left:0;top:70px;width:80px;height:20px;background:#ff0000}}" +
+            ".flow{{margin-top:46px;width:80px;height:20px;background:#008000}}" +
+            "</style></head><body>" +
+            "<div class='pill'><span>HiddenPillText</span></div>" +
+            "<div class='banner'><strong>TopBanner</strong></div>" +
+            "<div style='margin-top:40px'><span class='rel3'>R3</span></div>" +
+            "<div class='abs1'>A1</div>" +
+            "<div class='under'></div>" +
+            "</body></html>"
+        )
+        val fb = simple_web_layout_render_html_software_result(html, 160, 100).pixels
+        # .pill (z=2) black text must not paint on top of .banner (z=5)
+        expect(_count_color_in_rect(fb, 160, 0, 0, 120, 30, 0xFF000000u32)).to_equal(0)
+        expect(_count_color_in_rect(fb, 160, 0, 0, 120, 30, 0xFFFFFFFFu32)).to_be_greater_than(0)
+        # .rel3 (position:relative; z-index:3) paints above .abs1 (z-index:1) at y=40..60
+        expect(_count_color_in_rect(fb, 160, 0, 40, 60, 60, 0xFFFF00FFu32)).to_be_greater_than(100)
+        # z-index:-1 .under paints above body (#ffffff) and stays visible at y=70..90
+        expect(_count_color_in_rect(fb, 160, 0, 70, 80, 90, 0xFFFF0000u32)).to_be_greater_than(100)
+
+    it "paints position:fixed overlays above normal-flow text":
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("Render fixed overlay covering normal-flow black text")
+        val html = (
+            "<html><head><style>" +
+            "body{{margin:0;background:#ffffff;font-size:16px;color:#000000}}" +
+            ".fx{{position:fixed;left:0;top:0;width:160px;height:32px;background:#112233;color:#ffffff}}" +
+            "</style></head><body>" +
+            "Normal Flow Text Covered" +
+            "<div class='fx'>FixedText</div>" +
+            "</body></html>"
+        )
+        val fb = simple_web_layout_render_html_software_result(html, 160, 50).pixels
+        expect(_count_color_in_rect(fb, 160, 0, 0, 160, 32, 0xFF000000u32)).to_equal(0)
+        expect(_count_color_in_rect(fb, 160, 0, 0, 160, 32, 0xFFFFFFFFu32)).to_be_greater_than(0)
+
+    it "paints ul (disc, circle, square, none) and ol markers in the left gutter":
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("Render ul disc/circle/square/none and ol items")
+        val ul_html = (
+            "<html><head><style>body{{margin:0;background:#ffffff;color:#000000}}</style></head>" +
+            "<body><ul style='margin:0;padding-left:30px'>" +
+            "<li style='height:24px'>Disc</li>" +
+            "<li style='height:24px;list-style-type:circle'>Circle</li>" +
+            "<li style='height:24px;list-style-type:square'>Square</li>" +
+            "<li style='height:24px;list-style-type:none'>None</li>" +
+            "</ul></body></html>"
+        )
+        val ul_fb = simple_web_layout_render_html_software_result(ul_html, 160, 100).pixels
+        expect(_count_not_color_in_rect(ul_fb, 160, 0, 0, 28, 24, 0xFFFFFFFFu32)).to_be_greater_than(5)
+        expect(_count_not_color_in_rect(ul_fb, 160, 0, 24, 28, 48, 0xFFFFFFFFu32)).to_be_greater_than(5)
+        expect(_count_not_color_in_rect(ul_fb, 160, 0, 48, 28, 72, 0xFFFFFFFFu32)).to_be_greater_than(5)
+        expect(_count_not_color_in_rect(ul_fb, 160, 0, 72, 28, 96, 0xFFFFFFFFu32)).to_equal(0)
+
+        val ol_html = (
+            "<html><head><style>body{{margin:0;background:#ffffff;color:#000000}}</style></head>" +
+            "<body><ol style='margin:0;padding-left:32px'>" +
+            "<li style='height:24px'>One</li>" +
+            "<li style='height:24px'>Two</li>" +
+            "</ol></body></html>"
+        )
+        val ol_fb = simple_web_layout_render_html_software_result(ol_html, 160, 60).pixels
+        expect(_count_not_color_in_rect(ol_fb, 160, 0, 0, 30, 24, 0xFFFFFFFFu32)).to_be_greater_than(4)
+        expect(_count_not_color_in_rect(ol_fb, 160, 0, 24, 30, 48, 0xFFFFFFFFu32)).to_be_greater_than(4)
+
+    it "clips img pixels outside border-radius corners":
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("Render a solid 40x40 red image with border-radius: 16px")
+        val im = SimpleOsHostGpuImageResource(
+            image_uri: "test://solid_red.png",
+            width: 40,
+            height: 40,
+            pixels: [0xFFFF0000u32; 40 * 40],
+            pixel_checksum: 1
+        )
+        val html = (
+            "<html><head><style>body{{margin:0;background:#ffffff}}</style></head>" +
+            "<body><img src='test://solid_red.png' width='40' height='40' style='border-radius:16px'></body></html>"
+        )
+        val fb = simple_web_layout_render_html_software_result_with_images(html, 60, 60, 10000, [im]).pixels
+        expect(_hex_rgb(fb[0 * 60 + 0])).to_equal("ffffff")
+        expect(_hex_rgb(fb[1 * 60 + 1])).to_equal("ffffff")
+        expect(_hex_rgb(fb[0 * 60 + 39])).to_equal("ffffff")
+        expect(_hex_rgb(fb[39 * 60 + 0])).to_equal("ffffff")
+        expect(_hex_rgb(fb[39 * 60 + 39])).to_equal("ffffff")
+        expect(_hex_rgb(fb[20 * 60 + 20])).to_equal("ff0000")
+
+    it "decodes textarea &#10;/&#x0a;/&#x0A; onto separate lines and paints select chevron":
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("Render multiline textarea with decimal and hex newline entities plus select chevron")
+        val html = (
+            "<html><head><style>body{{margin:0;background:#ffffff;color:#000000}}</style></head>" +
+            "<body><textarea rows='4' cols='15' style='background:#ffffff;color:#000000;border:0;padding:0;font-size:14px;line-height:16px'>" +
+            "AAAA&#10;BBBB&#x0a;CCCC&#x0A;DDDD" +
+            "</textarea><br>" +
+            "<select style='width:80px;height:24px;color:#000000;background:#ffffff'><option>Alpha</option></select>" +
+            "</body></html>"
+        )
+        val fb = simple_web_layout_render_html_software_result(html, 200, 120).pixels
+        # Distinct ink on lines 1, 2, 3, and 4 inside textarea
+        expect(_count_not_color_in_rect(fb, 200, 0, 0, 100, 16, 0xFFFFFFFFu32)).to_be_greater_than(30)
+        expect(_count_not_color_in_rect(fb, 200, 0, 16, 100, 32, 0xFFFFFFFFu32)).to_be_greater_than(30)
+        expect(_count_not_color_in_rect(fb, 200, 0, 32, 100, 48, 0xFFFFFFFFu32)).to_be_greater_than(30)
+        expect(_count_not_color_in_rect(fb, 200, 0, 48, 100, 64, 0xFFFFFFFFu32)).to_be_greater_than(30)
+        # Right-edge <select> dropdown chevron ink
+        expect(_count_not_color_in_rect(fb, 200, 60, 64, 80, 105, 0xFFFFFFFFu32)).to_be_greater_than(10)
