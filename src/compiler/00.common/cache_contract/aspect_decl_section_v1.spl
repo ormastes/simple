@@ -1,0 +1,381 @@
+# `aspect-decl|` module TLDR section (aspect plan stage AW-1).
+#
+# doc/05_design/compiler/cache/aspect_tldr_async_trace.md section 3: a module's
+# TLDR carries its own advice declarations, so a join-point file learns which
+# advice can apply to it from TLDR and never from another file's HIR or a
+# process-global registry. One row per declaration of either family
+# ("logical" = `@advice`, "mir" = `on pc{...}`).
+#
+# Three identities are kept apart on purpose:
+#   seal          integrity of the whole section text (covers every byte)
+#   leaf_digest   the module's aspect interface (declaration rows + handler
+#                 signature + effects, NO body); the input of aspect_root_digest
+#   body_digest   facet `advice.body`; never read by matching, by the leaf or
+#                 by the row digest, so a body edit moves nothing else
+#
+# Pure value code: no filesystem, no lock, no module-level mutable state.
+# Wire form is length-framed text, `<byte length>:<bytes>` per value:
+#   frame(seal) frame(magic) frame(module) frame(coverage schema) frame(leaf)
+#   frame(row count) { frame(pair count) { frame(key) frame(value) } }
+# Row fields are keyed. A key this reader does not know is ignored only when it
+# starts with `?` (optional); any other unknown key fails closed.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, digest_v1_parse}
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectHandlerV2,
+    DirectoryAspectSemanticV2}
+use compiler.common.cache_contract.aspect_match_shard_v1.{pointcut_selector_parse_v1}
+
+pub val ASPECT_DECL_SECTION_KIND_V1: text = "aspect-decl"
+pub val ASPECT_DECL_SECTION_MAGIC_V1: text = "aspect-decl/v1"
+pub val ASPECT_DECL_SECTION_MAX_ROWS_V1: i64 = 1024
+pub val ASPECT_DECL_SECTION_MAX_FIELD_BYTES_V1: i64 = 65536
+pub val ASPECT_DECL_SECTION_MAX_BYTES_V1: i64 = 1048576
+
+# Decode status. A miss is "cannot be used, nothing is wrong with the cache"
+# (absent section, digest algorithm this reader cannot verify); a reject is a
+# malformed, truncated, over-limit or tampered section.
+pub val ASPECT_SECTION_OK_V1: text = "ok"
+pub val ASPECT_SECTION_MISS_V1: text = "miss"
+pub val ASPECT_SECTION_REJECT_V1: text = "reject"
+
+pub struct AspectDeclRowV1:
+    family: text
+    # Declaration order only; not part of the row digest or the AdviceId.
+    # @allow(primitive_api) mirrors DirectoryAspectDeclarationV2.family_inventory_index
+    family_inventory_index: i64
+    advice_id: text
+    handler: text
+    form: text
+    mode: text
+    activation: text
+    selector: text
+    selector_id: text
+    scope_id: text
+    # @allow(primitive_api) mirrors DirectoryAspectDeclarationV2.priority
+    order: i64
+    # @allow(primitive_api) mirrors DirectoryAspectDeclarationV2.readonly
+    readonly: bool
+    # @allow(primitive_api) mirrors DirectoryAspectDeclarationV2.noalloc
+    noalloc: bool
+    # @allow(primitive_api) mirrors DirectoryAspectDeclarationV2.bounded_time
+    bounded_time: bool
+    signature_digest: text
+    effects_digest: text
+    body_digest: text
+
+pub struct AspectDeclSectionV1:
+    module_identity: text
+    coverage_schema: text
+    leaf_digest: text
+    rows: [AspectDeclRowV1]
+
+pub struct AspectDeclSectionDecodeV1:
+    status: text
+    reason: text
+    section: AspectDeclSectionV1
+
+
+pub fn aspect_section_frame_v1(value: text) -> text:
+    "{value.byte_len()}:" + value
+
+# @allow(primitive_api) cache-contract scalar: a decoded frame count, -1 when malformed, like the sibling v1 codecs
+pub fn aspect_section_count_v1(value: text) -> i64:
+    """Decimal count of 1..12 digits; -1 for anything else."""
+    val width = value.byte_len()
+    if width == 0 or width > 12:
+        return -1
+    var n = 0
+    var i = 0
+    while i < width:
+        val code = value.byte_at(i)
+        if code < 48 or code > 57:
+            return -1
+        n = n * 10 + (code - 48)
+        i = i + 1
+    n
+
+pub fn aspect_section_frames_read_v1(data: text) -> [text]?:
+    """Every frame of `data`, or None when any byte is outside a frame."""
+    var values: [text] = []
+    val total = data.byte_len()
+    var pos = 0
+    while pos < total:
+        var end = pos
+        while end < total and end - pos < 12 and data.byte_at(end) != 58:
+            end = end + 1
+        val width = aspect_section_count_v1(data.substring(pos, end))
+        if width < 0 or end >= total or data.byte_at(end) != 58 or end + 1 + width > total:
+            return None
+        values.push(data.substring(end + 1, end + 1 + width))
+        pos = end + 1 + width
+    Some(values)
+
+pub fn aspect_section_seal_v1(body: text) -> text:
+    "sha256:" + sha256_text(body)
+
+pub fn aspect_section_seal_status_v1(seal: text, body: text) -> text:
+    """ok when `seal` is the sha256 seal of `body`; miss when its algorithm is
+    unknown or not the one this producer writes; reject when it does not verify."""
+    match digest_v1_parse(seal):
+        case Some(digest):
+            if digest.algo_id != HASH_ALGO_SHA256_V1:
+                return ASPECT_SECTION_MISS_V1
+            if seal != aspect_section_seal_v1(body):
+                return ASPECT_SECTION_REJECT_V1
+            ASPECT_SECTION_OK_V1
+        case None: ASPECT_SECTION_MISS_V1
+
+# @allow(primitive_api) byte offsets are passed as the i64 fields of the compiler's Span
+pub fn aspect_body_span_digest_v1(source: text, start: i64, end: i64, fn_name: text) -> text:
+    """Body digest of the function whose declaration occupies bytes
+    [start, end) of `source`. "" when the span is not inside `source` or does
+    not hold a declaration of `fn_name` (a span from another source text)."""
+    if start < 0 or end <= start or end > source.byte_len():
+        return ""
+    val block = source.substring(start, end).trim()
+    if not block.contains("fn " + fn_name):
+        return ""
+    sha256_text(aspect_section_frame_v1("aop-body-span/v1") + aspect_section_frame_v1(block))
+
+# @allow(primitive_api) a 0-based occurrence ordinal; a count has no closer domain type in this contract layer
+pub fn aspect_decl_advice_id_v1(module_identity: text, family: text, handler: text,
+        occurrence: i64) -> text:
+    """AdviceId: the `occurrence`-th declaration (0-based, in declaration
+    order) that names `handler` in `family` inside its owning module. Stable
+    under a selector, order, signature or body edit of that declaration and
+    under adding or removing a declaration of any other handler. It is not
+    the family inventory index, which shifts when an earlier declaration is
+    added."""
+    var framed = aspect_section_frame_v1("aop-advice-id/v2")
+    for part in [module_identity, family, handler, "{occurrence}"]:
+        framed = framed + aspect_section_frame_v1(part)
+    "sha256:" + sha256_text(framed)
+
+fn _flag_v1(value: bool) -> text:
+    if value: "1" else: "0"
+
+fn _row_keys_v1() -> [text]:
+    ["family", "index", "advice", "handler", "form", "mode", "activation", "selector",
+        "selector_id", "scope_id", "order", "readonly", "noalloc", "bounded_time",
+        "signature", "effects", "body"]
+
+fn _row_values_v1(row: AspectDeclRowV1) -> [text]:
+    [row.family, "{row.family_inventory_index}", row.advice_id, row.handler, row.form, row.mode,
+        row.activation, row.selector, row.selector_id, row.scope_id, "{row.order}",
+        _flag_v1(row.readonly), _flag_v1(row.noalloc), _flag_v1(row.bounded_time),
+        row.signature_digest, row.effects_digest, row.body_digest]
+
+pub fn aspect_decl_row_digest_v1(row: AspectDeclRowV1) -> text:
+    """Row identity: every field except the `advice.body` facet and the
+    positional `family_inventory_index`. The declaration is identified by its
+    AdviceId (handler occurrence), so adding or removing another declaration
+    leaves this digest unchanged; the index is kept in the row for order only."""
+    val keys = _row_keys_v1()
+    val values = _row_values_v1(row)
+    var framed = aspect_section_frame_v1("aop-decl-row/v2")
+    var i = 0
+    while i < keys.len():
+        if keys[i] != "body" and keys[i] != "index":
+            framed = framed + aspect_section_frame_v1(keys[i]) + aspect_section_frame_v1(values[i])
+        i = i + 1
+    "sha256:" + sha256_text(framed)
+
+# @allow(primitive_api) the occurrence ordinal of aspect_decl_advice_id_v1
+pub fn aspect_decl_row_v1(module_identity: text, handler: DirectoryAspectHandlerV2,
+        occurrence: i64, body_digest: text) -> AspectDeclRowV1:
+    """One section row from a resolved handler; `occurrence` counts the earlier
+    rows of the same family and handler in this module.
+    `form` is the declaration's own form: the advice form of a mir row
+    (`before`/`after`/`around`), the join-point kind of a logical row.
+    `mode` is where the advice runs, as AdviceFacetsV1.mode reads it: the form
+    of a mir row; `before` for a logical row, whose one weave shape is a call
+    prepended to the forwarder (35.semantics/aspect_weave.spl).
+    `activation` is the declaration's weave mode verbatim (`static`, or a
+    registry mode). No scope syntax exists yet, so every row has the
+    unrestricted scope id."""
+    val d = handler.declaration
+    AspectDeclRowV1(family: d.family, family_inventory_index: d.family_inventory_index,
+        advice_id: aspect_decl_advice_id_v1(module_identity, d.family, d.handler, occurrence),
+        handler: d.handler, form: d.form, mode: if d.family == "mir": d.form else: "before",
+        activation: d.mode,
+        selector: d.selector, selector_id: pointcut_selector_parse_v1(d.selector).selector_digest,
+        scope_id: "sha256:" + sha256_text(aspect_section_frame_v1("aop-scope/v1") + aspect_section_frame_v1("")),
+        order: d.priority, readonly: d.readonly, noalloc: d.noalloc, bounded_time: d.bounded_time,
+        signature_digest: handler.signature_digest, effects_digest: handler.effects_digest,
+        body_digest: body_digest)
+
+pub fn aspect_decl_section_of_semantic_v1(semantic: DirectoryAspectSemanticV2,
+        body_digests: Dict<text, text>) -> Result<AspectDeclSectionV1, text>:
+    """The module's section from its typed-HIR aspect capture. `body_digests`
+    maps a handler name to its body digest; a handler without one is an error,
+    never a row with an empty facet."""
+    var rows: [AspectDeclRowV1] = []
+    var seen: Dict<text, i64> = {}
+    for item in semantic.handlers:
+        val handler: DirectoryAspectHandlerV2 = item
+        val name = handler.declaration.handler
+        if not body_digests.contains_key(name) or body_digests[name] == "":
+            return Err("advice-body-unavailable")
+        val slot = aspect_section_frame_v1(handler.declaration.family) + aspect_section_frame_v1(name)
+        var occurrence = 0
+        if seen.contains_key(slot):
+            occurrence = seen[slot]
+        seen[slot] = occurrence + 1
+        rows.push(aspect_decl_row_v1(semantic.module_identity, handler, occurrence, body_digests[name]))
+    Ok(AspectDeclSectionV1(module_identity: semantic.module_identity,
+        coverage_schema: semantic.coverage_schema, leaf_digest: semantic.interface_digest, rows: rows))
+
+pub fn aspect_decl_section_encode_v1(section: AspectDeclSectionV1) -> Result<text, text>:
+    if section.rows.len() > ASPECT_DECL_SECTION_MAX_ROWS_V1:
+        return Err("row-limit")
+    val keys = _row_keys_v1()
+    var body = aspect_section_frame_v1(ASPECT_DECL_SECTION_MAGIC_V1)
+    for head in [section.module_identity, section.coverage_schema, section.leaf_digest,
+            "{section.rows.len()}"]:
+        if head.byte_len() > ASPECT_DECL_SECTION_MAX_FIELD_BYTES_V1:
+            return Err("field-limit")
+        body = body + aspect_section_frame_v1(head)
+    for item in section.rows:
+        val row: AspectDeclRowV1 = item
+        val values = _row_values_v1(row)
+        body = body + aspect_section_frame_v1("{keys.len()}")
+        var i = 0
+        while i < keys.len():
+            if values[i].byte_len() > ASPECT_DECL_SECTION_MAX_FIELD_BYTES_V1:
+                return Err("field-limit")
+            body = body + aspect_section_frame_v1(keys[i]) + aspect_section_frame_v1(values[i])
+            i = i + 1
+        # The seal frame is 74 bytes; checked before sealing so an over-limit
+        # section is never hashed.
+        if body.byte_len() + 74 > ASPECT_DECL_SECTION_MAX_BYTES_V1:
+            return Err("section-limit")
+    Ok(aspect_section_frame_v1(aspect_section_seal_v1(body)) + body)
+
+fn _empty_section_v1() -> AspectDeclSectionV1:
+    AspectDeclSectionV1(module_identity: "", coverage_schema: "", leaf_digest: "", rows: [])
+
+fn _not_ok_v1(status: text, reason: text) -> AspectDeclSectionDecodeV1:
+    AspectDeclSectionDecodeV1(status: status, reason: reason, section: _empty_section_v1())
+
+fn _int_v1(value: text) -> i64?:
+    if value.starts_with("-"):
+        val magnitude = aspect_section_count_v1(value.substring(1, value.byte_len()))
+        if magnitude < 0:
+            return None
+        return Some(0 - magnitude)
+    val n = aspect_section_count_v1(value)
+    if n < 0:
+        return None
+    Some(n)
+
+fn _row_decode_v1(toks: [text], first: i64, pair_count: i64) -> Result<AspectDeclRowV1, text>:
+    val keys = _row_keys_v1()
+    var fields: Dict<text, text> = {}
+    var i = 0
+    while i < pair_count:
+        val key = toks[first + i * 2]
+        if keys.contains(key):
+            if fields.contains_key(key):
+                return Err("duplicate-field")
+            fields[key] = toks[first + i * 2 + 1]
+        else:
+            if not key.starts_with("?"):
+                return Err("unknown-mandatory-field")
+        i = i + 1
+    for key in keys:
+        if not fields.contains_key(key):
+            return Err("missing-field")
+    for flag in ["readonly", "noalloc", "bounded_time"]:
+        if fields[flag] != "1" and fields[flag] != "0":
+            return Err("bad-flag")
+    val index = _int_v1(fields["index"])
+    val order = _int_v1(fields["order"])
+    if index.is_none() or order.is_none():
+        return Err("bad-number")
+    if index.unwrap() < 0:
+        return Err("bad-number")
+    Ok(AspectDeclRowV1(family: fields["family"], family_inventory_index: index.unwrap(),
+        advice_id: fields["advice"], handler: fields["handler"], form: fields["form"],
+        mode: fields["mode"], activation: fields["activation"], selector: fields["selector"],
+        selector_id: fields["selector_id"], scope_id: fields["scope_id"], order: order.unwrap(),
+        readonly: fields["readonly"] == "1", noalloc: fields["noalloc"] == "1",
+        bounded_time: fields["bounded_time"] == "1", signature_digest: fields["signature"],
+        effects_digest: fields["effects"], body_digest: fields["body"]))
+
+pub fn aspect_decl_section_decode_v1(data: text) -> AspectDeclSectionDecodeV1:
+    """Strict decode. Size, framing, magic, seal, counts and every row must
+    verify; the result is never a partial section."""
+    if data.byte_len() > ASPECT_DECL_SECTION_MAX_BYTES_V1:
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "section-limit")
+    val frames = aspect_section_frames_read_v1(data)
+    if frames.is_none():
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "malformed-frame")
+    val toks = frames.unwrap()
+    if toks.len() < 6:
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "truncated-section")
+    if toks[1] != ASPECT_DECL_SECTION_MAGIC_V1:
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "bad-magic")
+    val seal = toks[0]
+    val body = data.substring(aspect_section_frame_v1(seal).byte_len(), data.byte_len())
+    val sealed = aspect_section_seal_status_v1(seal, body)
+    if sealed == ASPECT_SECTION_MISS_V1:
+        return _not_ok_v1(ASPECT_SECTION_MISS_V1, "unknown-digest-algorithm")
+    if sealed == ASPECT_SECTION_REJECT_V1:
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "seal-mismatch")
+    val count = aspect_section_count_v1(toks[5])
+    if count < 0:
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "bad-row-count")
+    if count > ASPECT_DECL_SECTION_MAX_ROWS_V1:
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "row-limit")
+    var rows: [AspectDeclRowV1] = []
+    var at = 6
+    var r = 0
+    while r < count:
+        if at >= toks.len():
+            return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "truncated-section")
+        val pair_count = aspect_section_count_v1(toks[at])
+        if pair_count < 0 or at + 1 + pair_count * 2 > toks.len():
+            return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "truncated-row")
+        match _row_decode_v1(toks, at + 1, pair_count):
+            case Ok(row): rows.push(row)
+            case Err(reason): return _not_ok_v1(ASPECT_SECTION_REJECT_V1, reason)
+        at = at + 1 + pair_count * 2
+        r = r + 1
+    if at != toks.len():
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "trailing-data")
+    AspectDeclSectionDecodeV1(status: ASPECT_SECTION_OK_V1, reason: "",
+        section: AspectDeclSectionV1(module_identity: toks[2], coverage_schema: toks[3],
+            leaf_digest: toks[4], rows: rows))
+
+pub fn aspect_decl_section_entry_v1(section: AspectDeclSectionV1) -> Result<text, text>:
+    """The module TLDR entry (`aspect-decl|<section text>`) for `section`."""
+    match aspect_decl_section_encode_v1(section):
+        case Ok(encoded): Ok(ASPECT_DECL_SECTION_KIND_V1 + "|" + encoded)
+        case Err(reason): Err(reason)
+
+pub fn aspect_decl_section_of_entries_v1(entries: [text]) -> AspectDeclSectionDecodeV1:
+    """Decode the one `aspect-decl|` entry of a module TLDR's section entries.
+    None is a miss; more than one is a reject."""
+    val prefix = ASPECT_DECL_SECTION_KIND_V1 + "|"
+    var found = 0
+    var payload = ""
+    for entry in entries:
+        if entry.starts_with(prefix):
+            found = found + 1
+            payload = entry.substring(prefix.byte_len(), entry.byte_len())
+    if found == 0:
+        return _not_ok_v1(ASPECT_SECTION_MISS_V1, "section-absent")
+    if found > 1:
+        return _not_ok_v1(ASPECT_SECTION_REJECT_V1, "duplicate-section")
+    aspect_decl_section_decode_v1(payload)
+
+export ASPECT_DECL_SECTION_KIND_V1, ASPECT_DECL_SECTION_MAGIC_V1, ASPECT_DECL_SECTION_MAX_ROWS_V1
+export ASPECT_DECL_SECTION_MAX_FIELD_BYTES_V1, ASPECT_DECL_SECTION_MAX_BYTES_V1
+export ASPECT_SECTION_OK_V1, ASPECT_SECTION_MISS_V1, ASPECT_SECTION_REJECT_V1
+export AspectDeclRowV1, AspectDeclSectionV1, AspectDeclSectionDecodeV1
+export aspect_section_frame_v1, aspect_section_count_v1, aspect_section_frames_read_v1
+export aspect_section_seal_v1, aspect_section_seal_status_v1, aspect_body_span_digest_v1
+export aspect_decl_advice_id_v1, aspect_decl_row_digest_v1, aspect_decl_row_v1
+export aspect_decl_section_of_semantic_v1, aspect_decl_section_encode_v1
+export aspect_decl_section_decode_v1, aspect_decl_section_entry_v1, aspect_decl_section_of_entries_v1

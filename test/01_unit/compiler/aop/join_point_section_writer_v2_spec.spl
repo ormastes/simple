@@ -1,0 +1,263 @@
+# @req REQ-ASPECT-AW2-WRITER
+# @req REQ-ASPECT-AW2-PARITY
+# @req REQ-ASPECT-AW2-ROOT
+"""
+# Writing `join-point|` from a compiled module, and facts from sections
+
+## Purpose and audience
+
+Purpose: document and pin `join_point_tldr_entry_v2` in
+`src/compiler/80.driver/cache/aspect_tldr_section_writer_v1.spl` (aspect plan
+stage AW-2), and prove on real parsed and lowered modules that:
+
+- directory facts built from the members' `join-point|` sections equal the
+  facts the compiler builds today from every member's HIR
+  (`aop_directory_facts_from_hir_v1`), on a directory with private functions,
+  attributes and a static guard;
+- the section rows additionally carry a signature digest and a real base body
+  digest, which the HIR-built facts do not;
+- a member that has not written its section makes the facts incomplete;
+- the directory aspect root is independent of member order and unchanged by an
+  advice body edit.
+
+Audience: compiler engineers replacing whole-program fact collection with
+per-module sections, and reviewers checking that the replacement cannot change
+a match result.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/aop/join_point_section_writer_v2_spec.spl`
+   from the repository root. Every scenario parses and lowers small modules in
+   memory; no file is read.
+2. Measure coverage with
+   `SIMPLE_EXECUTION_MODE=interpreter SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<f> <seed> run <this spec>`
+   (doc/07_guide/infra/testing/coverage.md).
+
+## How the writer gets its inputs
+
+| Row field | Source |
+|-----------|--------|
+| kind, symbol | `forward_join_points_for_module_v1`: every pure forwarder of the module, exported or not |
+| attrs | the parser's join-point attribute registry for the module path |
+| signature digest | `hir_abi_function_digest_v1` of the forwarder (parameters, result, effects; no body) |
+| base body digest | sha256 over the forwarder's own source span, blank edges trimmed |
+| guards | supplied by the caller: the module's static guard evaluations for the target profile |
+
+## Lifecycle
+
+Research: doc/01_research/local/dir_tldr_aspect.md
+Plan: doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (AW-2)
+Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
+Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md (section 3, gap G15)
+
+## Decision inventory (MC/DC)
+
+| Function | Decision | Covering scenario |
+|----------|----------|-------------------|
+| `join_point_tldr_entry_v2` | module has a source path / only a module key | "facts from sections equal facts from HIR", "a module without a source path is owned by its key" |
+| `join_point_tldr_entry_v2` | loop over functions: none left / one more | every scenario |
+| `join_point_tldr_entry_v2` | section built or refused (match arms) | "facts from sections equal facts from HIR", "a source that is not the parsed text is refused" |
+
+Exclusions: the `Err` arm of the signature digest (`hir_abi_function_digest_v1`
+fails only for a function whose types cannot be encoded) is a match arm with
+no fixture; such a function gets an empty digest, which the pure builder
+refuses (`join-point-signature-unavailable`, covered in
+`join_point_section_v2_spec.spl`).
+
+## Compatibility and limitations
+
+The writer is not yet called by TLDR publication, for the same reason as the
+`aspect-decl|` writer: publication runs before typed HIR exists.
+The parity scenario compares facts key, negative root, guard root, ids,
+attributes and completeness. `base_body_digest` is excluded from the equality
+because the HIR path leaves it empty; it is asserted separately.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:aop
+# @tag:cache
+# @tag:coverage
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.core.parser.{parser_initialization_generation_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_seal_parser_inventory_v2}
+use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_trait_root_v2, module_surface_extension_root_v2}
+use compiler.common.config.{Logger}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2}
+use compiler.driver.cache.directory_aspect_capture_v2.{directory_aspect_capture_v2}
+use compiler.driver.cache.directory_aspect_semantic_v2.{directory_aspect_semantic_capture_v2}
+use compiler.driver.cache.aop_match_cache_driver_v1.{aop_directory_facts_from_hir_v1}
+use compiler.driver.cache.aop_guard_eval_v1.{aop_guard_profile_v1, aop_source_guard_evals_v1}
+use compiler.driver.cache.aspect_tldr_section_writer_v1.{join_point_tldr_entry_v2}
+use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1}
+use compiler.common.cache_contract.aspect_decl_section_v1.{ASPECT_SECTION_OK_V1}
+use compiler.common.cache_contract.join_point_section_v2.{JoinPointSectionV2, JoinPointFactV2,
+    join_point_section_of_entries_v2, directory_join_point_facts_of_sections_v2, aspect_root_digest_v1}
+
+val FILE_A = "pay/pay_a.spl"
+val FILE_B = "pay/pay_b.spl"
+# pay_a: an attributed implementation, an attributed exported forwarder and a private forwarder.
+val SOURCE_A = "@logged\nfn submit_impl(n: i64) -> i64:\n    n + 1\n\n@logged\npub fn submit_view(n: i64) -> i64:\n    submit_impl(n)\n\nfn _hidden_view(n: i64) -> i64:\n    submit_impl(n)\n"
+# pay_b: a function under a static `@when` guard and one private forwarder.
+val SOURCE_B = "@when(true):\nfn g():\n    pass\n@end\n\nfn refund_impl(n: i64) -> i64:\n    n\n\nfn refund_view(n: i64) -> i64:\n    refund_impl(n)\n"
+
+val ASPECT_PATH = "pkg/aspects.spl"
+val ADVICE = "@advice(forward, submit)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    return\n"
+val ADVICE_BODY_EDIT = "@advice(forward, submit)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    val seen: i64 = 1\n"
+val ADVICE_SELECTOR_EDIT = "@advice(forward, pay)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    return\n"
+
+fn lower(source: text, path: text, name: text) -> HirModule:
+    val module = parse_full_frontend(source, path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(module)
+
+fn pay_modules() -> Dict<text, HirModule>:
+    {"pay_a": lower(SOURCE_A, FILE_A, "pay_a"), "pay_b": lower(SOURCE_B, FILE_B, "pay_b")}
+
+fn guard_sources() -> Dict<text, text>:
+    {"pay/pay_a.spl": SOURCE_A, "pay/pay_b.spl": SOURCE_B}
+
+# The module's section, written and read back through its TLDR entry.
+fn section_of(key: text, module: HirModule, source: text) -> JoinPointSectionV2:
+    val guards = aop_source_guard_evals_v1(source, cfg_detect_os(), cfg_detect_arch())
+    val entry = join_point_tldr_entry_v2(key, module, source, aop_guard_profile_v1(), guards).unwrap()
+    val decoded = join_point_section_of_entries_v2([entry])
+    expect(decoded.status).to_equal(ASPECT_SECTION_OK_V1)
+    decoded.section
+
+fn pay_sections(modules: Dict<text, HirModule>) -> [JoinPointSectionV2]:
+    [section_of("pay_a", modules["pay_a"], SOURCE_A), section_of("pay_b", modules["pay_b"], SOURCE_B)]
+
+fn selector_visible(facts: DirectoryJoinPointFactsV1) -> [text]:
+    var out: [text] = [facts.scope_id, "{facts.complete}", facts.facts_key, facts.negative_root,
+        facts.active_guard_root]
+    for file in facts.sorted_member_files:
+        out.push(file)
+    for point in facts.sorted_join_points:
+        out.push(point.id + "|" + point.kind + "|" + point.symbol + "|" + point.owner_file + "|" +
+            point.attrs.join(","))
+    out
+
+# The aspect leaf digest of one advice module, from the real typed-HIR capture.
+fn aspect_leaf(source: text) -> text:
+    val before = parser_initialization_generation_v1()
+    val parsed = parse_and_build_module_checked_reference_v1(source, ASPECT_PATH).unwrap()
+    val after = parser_initialization_generation_v1()
+    expect(aspect_registry_seal_parser_inventory_v2(ASPECT_PATH, true)).to_equal(true)
+    val category = DirectoryCategoryProjectionV2(canonical_path: ASPECT_PATH, source_identity: ASPECT_PATH,
+        source_digest: sha256_text(source), target_triple: "aarch64-unknown-linux-gnu",
+        preprocessed_digest: sha256_text(source), cfg_decision_digest: sha256_text("fixture-without-cfg"),
+        environment_policy_digest: sha256_text("fixture-policy"),
+        trait_root: module_surface_trait_root_v2(parsed.traits),
+        extension_root: module_surface_extension_root_v2(parsed.impls, parsed.extend_enums))
+    val epoch = DirectorySourceEpochV2(driver_identity: 1, generation: 1)
+    val draft = directory_aspect_capture_v2(ModuleSurfaceParserOwner.new(parsed), ASPECT_PATH, category,
+        epoch, before, after).unwrap()
+    var lowering = HirLowering.with_filename(ASPECT_PATH)
+    val module = lowering.lower_parser_module_unstub(parsed, false)
+    directory_aspect_semantic_capture_v2(draft, category, epoch, module, ASPECT_PATH).unwrap().interface_digest
+
+# @manual_section: Facts from sections versus facts from HIR
+describe "join_point_tldr_entry_v2":
+    it "facts from sections equal facts from HIR":
+        # @req REQ-ASPECT-AW2-PARITY
+        step("Lower two modules of directory `pay`, build its facts from HIR, then from the two modules' sections")
+        val modules = pay_modules()
+        val from_hir = aop_directory_facts_from_hir_v1(modules, guard_sources())
+        val sections = pay_sections(modules)
+        val from_sections = directory_join_point_facts_of_sections_v2("pay", [FILE_A, FILE_B], sections,
+            aop_guard_profile_v1())
+        # @capture(exec): selector-visible facts of both constructions
+        step("Scope, completeness, facts key, negative root, guard root, members, ids and attributes are equal")
+        expect(from_hir.len()).to_equal(1)  # oracle: both modules are in the one directory `pay`
+        expect(from_sections.complete).to_equal(true)
+        expect(selector_visible(from_sections)).to_equal(selector_visible(from_hir[0]))
+        expect(from_sections.sorted_join_points.len()).to_equal(3)  # oracle: submit_view, _hidden_view, refund_view
+
+    it "section rows carry a signature digest and a real base body digest":
+        # @req REQ-ASPECT-AW2-WRITER
+        step("Write and read back the sections of both modules and build the directory facts from them")
+        val modules = pay_modules()
+        val sections = pay_sections(modules)
+        val facts = directory_join_point_facts_of_sections_v2("pay", [FILE_A, FILE_B], sections,
+            aop_guard_profile_v1())
+        val hir_facts = aop_directory_facts_from_hir_v1(modules, guard_sources())[0]
+        val a_points = sections[0].points
+        # @capture(exec): digests of the section rows and of the facts
+        step("Every row has both digests, the private forwarder is a row, the guarded file lists its guard, and the HIR path has no body digest")
+        expect([a_points[0].id, a_points[1].id]).to_equal(["pay_a::_hidden_view", "pay_a::submit_view"])
+        expect(a_points[1].attrs).to_equal(["logged"])
+        for section in sections:
+            for point in section.points:
+                expect(point.signature_digest.byte_len()).to_equal(64)  # oracle: sha256 hex width
+                expect(point.base_body_digest.byte_len()).to_equal(64)  # oracle: sha256 hex width
+        expect(a_points[0].base_body_digest == a_points[1].base_body_digest).to_equal(false)
+        expect(a_points[0].guard_ids).to_equal([])
+        expect(sections[1].points[0].guard_ids.len()).to_equal(sections[1].guards.len())
+        expect(sections[1].guards.len() > 0).to_equal(true)
+        for point in facts.sorted_join_points:
+            expect(point.base_body_digest.byte_len()).to_equal(64)  # oracle: sha256 hex width
+        for point in hir_facts.sorted_join_points:
+            expect(point.base_body_digest).to_equal("")
+
+    it "a member without a section makes the facts incomplete":
+        # @req REQ-ASPECT-AW2-PARITY
+        step("Build the facts of `pay` from the section of pay_a only")
+        val modules = pay_modules()
+        val only_a = [section_of("pay_a", modules["pay_a"], SOURCE_A)]
+        val facts = directory_join_point_facts_of_sections_v2("pay", [FILE_A, FILE_B], only_a,
+            aop_guard_profile_v1())
+        # @capture(exec): completeness
+        step("The facts are incomplete; with both sections they are complete")
+        expect(facts.complete).to_equal(false)
+        expect(directory_join_point_facts_of_sections_v2("pay", [FILE_A, FILE_B], pay_sections(modules),
+            aop_guard_profile_v1()).complete).to_equal(true)
+
+    it "a module without a source path is owned by its key":
+        # @req REQ-ASPECT-AW2-WRITER
+        step("Write the section of a lowered module whose path was cleared")
+        val module = lower(SOURCE_B, FILE_B, "pay_b")
+        val keyed = section_of("pay_b", HirModule(..module, path: ""), SOURCE_B)
+        val pathed = section_of("pay_b", module, SOURCE_B)
+        # @capture(exec): owner files
+        step("The owner file is the module key; with a path it is the path")
+        expect(keyed.owner_file).to_equal("pay_b")
+        expect(pathed.owner_file).to_equal(FILE_B)
+        expect(keyed.points[0].id).to_equal(pathed.points[0].id)
+
+    it "a source that is not the parsed text is refused":
+        # @req REQ-ASPECT-AW2-WRITER
+        step("Write the section of pay_a while passing the source of pay_b")
+        val module = lower(SOURCE_A, FILE_A, "pay_a")
+        val wrong = join_point_tldr_entry_v2("pay_a", module, SOURCE_B, aop_guard_profile_v1(), [])
+        # @capture(exec): writer error
+        step("No entry is produced: a forwarder span that does not hold the forwarder has no body digest")
+        expect(wrong.unwrap_err()).to_equal("join-point-body-unavailable")
+
+# @manual_section: Aspect root from real leaves
+describe "aspect root of compiled advice modules":
+    it "an advice body edit leaves the aspect root unchanged and a selector edit changes it":
+        # @req REQ-ASPECT-AW2-ROOT
+        step("Capture the leaf digest of an advice module, of its body edit and of its selector edit")
+        val leaf = aspect_leaf(ADVICE)
+        val body_edit_leaf = aspect_leaf(ADVICE_BODY_EDIT)
+        val selector_edit_leaf = aspect_leaf(ADVICE_SELECTOR_EDIT)
+        val sibling = sha256_text("leaf of a sibling module")
+        val child = aspect_root_digest_v1([sha256_text("leaf in a child directory")], [])
+        val root = aspect_root_digest_v1([leaf, sibling], [child])
+        # @capture(exec): directory roots before and after each edit
+        step("The root is the same for the body edit and in the other member order, and differs for the selector edit")
+        expect(aspect_root_digest_v1([body_edit_leaf, sibling], [child])).to_equal(root)
+        expect(aspect_root_digest_v1([sibling, leaf], [child])).to_equal(root)
+        expect(aspect_root_digest_v1([selector_edit_leaf, sibling], [child]) == root).to_equal(false)
