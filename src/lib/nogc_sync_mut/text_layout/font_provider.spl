@@ -78,6 +78,9 @@ fn browser_platform_mono_faces() -> [text]:
 fn browser_platform_sans_faces() -> [text]:
     _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#0", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"])
 
+fn browser_platform_serif_faces() -> [text]:
+    _browser_present_platform_faces(["/System/Library/Fonts/Times.ttc#0", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"])
+
 # Weight >= 600 wants a real bold face, not a synthesised one. Helvetica.ttc
 # face 1 is Helvetica Bold; its `abcdefg` run is 61.34 px at 16 against the
 # regular face's 56.94, i.e. the +4 px delta Chrome shows and Simple measured
@@ -94,6 +97,8 @@ fn browser_platform_mono_bold_faces() -> [text]:
 # faces below; no macOS face is guessed. Only when the serif stack's regular
 # face is Liberation Serif too, so bold never swaps the typeface.
 fn browser_platform_serif_bold_faces() -> [text]:
+    if _browser_host_is_macos() and file_exists("/System/Library/Fonts/Times.ttc"):
+        return ["/System/Library/Fonts/Times.ttc#1"]
     if not file_exists("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
         return []
     _browser_present_platform_faces(["/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf"])
@@ -121,11 +126,15 @@ fn browser_platform_mono_bold_italic_faces() -> [text]:
 # 115.56, against the upright faces' 111.69 / 120.00. Same guard as the serif
 # bold face: only when the serif stack's regular face is Liberation Serif.
 fn browser_platform_serif_italic_faces() -> [text]:
+    if _browser_host_is_macos() and file_exists("/System/Library/Fonts/Times.ttc"):
+        return ["/System/Library/Fonts/Times.ttc#2"]
     if not file_exists("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
         return []
     _browser_present_platform_faces(["/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf"])
 
 fn browser_platform_serif_bold_italic_faces() -> [text]:
+    if _browser_host_is_macos() and file_exists("/System/Library/Fonts/Times.ttc"):
+        return ["/System/Library/Fonts/Times.ttc#3"]
     if not file_exists("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
         return []
     _browser_present_platform_faces(["/usr/share/fonts/truetype/liberation/LiberationSerif-BoldItalic.ttf"])
@@ -203,6 +212,12 @@ pub fn browser_host_has_measured_linux_face_set() -> bool:
         _browser_host_linux_face_set_state = if present: 1 else: 2
     _browser_host_linux_face_set_state == 1
 
+# Hosts with measured system face line metrics (Linux Chrome-159 or macOS CoreText).
+# reason: host capability predicate for measured system SFNT line metrics.
+# @allow(primitive_api)
+pub fn browser_host_has_measured_face_set() -> bool:
+    browser_host_has_measured_linux_face_set() or _browser_host_is_macos()
+
 fn _browser_host_face_or_empty(path: text) -> text:
     if file_exists(path): path else: ""
 
@@ -216,7 +231,47 @@ fn _browser_family_unserved(default_category: text) -> BrowserResolvedFamily:
 # hosts the per-name walk was not measured on: substring tests over the WHOLE
 # value (a decorated value's source path included), bundled lookup on the first
 # name only, mono as the unmatched default.
+fn _browser_resolve_macos_family(family: text) -> BrowserResolvedFamily:
+    val list_text = _browser_family_list_text(family)
+    val sentinel = list_text.trim().to_lower()
+    if sentinel == "" or sentinel == "inherit":
+        return _browser_family_unserved("mono")
+    val names = list_text.split(",")
+    for raw in names:
+        val trimmed = raw.trim()
+        val wanted = _strip_font_url_quotes(trimmed).trim().to_lower()
+        val quoted = wanted != trimmed.to_lower()
+        if wanted == "":
+            continue
+        for asset in selected_font_asset_candidates():
+            if asset.family.to_lower() == wanted:
+                return BrowserResolvedFamily(category: asset.category, category_strict: asset.category, face: "", bundled: asset.local_path, default_category: "mono")
+        if not quoted:
+            if wanted == "serif":
+                return BrowserResolvedFamily(category: "serif", category_strict: "serif", face: "", bundled: "", default_category: "mono")
+            if wanted == "sans-serif" or wanted == "system-ui" or wanted == "-apple-system" or wanted == "blinkmacsystemfont":
+                return BrowserResolvedFamily(category: "sans", category_strict: "sans", face: "", bundled: "", default_category: "mono")
+            if wanted == "monospace" or wanted == "ui-monospace":
+                return BrowserResolvedFamily(category: "mono", category_strict: "mono", face: "", bundled: "", default_category: "mono")
+        if wanted == "georgia":
+            val georgia_face = _browser_host_face_or_empty("/System/Library/Fonts/Supplemental/Georgia.ttf")
+            return BrowserResolvedFamily(category: "serif", category_strict: "serif", face: georgia_face, bundled: "", default_category: "mono")
+        if wanted == "times new roman":
+            val tnr_face = _browser_host_face_or_empty("/System/Library/Fonts/Supplemental/Times New Roman.ttf")
+            return BrowserResolvedFamily(category: "serif", category_strict: "serif", face: tnr_face, bundled: "", default_category: "mono")
+        if wanted == "times":
+            return BrowserResolvedFamily(category: "serif", category_strict: "serif", face: "", bundled: "", default_category: "mono")
+        if wanted == "helvetica" or wanted == "arial" or wanted == "sans":
+            return BrowserResolvedFamily(category: "sans", category_strict: "sans", face: "", bundled: "", default_category: "mono")
+        if wanted == "menlo" or wanted == "monaco" or wanted == "courier" or wanted == "courier new" or wanted == "sf mono":
+            return BrowserResolvedFamily(category: "mono", category_strict: "mono", face: "", bundled: "", default_category: "mono")
+    BrowserResolvedFamily(category: "", category_strict: "", face: "", bundled: "", default_category: "mono")
+
 fn _browser_resolve_family_legacy(family: text) -> BrowserResolvedFamily:
+    if _browser_host_is_macos():
+        val mac_resolved = _browser_resolve_macos_family(family)
+        if mac_resolved.category != "" or mac_resolved.bundled != "":
+            return mac_resolved
     val lower = family.to_lower()
     val families = family.split(",")
     val first = if families.len() > 0: families[0].trim() else: family.trim()
@@ -358,14 +413,22 @@ pub fn browser_font_family_is_monospace(family: text) -> bool:
 # when the host has none (the caller then keeps the regular face: recorded, not
 # synthesised, and never a typeface swap).
 fn _browser_host_face_variant(face: text, bold: bool, italic: bool) -> text:
+    if face.ends_with(".ttc#0"):
+        val ttc_idx = if bold and italic: "#3" elif bold: "#1" elif italic: "#2" else: "#0"
+        val ttc_path = face.slice(0, face.byte_len() - 2)
+        return if file_exists(ttc_path): ttc_path + ttc_idx else: ""
     val regular_suffix = if face.ends_with("-Regular.ttf"): "-Regular.ttf" else: ".ttf"
     val stem = face.slice(0, face.byte_len() - regular_suffix.byte_len())
     val slant = if face.contains("/dejavu/DejaVuSans"): "Oblique" else: "Italic"
     val style_name = if bold and italic: "Bold" + slant elif bold: "Bold" elif italic: slant else: ""
     if style_name == "":
         return face
-    val variant = stem + "-" + style_name + ".ttf"
-    if file_exists(variant): variant else: ""
+    val hyphen_variant = stem + "-" + style_name + ".ttf"
+    if file_exists(hyphen_variant):
+        return hyphen_variant
+    val spaced_style = if bold and italic: "Bold " + slant elif bold: "Bold" elif italic: slant else: ""
+    val spaced_variant = stem + " " + spaced_style + ".ttf"
+    if file_exists(spaced_variant): spaced_variant else: ""
 
 # Bold routing rides the existing `__simple_font_face__|<source>|<family>`
 # channel, which `browser_font_candidates_for_family` already understands, so
@@ -463,12 +526,12 @@ fn browser_font_dylib_candidates() -> [text]:
     ]
 
 fn browser_serif_font_candidates() -> [text]:
-    # Chrome-compatible serif stack: host Liberation Serif first, then the
-    # SimpleOS-bundled Noto Serif faces, then the multilingual Noto serif
-    # assets and remaining host fallbacks. The bundled example paths are
-    # resolved by content sniffing, so a missing file simply falls through
-    # to the next candidate.
-    _browser_resolve_bundled_candidates([
+    # Chrome-compatible serif stack: host Times (macOS) / Liberation Serif
+    # (Linux) first, then the SimpleOS-bundled Noto Serif faces, then the
+    # multilingual Noto serif assets and remaining host fallbacks. The bundled
+    # example paths are resolved by content sniffing, so a missing file simply
+    # falls through to the next candidate.
+    browser_platform_serif_faces() + _browser_resolve_bundled_candidates([
         "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
         "examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf",
         "examples/09_embedded/simple_os/fonts/serif/NotoSerifSC-Regular.otf",
@@ -760,6 +823,8 @@ fn browser_family_has_host_face(family: text) -> bool:
         return browser_platform_mono_faces().len() > 0
     if resolved.category == "sans":
         return browser_platform_sans_faces().len() > 0
+    if resolved.category == "serif" or (resolved.category == "" and resolved.default_category == "serif"):
+        return browser_platform_serif_faces().len() > 0
     false
 
 var _browser_face_x_height_units_memo: Dict<text, [i64]> = {}

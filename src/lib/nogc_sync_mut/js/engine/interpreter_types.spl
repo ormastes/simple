@@ -272,7 +272,115 @@ fn _get_fn_id(v: JsValue) -> i64:
         _: -1
 
 fn f64_to_i64(n: f64) -> i64:
-    n.to_i64()
+    if n != n:
+        return 0
+    val s = "{n}"
+    val slen = s.byte_len()
+    if slen == 0 or s == "inf" or s == "Infinity" or s == "-inf" or s == "-Infinity":
+        return 0
+    var i = 0
+    var neg = false
+    if s.byte_at(0) == 45:
+        neg = true
+        i = 1
+    var out: i64 = 0
+    while i < slen:
+        val b = s.byte_at(i)
+        if b == 46:
+            i = slen
+        elif b == 101 or b == 69:
+            return n.to_i64()
+        else:
+            val d = _digit_val(b)
+            if d >= 0:
+                out = out * 10 + d
+        i = i + 1
+    if neg:
+        return 0 - out
+    out
+
+fn _js_is_ws_byte(b: i64) -> bool:
+    b == 32 or b == 9 or b == 10 or b == 13
+
+fn js_parse_int_str(raw: text, has_radix: bool, radix_arg: f64) -> f64:
+    val slen = raw.byte_len()
+    var i = 0
+    while i < slen and _js_is_ws_byte(raw.byte_at(i)):
+        i = i + 1
+    if i >= slen:
+        return js_nan()
+    var neg = false
+    val sign_b = raw.byte_at(i)
+    if sign_b == 45:
+        neg = true
+        i = i + 1
+    elif sign_b == 43:
+        i = i + 1
+    var radix: i64 = 10
+    if has_radix:
+        radix = f64_to_i64(radix_arg)
+        if radix == 0:
+            radix = 10
+    if (not has_radix or radix == 16) and i + 1 < slen and raw.byte_at(i) == 48:
+        val next_b = raw.byte_at(i + 1)
+        if next_b == 120 or next_b == 88:
+            radix = 16
+            i = i + 2
+    if radix < 2 or radix > 36:
+        return js_nan()
+    var acc: i64 = 0
+    var count = 0
+    while i < slen:
+        val d = _digit_val(raw.byte_at(i))
+        if d < 0 or d >= radix:
+            break
+        acc = acc * radix + d
+        count = count + 1
+        i = i + 1
+    if count == 0:
+        return js_nan()
+    val res = acc.to_f64()
+    if neg:
+        return 0.0 - res
+    res
+
+fn js_parse_float_str(raw: text) -> f64:
+    val slen = raw.byte_len()
+    var i = 0
+    while i < slen and _js_is_ws_byte(raw.byte_at(i)):
+        i = i + 1
+    if i >= slen:
+        return js_nan()
+    val start = i
+    val sb = raw.byte_at(i)
+    if sb == 45 or sb == 43:
+        i = i + 1
+    var digits = 0
+    while i < slen and raw.byte_at(i) >= 48 and raw.byte_at(i) <= 57:
+        digits = digits + 1
+        i = i + 1
+    if i < slen and raw.byte_at(i) == 46:
+        i = i + 1
+        while i < slen and raw.byte_at(i) >= 48 and raw.byte_at(i) <= 57:
+            digits = digits + 1
+            i = i + 1
+    if digits == 0:
+        return js_nan()
+    if i < slen and (raw.byte_at(i) == 101 or raw.byte_at(i) == 69):
+        val exp_save = i
+        i = i + 1
+        if i < slen and (raw.byte_at(i) == 45 or raw.byte_at(i) == 43):
+            i = i + 1
+        var exp_digits = 0
+        while i < slen and raw.byte_at(i) >= 48 and raw.byte_at(i) <= 57:
+            exp_digits = exp_digits + 1
+            i = i + 1
+        if exp_digits == 0:
+            i = exp_save
+    val slice = raw.slice(start, i)
+    if val Some(n) = slice.parse_f64():
+        return n
+    js_nan()
 
 fn _digit_val(ch: i64) -> i64:
     if ch >= 48 and ch <= 57:
@@ -283,6 +391,25 @@ fn _digit_val(ch: i64) -> i64:
         return ch - 87
     -1
 
+fn js_math_floor(x: f64) -> f64:
+    if x != x:
+        return js_nan()
+    val iv: i64 = f64_to_i64(x)
+    val fv: f64 = iv.to_f64()
+    if x < 0.0 and fv != x:
+        return fv - 1.0
+    return fv
+
+fn js_math_ceil(x: f64) -> f64:
+    if x != x:
+        return js_nan()
+    return 0.0 - js_math_floor(0.0 - x)
+
+fn js_math_round(x: f64) -> f64:
+    if x != x:
+        return js_nan()
+    return js_math_floor(x + 0.5)
+
 export RETURN_SIGNAL
 export MAX_SCRIPT_EXECUTION_STEPS
 export JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS
@@ -292,3 +419,4 @@ export env_new, env_stack_new, call_frame_new
 export to_number, js_to_string, to_boolean, is_truthy, typeof_value
 export strict_equals, abstract_equals
 export _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val
+export js_parse_int_str, js_parse_float_str, js_math_floor, js_math_ceil, js_math_round

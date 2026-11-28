@@ -1,0 +1,624 @@
+# Agent Script Executor (`<script type="text/agent">` / `application/agent-script`)
+#
+# Executes deterministic browser automation verbs (`click`, `fill`, `select`,
+# `drag`, `hover`, `check`, `uncheck`, `submit`), DOM mutations (`set_text`,
+# `set_attr`, `set_style`, `add_class`, `remove_class`), and assertions/logs
+# (`expect_text`, `expect_attr`, `log`) against a `BeDomNode` tree and emits a
+# structured SDN receipt.
+
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, be_dom_find_by_id, be_dom_query_selector,
+    be_dom_query_selector_all, be_dom_get_text_content
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_attr, be_dom_set_attr, be_dom_serialize_html,
+    be_dom_serialize_html_for_render
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+
+# reason: line-indexed script step record for AgentScriptExecutor
+# @allow(primitive_api)
+pub class AgentScriptStep:
+    line_number: i64
+    raw: text
+    verb: text
+    target: text
+    arg1: text
+    arg2: text
+
+# reason: structured SDN receipt counters for AgentScript execution
+# @allow(primitive_api)
+pub class AgentScriptReceipt:
+    steps_run: i64
+    passed: i64
+    failed: i64
+    mutations: i64
+    logs: [text]
+    errors: [text]
+    ok: bool
+
+impl AgentScriptReceipt:
+    static fn empty() -> AgentScriptReceipt:
+        AgentScriptReceipt(
+            steps_run: 0,
+            passed: 0,
+            failed: 0,
+            mutations: 0,
+            logs: [],
+            errors: [],
+            ok: true
+        )
+
+    fn to_sdn() -> text:
+        var out = "steps_run: {self.steps_run}\n"
+        out = out + "passed: {self.passed}\n"
+        out = out + "failed: {self.failed}\n"
+        out = out + "mutations: {self.mutations}\n"
+        val ok_str = if self.ok: "true" else: "false"
+        out = out + "ok: {ok_str}\n"
+        out = out + "logs: ["
+        var i = 0
+        while i < self.logs.len():
+            if i > 0:
+                out = out + ", "
+            out = out + "\"" + _sdn_escape(self.logs[i]) + "\""
+            i = i + 1
+        out = out + "]\n"
+        out = out + "errors: ["
+        var j = 0
+        while j < self.errors.len():
+            if j > 0:
+                out = out + ", "
+            out = out + "\"" + _sdn_escape(self.errors[j]) + "\""
+            j = j + 1
+        out = out + "]\n"
+        out
+
+pub class AgentScriptExecutionResult:
+    dom: BeDomNode
+    receipt: AgentScriptReceipt
+    serialized_html: text
+
+pub class AgentScriptHtmlResult:
+    html: text
+    render_html: text
+    receipt: AgentScriptReceipt
+
+# reason: MIME type predicate for <script type="text/agent"> / application/agent-script
+# @allow(primitive_api)
+pub fn agent_script_is_type(script_type: text) -> bool:
+    val lower = script_type.trim().lower()
+    lower == "text/agent" or lower == "application/agent-script"
+
+fn _sdn_escape(s: text) -> text:
+    var out = ""
+    var i = 0
+    val n = s.byte_len()
+    while i < n:
+        val ch = s.slice(i, i + 1)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+pub fn agent_parse_line_tokens(line: text) -> [text]:
+    """Tokenize a single script line respecting `'...'` and `\"...\"` quotes."""
+    var tokens: [text] = []
+    val trimmed = line.trim()
+    val n = trimmed.byte_len()
+    var i = 0
+    while i < n:
+        while i < n and (trimmed.slice(i, i + 1) == " " or trimmed.slice(i, i + 1) == "\t"):
+            i = i + 1
+        if i >= n:
+            break
+        val ch = trimmed.slice(i, i + 1)
+        if ch == "\"" or ch == "'":
+            val q = ch
+            i = i + 1
+            var buf = ""
+            while i < n:
+                val c = trimmed.slice(i, i + 1)
+                if c == "\\" and i + 1 < n:
+                    val esc = trimmed.slice(i + 1, i + 2)
+                    if esc == "n":
+                        buf = buf + "\n"
+                    elif esc == "t":
+                        buf = buf + "\t"
+                    else:
+                        buf = buf + esc
+                    i = i + 2
+                elif c == q:
+                    i = i + 1
+                    break
+                else:
+                    buf = buf + c
+                    i = i + 1
+            tokens.push(buf)
+        else:
+            val start = i
+            while i < n and trimmed.slice(i, i + 1) != " " and trimmed.slice(i, i + 1) != "\t":
+                i = i + 1
+            tokens.push(trimmed.slice(start, i))
+    tokens
+
+pub fn dom_merge_inline_style(existing: text, prop_in: text, value_in: text) -> text:
+    """Upsert or clear one CSS property in an inline style string."""
+    val prop = prop_in.trim().lower()
+    val value = value_in.trim()
+    if prop == "":
+        return existing
+    var keys: [text] = []
+    var vals: [text] = []
+    if existing.trim() != "":
+        for decl in existing.split(";"):
+            val d = decl.trim()
+            if d == "":
+                continue
+            val colon = d.index_of(":") ?? -1
+            if colon > 0:
+                val k = d.slice(0, colon).trim().lower()
+                val v = d.slice(colon + 1, d.byte_len()).trim()
+                if k != "" and k != prop:
+                    var replaced = false
+                    var ki = 0
+                    while ki < keys.len():
+                        if keys[ki] == k:
+                            vals[ki] = v
+                            replaced = true
+                            break
+                        ki = ki + 1
+                    if not replaced:
+                        keys.push(k)
+                        vals.push(v)
+    if value != "":
+        keys.push(prop)
+        vals.push(value)
+    var parts: [text] = []
+    var i = 0
+    while i < keys.len():
+        parts.push("{keys[i]}: {vals[i]}")
+        i = i + 1
+    if parts.len() == 0:
+        return ""
+    parts.join("; ") + ";"
+
+fn _split_class_tokens(raw: text) -> [text]:
+    var out: [text] = []
+    for part in raw.trim().split(" "):
+        val p = part.trim()
+        if p != "":
+            out.push(p)
+    out
+
+fn _next_node_id_seed(node: BeDomNode) -> i64:
+    var max_id: i64 = node.node_id + 1
+    for ch in node.children:
+        val sub = _next_node_id_seed(ch)
+        if sub > max_id:
+            max_id = sub
+    max_id
+
+fn _reassign_node_ids(node: BeDomNode, start_id: i64) -> (BeDomNode, i64):
+    var cur = node
+    cur.node_id = start_id
+    var next_id = start_id + 1
+    var new_children: [BeDomNode] = []
+    for child in cur.children:
+        var res = _reassign_node_ids(child, next_id)
+        var c = res.0
+        c.parent_id = start_id
+        new_children.push(c)
+        next_id = res.1
+    cur.children = new_children
+    (cur, next_id)
+
+# reason: HTML fragment parser returning BeDomNode children and next monotonic node_id
+# @allow(primitive_api)
+pub fn dom_parse_fragment_children(html_fragment: text, start_id: i64) -> ([BeDomNode], i64):
+    val doc = html_tree_builder_build("<!doctype html><html><body>" + html_fragment + "</body></html>")
+    var out: [BeDomNode] = []
+    var next_id = start_id
+    val body_opt = be_dom_query_selector(doc, "body")
+    if val Some(body) = body_opt:
+        for ch in body.children:
+            val res = _reassign_node_ids(ch, next_id)
+            out.push(res.0)
+            next_id = res.1
+    (out, next_id)
+
+fn _apply_mutation_on_node(node: BeDomNode, op: text, key: text, val_str: text, next_id: i64) -> (BeDomNode, i64):
+    var cur = node
+    var nid = next_id
+    if op == "set_text":
+        cur.children = [BeDomNode.text_node(nid, val_str)]
+        cur.data = ""
+        nid = nid + 1
+        return (cur, nid)
+    if op == "set_html":
+        val frag = dom_parse_fragment_children(val_str, nid)
+        var attached: [BeDomNode] = []
+        for fc in frag.0:
+            var child_mut = fc
+            child_mut.parent_id = cur.node_id
+            attached.push(child_mut)
+        cur.children = attached
+        cur.data = ""
+        return (cur, frag.1)
+    if op == "append_html":
+        val frag = dom_parse_fragment_children(val_str, nid)
+        for fc in frag.0:
+            var child_mut = fc
+            child_mut.parent_id = cur.node_id
+            cur.children.push(child_mut)
+        return (cur, frag.1)
+    if op == "set_attr":
+        cur.set_attr(key, val_str)
+        return (cur, nid)
+    if op == "remove_attr":
+        cur.remove_attr(key)
+        return (cur, nid)
+    if op == "set_style":
+        val merged = dom_merge_inline_style(cur.get_attr("style"), key, val_str)
+        if merged == "":
+            cur.remove_attr("style")
+        else:
+            cur.set_attr("style", merged)
+        return (cur, nid)
+    if op == "add_class":
+        var classes = _split_class_tokens(cur.get_attr("class"))
+        var has = false
+        for c in classes:
+            if c == val_str:
+                has = true
+        if not has and val_str != "":
+            classes.push(val_str)
+        if classes.len() > 0:
+            cur.set_attr("class", classes.join(" "))
+        return (cur, nid)
+    if op == "remove_class":
+        var classes = _split_class_tokens(cur.get_attr("class"))
+        var kept: [text] = []
+        for c in classes:
+            if c != val_str:
+                kept.push(c)
+        if kept.len() > 0:
+            cur.set_attr("class", kept.join(" "))
+        else:
+            cur.remove_attr("class")
+        return (cur, nid)
+    if op == "toggle_class":
+        var classes = _split_class_tokens(cur.get_attr("class"))
+        var kept: [text] = []
+        var existed = false
+        for c in classes:
+            if c == val_str:
+                existed = true
+            else:
+                kept.push(c)
+        if not existed and val_str != "":
+            kept.push(val_str)
+        if kept.len() > 0:
+            cur.set_attr("class", kept.join(" "))
+        else:
+            cur.remove_attr("class")
+        return (cur, nid)
+    if op == "select":
+        cur.set_attr("value", val_str)
+        cur.set_attr("data-selected", val_str)
+        cur.set_attr("data-last-action", "select")
+        var updated_opts: [BeDomNode] = []
+        for child in cur.children:
+            var c = child
+            if c.tag_name == "option":
+                val opt_val = if c.has_attr("value"): c.get_attr("value") else: be_dom_get_text_content(c).trim()
+                if opt_val == val_str:
+                    c.set_attr("selected", "selected")
+                else:
+                    c.remove_attr("selected")
+            updated_opts.push(c)
+        cur.children = updated_opts
+        return (cur, nid)
+    if op == "fill":
+        cur.set_attr("value", val_str)
+        cur.set_attr("data-filled", "true")
+        cur.set_attr("data-last-action", "fill")
+        if cur.tag_name == "textarea":
+            cur.children = [BeDomNode.text_node(nid, val_str)]
+            cur.data = ""
+            nid = nid + 1
+        return (cur, nid)
+    if op == "check":
+        cur.set_attr("checked", "checked")
+        cur.set_attr("data-checked", "true")
+        cur.set_attr("data-last-action", "check")
+        return (cur, nid)
+    if op == "uncheck":
+        cur.remove_attr("checked")
+        cur.set_attr("data-checked", "false")
+        cur.set_attr("data-last-action", "uncheck")
+        return (cur, nid)
+    if op == "hover":
+        cur.set_attr("data-hovered", "true")
+        cur.set_attr("data-last-action", "hover")
+        return (cur, nid)
+    if op == "submit":
+        cur.set_attr("data-submitted", "true")
+        cur.set_attr("data-last-action", "submit")
+        return (cur, nid)
+    if op == "click":
+        cur.set_attr("data-clicked", "true")
+        cur.set_attr("data-last-action", "click")
+        val prev_cnt = (cur.get_attr("data-click-count").to_i64() ?? 0) + 1
+        cur.set_attr("data-click-count", "{prev_cnt}")
+        if cur.tag_name == "input" and cur.get_attr("type").lower() == "checkbox":
+            if cur.has_attr("checked"):
+                cur.remove_attr("checked")
+                cur.set_attr("data-checked", "false")
+            else:
+                cur.set_attr("checked", "checked")
+                cur.set_attr("data-checked", "true")
+        return (cur, nid)
+    (cur, nid)
+
+fn _replace_node_by_id(node: BeDomNode, target_id: i64, op: text, key: text, val_str: text, next_id: i64) -> (BeDomNode, bool, i64):
+    if node.node_id == target_id:
+        val res = _apply_mutation_on_node(node, op, key, val_str, next_id)
+        return (res.0, true, res.1)
+    var cur = node
+    var nid = next_id
+    var found = false
+    var new_children: [BeDomNode] = []
+    var i = 0
+    while i < cur.children.len():
+        if not found:
+            val sub = _replace_node_by_id(cur.children[i], target_id, op, key, val_str, nid)
+            new_children.push(sub.0)
+            if sub.1:
+                found = true
+            nid = sub.2
+        else:
+            new_children.push(cur.children[i])
+        i = i + 1
+    cur.children = new_children
+    (cur, found, nid)
+
+fn _detach_node_by_id(node: BeDomNode, target_id: i64) -> (BeDomNode, BeDomNode?):
+    var cur = node
+    var detached: BeDomNode? = None
+    var new_children: [BeDomNode] = []
+    for child in cur.children:
+        if child.node_id == target_id and detached.is_none():
+            detached = Some(child)
+        elif detached.is_none():
+            val sub = _detach_node_by_id(child, target_id)
+            new_children.push(sub.0)
+            if sub.1.is_some():
+                detached = sub.1
+        else:
+            new_children.push(child)
+    cur.children = new_children
+    (cur, detached)
+
+fn _append_child_by_id(node: BeDomNode, target_id: i64, child_to_add: BeDomNode) -> (BeDomNode, bool):
+    if node.node_id == target_id:
+        var cur = node
+        var ch = child_to_add
+        ch.parent_id = cur.node_id
+        cur.children.push(ch)
+        return (cur, true)
+    var cur = node
+    var found = false
+    var new_children: [BeDomNode] = []
+    for child in cur.children:
+        if not found:
+            val sub = _append_child_by_id(child, target_id, child_to_add)
+            new_children.push(sub.0)
+            if sub.1:
+                found = true
+        else:
+            new_children.push(child)
+    cur.children = new_children
+    (cur, found)
+
+# reason: tree-propagating selector mutation returning updated root, matched flag, and next node_id
+# @allow(primitive_api)
+pub fn dom_tree_apply_selector_op(root: BeDomNode, selector: text, op: text, key: text, val_str: text, next_id: i64) -> (BeDomNode, bool, i64):
+    """Find first node matching selector and apply a tree-propagating mutation."""
+    val found_opt = be_dom_query_selector(root, selector)
+    if val Some(target) = found_opt:
+        return _replace_node_by_id(root, target.node_id, op, key, val_str, next_id)
+    (root, false, next_id)
+
+# reason: tree-propagating drag/drop node move returning updated root and moved flag
+# @allow(primitive_api)
+pub fn dom_tree_move_selector(root: BeDomNode, src_sel: text, dst_sel: text) -> (BeDomNode, bool):
+    """Move the first element matching src_sel to become a child of dst_sel."""
+    val src_opt = be_dom_query_selector(root, src_sel)
+    val dst_opt = be_dom_query_selector(root, dst_sel)
+    if val Some(src) = src_opt:
+        if val Some(dst) = dst_opt:
+            if src.node_id == dst.node_id:
+                return (root, false)
+            val det = _detach_node_by_id(root, src.node_id)
+            if val Some(moved_raw) = det.1:
+                var moved = moved_raw
+                moved.set_attr("data-dragged", "true")
+                moved.set_attr("data-drop-target", dst_sel)
+                moved.set_attr("data-last-action", "drag")
+                val ins = _append_child_by_id(det.0, dst.node_id, moved)
+                return (ins.0, ins.1)
+    (root, false)
+
+# reason: next_node_id tracks monotonic node ID assignment across DOM mutations
+# @allow(primitive_api)
+pub class AgentScriptExecutor:
+    dom: BeDomNode
+    receipt: AgentScriptReceipt
+    next_node_id: i64
+
+impl AgentScriptExecutor:
+    static fn new(dom: BeDomNode) -> AgentScriptExecutor:
+        val seed = _next_node_id_seed(dom)
+        AgentScriptExecutor(
+            dom: dom,
+            receipt: AgentScriptReceipt.empty(),
+            next_node_id: seed
+        )
+
+    static fn from_html(html: text) -> AgentScriptExecutor:
+        AgentScriptExecutor.new(html_tree_builder_build(html))
+
+    fn serialized_html() -> text:
+        be_dom_serialize_html(self.dom)
+
+    fn render_html() -> text:
+        be_dom_serialize_html_for_render(self.dom)
+
+    me _record_fail(msg: text):
+        self.receipt.failed = self.receipt.failed + 1
+        self.receipt.ok = false
+        self.receipt.errors.push(msg)
+        self.receipt.logs.push("ERR: " + msg)
+
+    me _record_mutation(ok: bool, err_msg: text):
+        if ok:
+            self.receipt.mutations = self.receipt.mutations + 1
+            self.receipt.passed = self.receipt.passed + 1
+        else:
+            self._record_fail(err_msg)
+
+    me execute(script: text) -> AgentScriptReceipt:
+        val lines = script.split("\n")
+        var line_idx: i64 = 0
+        while line_idx < lines.len():
+            val raw = lines[line_idx].trim()
+            line_idx = line_idx + 1
+            if raw == "" or raw.starts_with("#") or raw.starts_with("//"):
+                continue
+            val toks = agent_parse_line_tokens(raw)
+            if toks.len() == 0:
+                continue
+            val verb = toks[0].lower()
+            self.receipt.steps_run = self.receipt.steps_run + 1
+
+            if verb == "log":
+                val msg = if toks.len() > 1: toks[1] else: ""
+                self.receipt.logs.push(msg)
+                self.receipt.passed = self.receipt.passed + 1
+                continue
+
+            if verb == "click" or verb == "hover" or verb == "check" or verb == "uncheck" or verb == "submit":
+                if toks.len() < 2:
+                    self._record_fail("line {line_idx}: {verb} missing selector")
+                    continue
+                val sel = toks[1]
+                val res = dom_tree_apply_selector_op(self.dom, sel, verb, "", "", self.next_node_id)
+                self.dom = res.0
+                self.next_node_id = res.2
+                self._record_mutation(res.1, "line {line_idx}: {verb} selector not found: {sel}")
+                continue
+
+            if verb == "fill" or verb == "select" or verb == "set_text" or verb == "set_html" or verb == "append_html" or verb == "add_class" or verb == "remove_class" or verb == "toggle_class":
+                if toks.len() < 3:
+                    self._record_fail("line {line_idx}: {verb} requires selector and value")
+                    continue
+                val sel = toks[1]
+                val val_arg = toks[2]
+                val res = dom_tree_apply_selector_op(self.dom, sel, verb, "", val_arg, self.next_node_id)
+                self.dom = res.0
+                self.next_node_id = res.2
+                self._record_mutation(res.1, "line {line_idx}: {verb} selector not found: {sel}")
+                continue
+
+            if verb == "set_attr" or verb == "set_style":
+                if toks.len() < 4:
+                    self._record_fail("line {line_idx}: {verb} requires selector, name, and value")
+                    continue
+                val sel = toks[1]
+                val k = toks[2]
+                val v = toks[3]
+                val res = dom_tree_apply_selector_op(self.dom, sel, verb, k, v, self.next_node_id)
+                self.dom = res.0
+                self.next_node_id = res.2
+                self._record_mutation(res.1, "line {line_idx}: {verb} selector not found: {sel}")
+                continue
+
+            if verb == "drag":
+                if toks.len() < 3:
+                    self._record_fail("line {line_idx}: drag requires source and target selectors")
+                    continue
+                val src_sel = toks[1]
+                val dst_sel = toks[2]
+                val moved = dom_tree_move_selector(self.dom, src_sel, dst_sel)
+                self.dom = moved.0
+                self._record_mutation(moved.1, "line {line_idx}: drag failed ({src_sel} -> {dst_sel})")
+                continue
+
+            if verb == "expect_text":
+                if toks.len() < 3:
+                    self._record_fail("line {line_idx}: expect_text requires selector and expected text")
+                    continue
+                val sel = toks[1]
+                val expected = toks[2]
+                val found = be_dom_query_selector(self.dom, sel)
+                if val Some(node) = found:
+                    var actual = be_dom_get_text_content(node).trim()
+                    if actual == "" and node.has_attr("value"):
+                        actual = node.get_attr("value").trim()
+                    if actual == expected.trim():
+                        self.receipt.passed = self.receipt.passed + 1
+                    else:
+                        self._record_fail("expect_text {sel}: expected '{expected}' got '{actual}'")
+                else:
+                    self._record_fail("expect_text selector not found: {sel}")
+                continue
+
+            if verb == "expect_attr":
+                if toks.len() < 4:
+                    self._record_fail("line {line_idx}: expect_attr requires selector, attr, and expected")
+                    continue
+                val sel = toks[1]
+                val attr_name = toks[2]
+                val expected = toks[3]
+                val found = be_dom_query_selector(self.dom, sel)
+                if val Some(node) = found:
+                    val actual = node.get_attr(attr_name)
+                    if actual == expected:
+                        self.receipt.passed = self.receipt.passed + 1
+                    else:
+                        self._record_fail("expect_attr {sel}[{attr_name}]: expected '{expected}' got '{actual}'")
+                else:
+                    self._record_fail("expect_attr selector not found: {sel}")
+                continue
+
+            self._record_fail("line {line_idx}: unknown agent verb '{verb}'")
+        self.receipt
+
+pub fn execute_agent_script(dom: BeDomNode, script: text) -> AgentScriptExecutionResult:
+    var exec = AgentScriptExecutor.new(dom)
+    val receipt = exec.execute(script)
+    AgentScriptExecutionResult(
+        dom: exec.dom,
+        receipt: receipt,
+        serialized_html: exec.serialized_html()
+    )
+
+pub fn execute_agent_script_on_html(html: text, script: text) -> AgentScriptHtmlResult:
+    var exec = AgentScriptExecutor.from_html(html)
+    val receipt = exec.execute(script)
+    AgentScriptHtmlResult(
+        html: exec.serialized_html(),
+        render_html: exec.render_html(),
+        receipt: receipt
+    )

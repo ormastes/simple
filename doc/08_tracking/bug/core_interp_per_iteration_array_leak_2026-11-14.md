@@ -176,3 +176,42 @@ excluded) `b7a9577fe8c41a73…`. Serial, cgroup-capped, aarch64.
 Known limits of the quarantine mode: a stale `len()` on a freed array reads `i64::MAX`
 instead of aborting (stale element reads and writes do fault). The self-hosted
 `mir_array_move.spl` has no port of this release yet.
+
+## Follow-up fix for remaining hot statement paths (2026-11-28)
+Completed the **Remaining** statement-evaluator items without adding new flat AST pools:
+
+1. **Eliminated `expr_get(...)` from `src/compiler/10.frontend/core/interpreter/eval_stmts.spl`:**
+   - Removed the `expr_get` import and replaced all `expr_get(...)` unpacks in
+     `eval_stmt_expr`, `eval_stmt_val_decl`, `eval_stmt_assign`,
+     `eval_stmt_compound_assign`, `eval_stmt_for`, and `eval_stmt_match` with
+     scalar AST field accessors (`expr_get_tag`, `expr_get_left`, `expr_get_right`,
+     `expr_get_str`, `expr_get_int`, `expr_get_span`).
+
+2. **Zero-allocation indexed AST body accessors (`ast_stmt.spl`, `_Ast/decl_nodes.spl`, `ast.spl`, `__init__.spl`):**
+   - Added `stmt_body_len` / `stmt_body_at` in `src/compiler/10.frontend/core/ast_stmt.spl`.
+   - Added `_flat_csv_count`, `_flat_csv_at`, `arm_body_len` / `arm_body_at`,
+     `elif_body_len` / `elif_body_at`, and `elif_else_len` / `elif_else_at` in
+     `src/compiler/10.frontend/core/_Ast/decl_nodes.spl` (re-exported via `ast.spl`
+     and `core/__init__.spl`).
+   - Added `eval_stmt_body_block` in `src/compiler/10.frontend/core/interpreter/eval.spl`,
+     switched `eval_match_expr` to `arm_body_len`/`arm_body_at`, switched
+     `eval_labeled_loop` in `eval_decls.spl` to `stmt_body_len`/`stmt_body_at`,
+     and converted `eval_stmts.spl` (`eval_stmt_assign`, `eval_stmt_compound_assign`,
+     `eval_stmt_if`, `eval_stmt_for`, `eval_stmt_static_for`, `eval_stmt_comptime`,
+     `eval_stmt_while`, `eval_stmt_match`, `eval_stmt_block`) to indexed body
+     iteration (preserving `STMT_RECEIVE`'s `arm_get_body(recv_arms[0])` contract
+     for `receive_spec.spl`, and leaving cold unmemoized match-exhaustiveness/fallthrough
+     helpers on `[i64]`).
+
+### Verification (2026-11-28)
+- Added `test/01_unit/compiler_core/interpreter/stmt_eval_zero_array_leak_spec.spl`.
+- Full `simple test` / `compiler.core` loading on the Nov 16 Rust seed binary hits
+  pre-existing `src/lib/common/types.spl:23:19: Unexpected token: expected As, found Newline`.
+- Isolated seed syntax probe passed with zero parse errors on all modified core AST,
+  interpreter, and spec files.
+- Self-contained seed execution (`JIT` and `SIMPLE_EXECUTION_MODE=interpret`)
+  verified `_flat_csv_count`/`_flat_csv_at` semantics and `rt_heap_live_count_by_kind(2)`
+  delta `0` across 1,000 iterations.
+- `sh scripts/check/check-flat-ast-codec-complete.shs` reported only the 6 pre-existing
+  unrounded pools (`expr_extra`, `expr_i_val`, `expr_s_val`, `par_error_records`,
+  `par_nil`, `par_state`); no new pools were introduced.

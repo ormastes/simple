@@ -1,0 +1,103 @@
+#!/bin/sh
+set -eu
+
+# Regression pin for
+# doc/08_tracking/bug/full_compiler_check_no_progress_over_five_minutes_2026-08-21.md
+#
+# Two receipt surfaces must work:
+#  1. the check worker (src/app/check/main.spl) honors the documented
+#     --progress <summary|count|dot> option and emits the designed
+#     event=check_phase receipts (same shape as --phase-profile);
+#  2. the public entry (src/app/cli/check_entry.spl) emits event=check_phase
+#     receipts around every worker spawn (chunk_start/chunk_done for directory
+#     targets, file_start/file_done for single-file invocations) so a composed
+#     `simple check <tree>` run can never sit silently across a chunk.
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+simple_bin=${SIMPLE_TEST_BINARY:-"${repo_root}/bin/simple"}
+[ -x "${simple_bin}" ] || {
+  echo "FAIL: pure-Simple test binary is not executable: ${simple_bin}" >&2
+  exit 1
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-check-progress.XXXXXX")
+trap 'rm -rf "${work}"' EXIT HUP INT TERM
+fixture="${work}/sample.spl"
+printf '%s\n' 'fn answer() -> i64: 42' >"${fixture}"
+fixture_dir="${work}/tree"
+mkdir "${fixture_dir}"
+printf '%s\n' 'fn first() -> i64: 1' >"${fixture_dir}/first.spl"
+printf '%s\n' 'fn second() -> i64: 2' >"${fixture_dir}/second.spl"
+
+run_worker() {
+  SIMPLE_BINARY="${simple_bin}" SIMPLE_BIN="${simple_bin}" SIMPLE_LIB="${repo_root}/src" \
+    "${simple_bin}" run "${repo_root}/src/app/check/main.spl" "$@"
+}
+
+run_entry() {
+  SIMPLE_BINARY="${simple_bin}" SIMPLE_BIN="${simple_bin}" SIMPLE_LIB="${repo_root}/src" \
+    "${simple_bin}" run "${repo_root}/src/app/cli/check_entry.spl" "$@"
+}
+
+# --- Worker: --progress drives the designed check_phase receipts ---
+
+run_worker --progress count "${fixture}" \
+  >"${work}/w_count.stdout" 2>"${work}/w_count.stderr"
+w_combined=$(cat "${work}/w_count.stdout" "${work}/w_count.stderr")
+printf '%s\n' "${w_combined}" | grep -Fq 'event=check_phase phase=parse '
+printf '%s\n' "${w_combined}" | grep -Fq 'event=check_phase phase=command_total elapsed_ms='
+
+run_worker --progress=dot "${fixture}" \
+  >"${work}/w_dot.stdout" 2>"${work}/w_dot.stderr"
+grep -Fq 'event=check_phase' "${work}/w_dot.stderr"
+
+run_worker --count "${fixture}" \
+  >"${work}/w_shorthand.stdout" 2>"${work}/w_shorthand.stderr"
+grep -Fq 'event=check_phase' "${work}/w_shorthand.stderr"
+
+run_worker --progress=none "${fixture}" \
+  >"${work}/w_none.stdout" 2>"${work}/w_none.stderr"
+if grep -Fq 'event=check_phase' "${work}/w_none.stdout" "${work}/w_none.stderr"; then
+  echo "FAIL: --progress=none emitted phase evidence" >&2
+  exit 1
+fi
+
+# Default run stays silent (same pin as check_phase_profile_test.shs).
+run_worker "${fixture}" \
+  >"${work}/w_default.stdout" 2>"${work}/w_default.stderr"
+if grep -Fq 'event=check_phase' "${work}/w_default.stdout" "${work}/w_default.stderr"; then
+  echo "FAIL: default worker run emitted phase evidence" >&2
+  exit 1
+fi
+
+run_worker --progress count --json "${fixture}" \
+  >"${work}/w_json.stdout" 2>"${work}/w_json.stderr"
+grep -Fq '"command":"check","status":"ok"' "${work}/w_json.stdout"
+if grep -Fq 'event=check_phase' "${work}/w_json.stdout" "${work}/w_json.stderr"; then
+  echo "FAIL: --progress receipts contaminated JSON mode" >&2
+  exit 1
+fi
+
+# --- Entry: receipts around every worker spawn ---
+
+# Directory target: chunk receipts on stderr by default.
+run_entry check "${fixture_dir}" \
+  >"${work}/e_dir.stdout" 2>"${work}/e_dir.stderr"
+grep -Fq 'event=check_phase phase=chunk_start ' "${work}/e_dir.stderr"
+grep -Fq 'event=check_phase phase=chunk_done ' "${work}/e_dir.stderr"
+
+# Directory target with explicit --progress none: silent.
+run_entry check --progress none "${fixture_dir}" \
+  >"${work}/e_none.stdout" 2>"${work}/e_none.stderr"
+if grep -Fq 'event=check_phase' "${work}/e_none.stdout" "${work}/e_none.stderr"; then
+  echo "FAIL: entry --progress none emitted receipts" >&2
+  exit 1
+fi
+
+# Single-file target: file receipts on stderr.
+run_entry check "${fixture}" \
+  >"${work}/e_file.stdout" 2>"${work}/e_file.stderr"
+grep -Fq 'event=check_phase phase=file_start ' "${work}/e_file.stderr"
+grep -Fq 'event=check_phase phase=file_done ' "${work}/e_file.stderr"
+
+echo "check_progress_receipts=true"

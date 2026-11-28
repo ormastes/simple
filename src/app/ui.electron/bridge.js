@@ -27,11 +27,36 @@ const {
 let mainWindow = null;
 let simpleProcess = null;
 let mdiProofInputFrames = [];
+let firstRenderShown = false;
+let captureQuitScheduled = false;
+
+function formatElectronWindowTitle(rawTitle) {
+    const trimmed = typeof rawTitle === 'string' ? rawTitle.trim() : '';
+    if (!trimmed) {
+        return 'Simple Browser — [Chrome Base / Electron]';
+    }
+    if (trimmed.includes('Chrome') || trimmed.includes('Electron')) {
+        return trimmed;
+    }
+    return `${trimmed} — [Chrome Base / Electron]`;
+}
 
 function handleSimpleMessageLine(line, win = mainWindow) {
     try {
         const msg = JSON.parse(line);
         if (msg.type === 'render' && win) {
+            if (!firstRenderShown) {
+                firstRenderShown = true;
+                if (process.platform === 'darwin' && app && app.dock && typeof app.dock.show === 'function') {
+                    app.dock.show();
+                }
+                if (typeof win.show === 'function') {
+                    win.show();
+                }
+                if (typeof win.focus === 'function') {
+                    win.focus();
+                }
+            }
             const rendered = win.webContents
                 .executeJavaScript(renderEnvelopeScript(msg))
                 .then(() => win.webContents.executeJavaScript(electronWmInitScript()));
@@ -46,6 +71,29 @@ function handleSimpleMessageLine(line, win = mainWindow) {
                     })
                     .catch(err => {
                         fs.writeFileSync(process.env.SIMPLE_ELECTRON_PROOF_PATH, JSON.stringify({ error: String(err) }));
+                        if (app) {
+                            app.quit();
+                        }
+                    });
+            }
+            if (process.env.SIMPLE_ELECTRON_CAPTURE_AND_QUIT_PATH && !captureQuitScheduled) {
+                captureQuitScheduled = true;
+                const capturePath = process.env.SIMPLE_ELECTRON_CAPTURE_AND_QUIT_PATH;
+                Promise.resolve(rendered)
+                    .then(() => new Promise(resolve => setTimeout(resolve, 350)))
+                    .then(() => win.webContents.capturePage())
+                    .then(image => {
+                        fs.mkdirSync(path.dirname(capturePath), { recursive: true });
+                        fs.writeFileSync(capturePath, image.toPNG());
+                    })
+                    .catch(() => {})
+                    .finally(() => {
+                        if (simpleProcess) {
+                            try {
+                                simpleProcess.kill();
+                            } catch (_) {}
+                            simpleProcess = null;
+                        }
                         if (app) {
                             app.quit();
                         }
@@ -281,7 +329,7 @@ function electronWmInitScript() {
             if (!document.getElementById('simple-electron-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-electron-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate}#wm-desktop .wm-window{position:absolute;display:flex;flex-direction:column;overflow:hidden}#wm-desktop .wm-body{flex:1;min-height:0;overflow:auto}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#wm-desktop .wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}#wm-desktop .wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate;pointer-events:none}#wm-desktop .wm-window{position:absolute;display:flex;flex-direction:column;overflow:hidden;pointer-events:auto}#wm-desktop .wm-body{flex:1;min-height:0;overflow:auto}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#wm-desktop .wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}#wm-desktop .wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -773,15 +821,15 @@ function shellUrl() {
 if (app) app.whenReady().then(() => {
     const platform = process.platform;
 
-    // When a SIMPLE_ELECTRON_TITLE is provided (e.g. the web-render backend
-    // comparison), use a standard visible title bar so the title — which names
-    // the backend — is actually shown. The WM/MDI default hides it (hiddenInset).
-    const showTitle = !!process.env.SIMPLE_ELECTRON_TITLE;
+    const hideTitle = process.env.SIMPLE_ELECTRON_HIDE_TITLEBAR === '1';
+    const lockedTitle = formatElectronWindowTitle(process.env.SIMPLE_ELECTRON_TITLE || 'Simple UI');
     const winOptions = {
-        width: Number(process.env.SIMPLE_ELECTRON_WIDTH) || 1280,
-        height: Number(process.env.SIMPLE_ELECTRON_HEIGHT) || 720,
-        titleBarStyle: showTitle ? 'default' : (platform === 'darwin' ? 'hiddenInset' : 'hidden'),
-        titleBarOverlay: (!showTitle && platform !== 'darwin')
+        width: Number(process.env.SIMPLE_ELECTRON_WIDTH) || 960,
+        height: Number(process.env.SIMPLE_ELECTRON_HEIGHT) || 640,
+        useContentSize: true,
+        show: true,
+        titleBarStyle: hideTitle ? (platform === 'darwin' ? 'hiddenInset' : 'hidden') : 'default',
+        titleBarOverlay: (hideTitle && platform !== 'darwin')
             ? { color: '#0b0d10', symbolColor: '#ffffff', height: 28 }
             : undefined,
         backgroundColor: '#0b0d10',
@@ -790,7 +838,7 @@ if (app) app.whenReady().then(() => {
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.js')
         },
-        title: process.env.SIMPLE_ELECTRON_TITLE || 'Simple UI'
+        title: lockedTitle
     };
 
     // Platform-specific material support
@@ -805,12 +853,14 @@ if (app) app.whenReady().then(() => {
 
     // Lock the window title to our backend label: a loaded page's <title>
     // (document.title) otherwise overrides it, hiding which backend rendered.
-    if (process.env.SIMPLE_ELECTRON_TITLE) {
-        const lockedTitle = process.env.SIMPLE_ELECTRON_TITLE;
-        mainWindow.on('page-title-updated', (e) => { e.preventDefault(); });
-        mainWindow.setTitle(lockedTitle);
-        mainWindow.webContents.on('did-finish-load', () => mainWindow.setTitle(lockedTitle));
+    mainWindow.on('page-title-updated', (e) => { e.preventDefault(); });
+    mainWindow.setTitle(lockedTitle);
+    mainWindow.webContents.on('did-finish-load', () => mainWindow.setTitle(lockedTitle));
+    if (platform === 'darwin' && app.dock && typeof app.dock.show === 'function') {
+        app.dock.show();
     }
+    mainWindow.show();
+    mainWindow.focus();
 
     // Optional zoom (e.g. 0.25 = 4x smaller fonts) for the web-render comparison.
     const zoomFactor = Number(process.env.SIMPLE_ELECTRON_ZOOM);
@@ -887,6 +937,7 @@ if (app) app.on('window-all-closed', () => {
 module.exports = {
     commonInputEnvelope,
     electronWmInitScript,
+    formatElectronWindowTitle,
     handleSimpleMessageLine,
     parseCliArgs,
     renderEnvelopeMetadata,

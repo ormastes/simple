@@ -274,6 +274,18 @@ impl<'a, M: Module> InstrContext<'a, M> {
         module: &'a mut M,
         runtime_funcs_by_string: &HashMap<String, cranelift_module::FuncId>,
     ) -> InstrContext<'a, M> {
+        Self::new_for_test_with_ambiguous(module, runtime_funcs_by_string, std::collections::HashSet::new())
+    }
+
+    /// `new_for_test` with an explicit ambiguous-name set, for tests of the
+    /// fail-closed guards that fire when a bare ambiguous PRIVATE call target
+    /// would otherwise be fabricated as an unmangled extern import.
+    #[doc(hidden)]
+    pub fn new_for_test_with_ambiguous(
+        module: &'a mut M,
+        runtime_funcs_by_string: &HashMap<String, cranelift_module::FuncId>,
+        ambiguous_names: std::collections::HashSet<String>,
+    ) -> InstrContext<'a, M> {
         use crate::hir::TypeId;
         use crate::mir::MirFunction;
         use simple_parser::ast::Visibility;
@@ -308,7 +320,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
         let fn_arities: &'static std::sync::Arc<std::collections::HashMap<String, usize>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
         let ambiguous_names: &'static std::sync::Arc<std::collections::HashSet<String>> =
-            Box::leak(Box::new(std::sync::Arc::new(std::collections::HashSet::new())));
+            Box::leak(Box::new(std::sync::Arc::new(ambiguous_names)));
         let enum_defs: &'static std::sync::Arc<
             std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>,
         > = Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));

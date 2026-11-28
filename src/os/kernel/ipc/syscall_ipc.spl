@@ -9,7 +9,7 @@ use os.kernel.types.ipc_types.{
 }
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
-use os.kernel.types.capability_types.{CapabilityKind}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
 use os.kernel.memory.user_copy.{user_copyin_bytes_validated, user_copyout_bytes}
 use os.kernel.text_checked.{kernel_text_checked}
 use os.kernel.errno.{EAGAIN, EFAULT, EINVAL, EIO, EMSGSIZE, ENOENT, ENOSPC, ENOSYS, EPERM}
@@ -160,6 +160,38 @@ fn _handle_ipc_recv_owned_v1_state(
             return _ipc_owned_state(-(EIO as i64), scheduler, ipc_mgr)
         return _ipc_owned_state(required as i64, scheduler, ipc_mgr)
     _ipc_owned_state(-(EIO as i64), scheduler, ipc_mgr)
+
+# Owned-record net broker wire values (frozen by src/os/userlib/ipc_protocol.spl
+# and the netstack service contract).  NET_BIND and NET_LISTEN carry the bound
+# local port as a little-endian u16 at payload bytes [8..10).
+val NET_BROKER_BIND_METHOD: u32 = 2u32
+val NET_BROKER_LISTEN_METHOD: u32 = 3u32
+val NET_BROKER_PORT_OFFSET: u64 = 8u64
+val NET_BROKER_MIN_PORT_BYTES: u64 = 10u64
+
+pub fn owned_net_listen_broker_allows(
+    caps: CapabilitySet, endpoint_name: text, method: u32, payload: [u8]
+) -> bool:
+    """Gate the owned-record net broker's bind/listen methods by exact NetListen.
+
+    The root service catalogue mints named listener authority (for example
+    NetListen(80) for the http service, see root_service_catalog.spl), and the
+    owned-record delivery path must check the requester's exact capability for
+    the wire-declared local port before a bind or listen reaches the net
+    service.  Non-net endpoints and methods other than NET_BIND/NET_LISTEN are
+    not this gate's authority boundary and pass through.  Truncated wire input
+    fails closed; there is deliberately no wildcard NetListen(0) fallback, so
+    the port in the message must match a held token exactly.
+    """
+    if endpoint_name != "net":
+        return true
+    if method != NET_BROKER_BIND_METHOD and method != NET_BROKER_LISTEN_METHOD:
+        return true
+    if payload.len() < NET_BROKER_MIN_PORT_BYTES:
+        return false
+    val port = (payload[NET_BROKER_PORT_OFFSET] as u16) |
+        ((payload[NET_BROKER_PORT_OFFSET + 1u64] as u16) << 8u16)
+    caps.has(CapabilityKind.NetListen(port: port))
 
 fn _ipc_read_user_u32(addr: u64) -> u32:
     (rt_copy_user_byte(addr).to_u32() |
@@ -393,3 +425,4 @@ export _handle_ipc_destroy_port, _handle_ipc_connect, _handle_ipc_port_owner
 export _handle_ipc_send_state, _handle_ipc_recv_state, _handle_ipc_create_port_state
 export _handle_ipc_destroy_port_state, _handle_ipc_connect_state
 export _handle_ipc_send_owned_v1_state, _handle_ipc_recv_owned_v1_state
+export owned_net_listen_broker_allows

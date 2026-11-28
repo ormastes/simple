@@ -235,3 +235,31 @@ fn parse_method_inline_generic_bounds_and_const_generic_args() {
         }]
     );
 }
+
+// `pass` is a statement keyword and `pass(msg)` is the pass-with-message
+// statement, so a bare call can never reach a free function of that name.
+// Bug: seed_jit_call_to_function_named_pass_segfaults_2026-11-28.
+#[test]
+fn reject_free_function_named_pass() {
+    for src in [
+        "fn pass(o: i64) -> i64:\n    o + 1\n",
+        "pub fn pass(o: i64) -> i64:\n    o + 1\n",
+        "fn main():\n    print(1)\n\nfn pass():\n    return 1\n",
+    ] {
+        let mut parser = Parser::new(src);
+        let err = parser.parse().expect_err("free function named pass should fail");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("reserved keyword 'pass' cannot be used as a function name"),
+            "unexpected error for {src:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn pass_stays_usable_as_method_name_and_statement() {
+    // Members are reached through `.pass(`, which never lexes as the statement.
+    parse_ok("class R:\n    ok: bool\n\n    static fn pass(n: i64) -> R:\n        R(ok: true)\n\n    fn pass(self) -> bool:\n        self.ok\n\nfn main():\n    val r = R.pass(1)\n    print(r.pass())\n");
+    parse_ok("fn main():\n    pass\n    pass(\"todo\")\n    print(1)\n");
+    parse_ok("fn passthrough(o: i64) -> i64:\n    o\n");
+}

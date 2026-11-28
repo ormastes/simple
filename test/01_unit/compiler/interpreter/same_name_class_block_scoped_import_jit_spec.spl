@@ -1,0 +1,106 @@
+# @req REQ-SSPEC-UNIT
+#
+# Regression guard for doc/08_tracking/bug/
+# jit_block_use_same_name_class_segv_2026-11-27.
+#
+# Block-scoped `use` of two lazily loaded same-named classes
+# (`use pa.{Thing}` + `use pb.{Thing as Legacy}` inside a function body)
+# SEGV'd (exit 139) on the JIT lane: the block use loads only the class TYPES
+# (`load_imported_types`), never the imported module's function bodies, so the
+# static-method call `Thing.create()` reaches codegen as a direct
+# `Call { target: Pure("Thing.create") }` whose import is DECLARED under the
+# sanitized spelling `Thing_dot_create`. The pre-finalize NULL-jump guard
+# (`unresolved_imports_called`, codegen/jit.rs) compared raw MIR target names
+# against declaration names, so the sanitized spelling never matched, the
+# import finalized to a NULL GOT slot, and main's call jumped to address 0.
+#
+# The probe runs in a child process via process_run_timeout, so a crash
+# cannot kill the lane.
+#
+# Re-verification recipe (Git Bash, from the checkout root):
+#
+#   1. Probe on the default binary:
+#        bin/simple run \
+#          build/p3cache/blockuse/repro/block_use_two_same_name_classes.spl \
+#          --mode=jit
+#      expect: the PROBE lines print and the process exits 0 (no SEGV).
+#
+#   2. Spec:
+#        bin/simple test \
+#          test/01_unit/compiler/interpreter/same_name_class_block_scoped_import_jit_spec.spl
+#      expect: 1 example, 0 failures.
+#
+#   3. Interpreter lane stays green:
+#        bin/simple test \
+#          test/01_unit/compiler/interpreter/same_name_class_block_scoped_import_spec.spl \
+#          --mode=interpreter
+#      expect: 1 example, 0 failures.
+use std.spec.*
+use std.io_runtime.{env_get, process_run_timeout, file_exists, file_write,
+    dir_create_all, getpid, time_now_unix_micros}
+
+fn _probe_simple_bin() -> text:
+    # SIMPLE_BINARY wins when set: it names the binary under test, which may
+    # be newer than the checkout's bin/simple. Fall back to bin/simple, then
+    # to the env, then to a bare name.
+    val from_env = env_get("SIMPLE_BINARY") ?? ""
+    if from_env != "":
+        return from_env
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    "bin/simple"
+
+fn _write_probe() -> text:
+    # The doc's block-use shape: two lazily loaded same-named classes,
+    # block-scoped, one aliased. Prints owner-discriminating values so a
+    # silent wrong-owner resolution fails the example too.
+    val directory = "build/test/block_use_same_name_class_{getpid()}_{time_now_unix_micros()}"
+    val _made = dir_create_all(directory)
+    val path = directory + "/block_use_two_same_name_classes.spl"
+    val _wrote = file_write(path,
+        "fn main():\n" +
+        "    use test.fixtures.same_name_class.pa.{{Thing}}\n" +
+        "    use test.fixtures.same_name_class.pb.{{Thing as Legacy}}\n" +
+        "    val a = Thing.create()\n" +
+        "    val l = Legacy.create()\n" +
+        "    print \"PROBE a.n={{a.n}}\"\n" +
+        "    print \"PROBE l.n={{l.n}}\"\n" +
+        "    print \"PROBE a.compile()={{a.compile()}}\"\n" +
+        "    print \"PROBE l.compile()={{l.compile()}}\"\n" +
+        "    print \"PROBE Thing.tag()={{Thing.tag()}}\"\n" +
+        "    print \"PROBE Legacy.tag()={{Legacy.tag()}}\"\n" +
+        "    print \"PROBE a.label()={{a.label()}}\"\n" +
+        "    print \"PROBE l.label()={{l.label()}}\"\n" +
+        "    print \"PROBE OK\"\n")
+    path
+
+describe "block-scoped use of two same-named classes does not SEGV the JIT lane":
+    it "runs the doc's block-use shape on the JIT lane with owner-aware resolution":
+        val bin = _probe_simple_bin()
+        val probe = _write_probe()
+        val (out, err, rc) = process_run_timeout(bin,
+            ["run", probe, "--mode=jit"], 300000)
+        # Post-fix: rc 0 with every owner-discriminating PROBE line.
+        # Pre-fix: the unguarded deref SEGVs the child (rc 139 on Git
+        # Bash, 0xC0000005 as a raw status). Anything else is the defect
+        # or a regression and must fail this example.
+        val expected = [
+            "PROBE a.n=1",
+            "PROBE l.n=2",
+            "PROBE a.compile()=24",
+            "PROBE l.compile()=1010",
+            "PROBE Thing.tag()=100",
+            "PROBE Legacy.tag()=200",
+            "PROBE a.label()=7",
+            "PROBE l.label()=8",
+            "PROBE OK",
+        ]
+        var clean = rc == 0
+        for line in expected:
+            if not out.contains(line):
+                clean = false
+        if not clean:
+            print "probe FAILED rc={rc}\n--- stdout ---\n{out}\n--- stderr (tail) ---\n{err}"
+        expect(clean).to_equal(true)

@@ -1,0 +1,110 @@
+"""
+## Purpose and audience
+Verifies Skia CPU backend completion items (`REQ-S2D-005..007`):
+1. Lossless 3x3 affine shear/skew matrix preservation across `SkCanvas` -> `SkPicture` -> `CpuBackend`.
+2. Isolated offscreen `SaveLayer` / `Restore` compositing (overlapping children blend with each other inside the layer, then composite once onto parent with layer alpha and `SkBlendMode`).
+3. Non-`SrcOver` `SkBlendMode` support on `DrawImage`, `DrawPath`, `DrawRRect`, and `DrawPaint` with real destination pixel reads and coverage-weighted blending.
+
+Audience: Skia CPU backend and 2D rendering maintainers.
+"""
+# @req REQ-S2D-005
+# @req REQ-S2D-006
+# @req REQ-S2D-007
+# @cover src/lib/skia/entity/canvas.spl 30%
+# @cover src/lib/skia/entity/picture.spl 30%
+# @cover src/lib/skia/backend/cpu/backend.spl 50%
+
+use std.spec.{describe, it, expect, step}
+use std.skia.entity.canvas.{sk_canvas_make, sk_save_layer_rec}
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.entity.paint.{sk_paint_new, sk_paint_fill}
+use std.skia.entity.path.{sk_path_new}
+use std.skia.entity.image.{SkImage, sk_image_info_n32_premul}
+use std.skia.entity.enums.{SkBlendMode}
+use std.skia.entity.color.{sk_color_argb}
+use std.skia.backend.cpu.backend.{cpu_backend_new}
+
+fn _near_channel(actual: u8, want: i64, tol: i64) -> bool:
+    val v = actual as i64
+    val d = if v > want: v - want else: want - v
+    d <= tol
+
+describe "Skia CPU lossless 3x3 affine matrices, SaveLayer isolation, and full blend modes":
+    it "preserves shear/skew through SkCanvas.concat and CpuBackend.render_picture":
+        step("Record a sheared rect via SkCanvas.concat and verify sheared device pixels")
+        val cull = SkRect(left: 0.0, top: 0.0, right: 20.0, bottom: 20.0)
+        val shear = Matrix3x3(
+            m00: 1.0, m01: 0.5, m02: 0.0,
+            m10: 0.0, m11: 1.0, m12: 0.0,
+            m20: 0.0, m21: 0.0, m22: 1.0
+        )
+        val c0 = sk_canvas_make(20, 20).begin_recording(cull)
+        val c1 = c0.concat(shear)
+        val c2 = c1.draw_rect(SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 8.0), sk_paint_fill(sk_color_argb(255, 220, 40, 40)))
+        val pic = c2.end_recording()
+        val bm = cpu_backend_new().render_picture(pic, cull)
+        # At y=6.5 (row 6), x spans [3.25, 7.25): pixel (5,6) is covered and (1,6) is outside.
+        val inside_idx = (6 * 20 + 5) * 4
+        val outside_idx = (6 * 20 + 1) * 4
+        expect(bm.pixels[inside_idx] as i64).to_be_greater_than(200)
+        expect(bm.pixels[inside_idx + 3] as i64).to_equal(255)
+        expect(bm.pixels[outside_idx + 3] as i64).to_equal(0)
+
+    it "isolates overlapping children inside SaveLayer and applies layer alpha once at Restore":
+        step("Draw two overlapping opaque red rects in an alpha-128 SaveLayer over blue")
+        val cull = SkRect(left: 0.0, top: 0.0, right: 10.0, bottom: 10.0)
+        val c0 = sk_canvas_make(10, 10).begin_recording(cull)
+        val c1 = c0.draw_rect(cull, sk_paint_fill(sk_color_argb(255, 0, 0, 200)))
+        val layer_paint = sk_paint_fill(sk_color_argb(128, 0, 0, 0))
+        val c2 = c1.save_layer(sk_save_layer_rec(Some(cull), Some(layer_paint)))
+        val red_paint = sk_paint_fill(sk_color_argb(255, 200, 0, 0))
+        val c3 = c2.draw_rect(SkRect(left: 1.0, top: 1.0, right: 6.0, bottom: 6.0), red_paint)
+        val c4 = c3.draw_rect(SkRect(left: 3.0, top: 3.0, right: 8.0, bottom: 8.0), red_paint)
+        val c5 = c4.restore()
+        val pic = c5.end_recording()
+        val bm = cpu_backend_new().render_picture(pic, cull)
+        val single_idx = (2 * 10 + 2) * 4
+        val overlap_idx = (4 * 10 + 4) * 4
+        expect(bm.pixels[overlap_idx]).to_equal(bm.pixels[single_idx])
+        expect(bm.pixels[overlap_idx + 2]).to_equal(bm.pixels[single_idx + 2])
+        expect(_near_channel(bm.pixels[overlap_idx], 100, 2)).to_equal(true)
+        expect(_near_channel(bm.pixels[overlap_idx + 2], 100, 2)).to_equal(true)
+
+    it "composites DrawImage against real destination pixels using SkBlendMode.Multiply":
+        step("Draw a 2x2 translucent green image with Multiply over cornflower blue")
+        val cull = SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0)
+        val c0 = sk_canvas_make(4, 4).begin_recording(cull)
+        val c1 = c0.draw_rect(cull, sk_paint_fill(sk_color_argb(255, 100, 149, 237)))
+        val img = SkImage(
+            info: sk_image_info_n32_premul(2, 2),
+            pixels: [
+                180, 50, 200, 50,  180, 50, 200, 50,
+                180, 50, 200, 50,  180, 50, 200, 50
+            ]
+        )
+        val img_paint = sk_paint_new().with_blend_mode(SkBlendMode.Multiply)
+        val c2 = c1.draw_image(img, 1.0, 1.0, Some(img_paint))
+        val pic = c2.end_recording()
+        val bm = cpu_backend_new().render_picture(pic, cull)
+        val idx = (1 * 4 + 1) * 4
+        expect(_near_channel(bm.pixels[idx], 43, 2)).to_equal(true)
+        expect(_near_channel(bm.pixels[idx + 1], 126, 2)).to_equal(true)
+        expect(_near_channel(bm.pixels[idx + 2], 103, 2)).to_equal(true)
+        expect(bm.pixels[idx + 3] as i64).to_equal(255)
+
+    it "honours SkBlendMode.Darken on DrawPath":
+        step("Draw a blue Darken triangle path over yellow background")
+        val cull = SkRect(left: 0.0, top: 0.0, right: 8.0, bottom: 8.0)
+        val c0 = sk_canvas_make(8, 8).begin_recording(cull)
+        val c1 = c0.draw_rect(cull, sk_paint_fill(sk_color_argb(255, 255, 220, 0)))
+        val tri = sk_path_new().move_to(0.0, 0.0).line_to(8.0, 0.0).line_to(8.0, 8.0).close()
+        val p_darken = sk_paint_fill(sk_color_argb(255, 0, 100, 200)).with_blend_mode(SkBlendMode.Darken)
+        val c2 = c1.draw_path(tri, p_darken)
+        val pic = c2.end_recording()
+        val bm = cpu_backend_new().render_picture(pic, cull)
+        val idx = (2 * 8 + 6) * 4
+        expect(bm.pixels[idx] as i64).to_equal(0)
+        expect(bm.pixels[idx + 1] as i64).to_equal(100)
+        expect(bm.pixels[idx + 2] as i64).to_equal(0)
+        expect(bm.pixels[idx + 3] as i64).to_equal(255)

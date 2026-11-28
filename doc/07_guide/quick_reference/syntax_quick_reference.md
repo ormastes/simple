@@ -1160,6 +1160,12 @@ match result:
 
 They compile to identical code. Use `()` for expression contexts, `pass` for clarity in statement contexts.
 
+**`pass` is reserved as a free-function and parameter name.** `pass(message)` is the
+pass-with-message statement, so a bare call can never reach a user function:
+`fn pass(x: i64)` at module level is a compile error (`reserved keyword 'pass' cannot
+be used as a function name`). Members stay legal because they are reached through
+`.`: `static fn pass(..)` / `fn pass(self)` called as `T.pass(..)` / `obj.pass()`.
+
 ---
 
 ## Operators

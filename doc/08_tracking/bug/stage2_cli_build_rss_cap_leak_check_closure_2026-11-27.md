@@ -91,3 +91,36 @@ this Linux host: `SIMPLE_HIR_SHARD_WORKER_KB` was 9000000 and is now 31457280.
 The bootstrap policy tests `product-frontend-policy-test` and
 `phase-c-frontend-policy-test` already fail on Linux before this change,
 because they expect the Windows values.
+
+## Second-run fix (2026-11-28)
+Closed the two remaining code-level causes on `release/1.0.0`:
+
+1. **`leak_check` driver closure removed (`src/compiler/90.tools/leak_check/external_runner.spl`):**
+   - Removed `use app.compile.native.{find_cpp_compiler}`,
+     `use compiler.driver.driver_api_codegen_backends.{aot_c_file}`, and
+     `use compiler.common.driver_compile_result.{CompileResult}`.
+   - Kept `use std.io_runtime.{file_exists}` (with `env_get`, `platform_name`,
+     and `use app.io.mod.{process_run}`) and added local `find_simple_binary()`
+     + `find_cpp_compiler()` helpers so C++ generation runs out-of-process via
+     `process_run(simple_bin, ["compile", cfg.source_file, "--emit-c", "-o", temp_cpp])`.
+   - Zero `compiler.driver.*` or `app.compile.*` imports remain in `external_runner.spl`.
+
+2. **Worker peak override no longer hides higher recorded peaks (`src/app/cli/shard_mem_clamp.spl`):**
+   - Updated `shard_worker_estimate_kib_v1` so when `override_kb > 0` and
+     `best > 0` (`worker_peaks_kib` has recorded peaks), it returns
+     `shard_commit_estimate_kib_v1(override_kb, shard_measured_estimate_kib_v1(best))`
+     (treating the override as a floor, matching `shard_commit_unmeasured_estimate_kib_v1`),
+     while still returning `override_kb` when `best <= 0`.
+
+### Tests & Verification (2026-11-28)
+- Added `test/01_unit/compiler/tools/leak_check/external_runner_closure_isolation_spec.spl`.
+- Updated `test/01_unit/app/cli/shard_peak_persistence_spec.spl`,
+  `test/01_unit/app/cli/shard_commit_admission_spec.spl`, and
+  `test/01_unit/compiler/driver/native_build_pool_memory_admission_spec.spl`.
+- Verification scope on the Nov 16 Rust seed binary (`/Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple`):
+  - Full `simple test` / `simple check` runs hit pre-existing seed parser failure
+    `src/lib/common/types.spl:23:19: Unexpected token: expected As, found Newline`.
+  - Isolated seed syntax probe passed with zero parse errors across all modified/new files.
+  - Self-contained seed execution (`JIT` and `SIMPLE_EXECUTION_MODE=interpret`)
+    verified `shard_worker_estimate_kib_v1` outputs `(1234, 4613734, 10000000, 32012040)`.
+  - `sh scripts/audit/direct-env-runtime-guard.shs --working` passed (`STATUS: PASS`).

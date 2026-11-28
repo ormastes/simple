@@ -165,12 +165,28 @@ class DomBridge:
     fn dom_event_to_ui_event(event: DomEvent) -> UIEvent?:
         """Convert a browser DOM event to a UI widget event."""
         match event.event_type:
-            "click":
+            "click" | "mousedown":
                 return UIEvent.MouseEvent(x: 0.0, y: 0.0, button: "left", kind: "down")
-            "keydown":
+            "mouseup":
+                return UIEvent.MouseEvent(x: 0.0, y: 0.0, button: "left", kind: "up")
+            "mousemove" | "mouseover" | "mouseenter" | "mouseleave" | "dragover":
+                return UIEvent.MouseEvent(x: 0.0, y: 0.0, button: "", kind: "move")
+            "dragstart":
+                return UIEvent.MouseEvent(x: 0.0, y: 0.0, button: "left", kind: "down")
+            "drop":
+                return UIEvent.MouseEvent(x: 0.0, y: 0.0, button: "left", kind: "up")
+            "wheel":
+                return UIEvent.ScrollEvent(x: 0.0, y: 0.0, dx: 0.0, dy: 0.0)
+            "keydown" | "keyup":
                 return UIEvent.KeyPress(key: event.event_type)
-            "mousedown":
-                return UIEvent.MouseEvent(x: 0.0, y: 0.0, button: "left", kind: "down")
+            "focus":
+                return UIEvent.FocusEvent(target_id: event.target_id, kind: "focus")
+            "blur":
+                return UIEvent.FocusEvent(target_id: event.target_id, kind: "blur")
+            "input" | "change":
+                return UIEvent.InputChange(target_id: event.target_id, value: "")
+            "submit":
+                return UIEvent.Action(name: "submit")
             _:
                 return nil
 
@@ -186,24 +202,46 @@ fn extract_tag_name(tag_content: text) -> text:
     return tag_content[0:space_idx].lower()
 
 fn extract_attributes(tag_content: text) -> Dict<text, text>:
-    """Extract attributes from tag content."""
+    """Extract attributes from tag content, preserving spaces inside quoted values."""
     var attrs: Dict<text, text> = {}
     val space_idx = tag_content.index_of(" ", 0)
     if space_idx < 0:
         return attrs
 
     val attr_text = tag_content[space_idx + 1:]
-    # Split on spaces to find name="value" pairs
-    val parts = attr_text.split(" ")
-    for part in parts:
-        val eq_idx = part.index_of("=", 0)
-        if eq_idx > 0:
-            val name = part[0:eq_idx]
-            var value = part[eq_idx + 1:]
-            # Strip quotes
-            if value.starts_with("\"") and value.ends_with("\""):
-                value = value[1:value.len() - 1]
-            attrs[name] = value
+    val n = attr_text.len()
+    var i = 0
+    while i < n:
+        while i < n and (attr_text[i:i + 1] == " " or attr_text[i:i + 1] == "\t" or attr_text[i:i + 1] == "\n"):
+            i = i + 1
+        if i >= n:
+            break
+        val name_start = i
+        while i < n and attr_text[i:i + 1] != "=" and attr_text[i:i + 1] != " " and attr_text[i:i + 1] != "\t":
+            i = i + 1
+        val name = attr_text[name_start:i].trim()
+        while i < n and (attr_text[i:i + 1] == " " or attr_text[i:i + 1] == "\t"):
+            i = i + 1
+        if i < n and attr_text[i:i + 1] == "=":
+            i = i + 1
+            while i < n and (attr_text[i:i + 1] == " " or attr_text[i:i + 1] == "\t"):
+                i = i + 1
+            if i < n and (attr_text[i:i + 1] == "\"" or attr_text[i:i + 1] == "'"):
+                val quote = attr_text[i:i + 1]
+                i = i + 1
+                val val_start = i
+                while i < n and attr_text[i:i + 1] != quote:
+                    i = i + 1
+                attrs[name] = attr_text[val_start:i]
+                if i < n:
+                    i = i + 1
+            else:
+                val val_start = i
+                while i < n and attr_text[i:i + 1] != " " and attr_text[i:i + 1] != "\t":
+                    i = i + 1
+                attrs[name] = attr_text[val_start:i]
+        elif name != "":
+            attrs[name] = ""
     return attrs
 
 fn is_void_element(tag_name: text) -> bool:

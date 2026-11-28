@@ -1,0 +1,248 @@
+# Duplicate Terminal Enum Variant Order Detector (W-DUP-ENUM-001)
+#
+# Detects enums declared in multiple terminal modules with divergent variant
+# orders (sharing at least two variant names where one or more shared variants
+# occupy different positional indices).
+#
+# Bug: doc/08_tracking/bug/duplicate_backend_types_terminal_declarations.md
+# Same-named enums collapse in the global enum registry — whichever declaration
+# registers first fixes the discriminants for every importer — so divergent
+# variant orders across terminal modules produce silent wrong-variant decoding
+# rather than a crash.
+
+use compiler.semantics.lint.lint_text.{code_line_snapshot, lint_is_vendor_path}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+# reason: 1-based source line numbers match sibling lint finding structs (UnwrappedResourceFinding, ValueSemanticOrigin)
+@allow(primitive_api)
+pub struct EnumDeclRecord:
+    """One terminal `enum Name:` declaration extracted from a module."""
+    name: text
+    file_path: text
+    line_num: i64
+    variants: [text]
+
+# reason: 1-based source line numbers match sibling lint finding structs (UnwrappedResourceFinding, ValueSemanticOrigin)
+@allow(primitive_api)
+pub struct DuplicateEnumVariantFinding:
+    """Finding emitted when two terminal modules declare the same enum with divergent variant orders."""
+    code: text
+    enum_name: text
+    first_path: text
+    first_line: i64
+    second_path: text
+    second_line: i64
+    divergent_variants: [text]
+    message: text
+
+    fn fmt() -> text:
+        "[{self.code}] WARNING: {self.message}"
+
+# ============================================================================
+# Lexical / Structural Extraction Helpers
+# ============================================================================
+
+fn _dev_indent_of(raw: text) -> i64:
+    var i = 0
+    val n = raw.byte_len()
+    while i < n:
+        val ch = raw.substring(i, i + 1)
+        if ch == " ":
+            i = i + 1
+        elif ch == "\t":
+            i = i + 4
+        else:
+            break
+    i
+
+fn _dev_is_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+        (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _dev_is_upper_start(ch: text) -> bool:
+    ch >= "A" and ch <= "Z"
+
+fn _dev_strip_comment(trimmed: text) -> text:
+    val idx = trimmed.find("#")
+    if idx < 0:
+        return trimmed
+    trimmed.substring(0, idx).trim()
+
+fn _dev_leading_ident(s: text) -> text:
+    val n = s.byte_len()
+    var i = 0
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if not _dev_is_ident_char(ch):
+            break
+        i = i + 1
+    if i == 0:
+        return ""
+    s.substring(0, i)
+
+fn _dev_parse_enum_header_name(trimmed: text) -> text:
+    """Parse `enum Name:` / `pub enum Name<T>:` (indent-0 header) -> Name, else ""."""
+    val clean = _dev_strip_comment(trimmed)
+    var rest = ""
+    if clean.starts_with("pub enum "):
+        rest = clean.substring(9, clean.byte_len()).trim()
+    elif clean.starts_with("enum "):
+        rest = clean.substring(5, clean.byte_len()).trim()
+    else:
+        return ""
+    if not clean.ends_with(":"):
+        return ""
+    val name = _dev_leading_ident(rest)
+    if name == "" or not _dev_is_upper_start(name.substring(0, 1)):
+        return ""
+    name
+
+fn _dev_parse_variant_name(trimmed: text) -> text:
+    """Parse one enum variant line (`Variant`, `Variant(a: i64)`, `Variant = 3`) -> Variant, else ""."""
+    val clean = _dev_strip_comment(trimmed)
+    if clean == "":
+        return ""
+    # Skip methods, nested declarations, attributes, and doc/control keywords.
+    if (clean.starts_with("fn ") or clean.starts_with("pub ") or
+            clean.starts_with("me ") or clean.starts_with("static ") or
+            clean.starts_with("impl ") or clean.starts_with("@") or
+            clean.starts_with("pass") or clean.starts_with("use ") or
+            clean.starts_with("export ")):
+        return ""
+    val name = _dev_leading_ident(clean)
+    if name == "" or not _dev_is_upper_start(name.substring(0, 1)):
+        return ""
+    val n = name.byte_len()
+    if n == clean.byte_len():
+        return name
+    val next_ch = clean.substring(n, n + 1)
+    # Valid continuations after a variant name: `(`, `=`, ` `, `,`, `:` (struct variant)
+    if next_ch == "(" or next_ch == "=" or next_ch == " " or next_ch == "," or next_ch == ":":
+        return name
+    ""
+
+pub fn extract_enum_declarations(source: text, file_path: text) -> [EnumDeclRecord]:
+    """Extract all top-level terminal enum declarations and their ordered variant names."""
+    if lint_is_vendor_path(file_path):
+        return []
+    val snapshot = code_line_snapshot(source)
+    val lines = snapshot.lines
+    val n = lines.len()
+    var decls: [EnumDeclRecord] = []
+    var i = 0
+    while i < n:
+        val cl = lines[i]
+        val header_indent = _dev_indent_of(cl.raw)
+        if header_indent == 0:
+            val enum_name = _dev_parse_enum_header_name(cl.trimmed)
+            if enum_name != "":
+                var variants: [text] = []
+                var variant_indent = -1
+                var j = i + 1
+                while j < n:
+                    val body = lines[j]
+                    val bt = body.trimmed
+                    if bt == "" or bt.starts_with("#"):
+                        j = j + 1
+                        continue
+                    val ind = _dev_indent_of(body.raw)
+                    if ind <= header_indent:
+                        break
+                    if variant_indent < 0:
+                        variant_indent = ind
+                    if ind == variant_indent:
+                        val vname = _dev_parse_variant_name(bt)
+                        if vname != "":
+                            variants.push(vname)
+                    j = j + 1
+                decls.push(EnumDeclRecord(
+                    name: enum_name,
+                    file_path: file_path,
+                    line_num: cl.line_num,
+                    variants: variants
+                ))
+                i = j
+                continue
+        i = i + 1
+    decls
+
+# ============================================================================
+# Variant-Order Divergence Detection
+# ============================================================================
+
+fn _dev_index_of(items: [text], target: text) -> i64:
+    var i = 0
+    while i < items.len():
+        if items[i] == target:
+            return i
+        i = i + 1
+    -1
+
+pub fn enum_variant_order_divergences(first_variants: [text], second_variants: [text]) -> [text]:
+    """Return shared variant names whose positional indices disagree when at least 2 variants are shared."""
+    var shared_count = 0
+    var divergent: [text] = []
+    var i = 0
+    while i < first_variants.len():
+        val v = first_variants[i]
+        val j = _dev_index_of(second_variants, v)
+        if j >= 0:
+            shared_count = shared_count + 1
+            if i != j:
+                divergent.push("{v} ({i} vs {j})")
+        i = i + 1
+    if shared_count < 2:
+        return []
+    divergent
+
+pub fn check_duplicate_enum_variants(modules: [(text, text)]) -> [DuplicateEnumVariantFinding]:
+    """Scan `(file_path, source)` pairs and flag multiply-declared enums with divergent variant orders."""
+    var all_decls: [EnumDeclRecord] = []
+    for entry in modules:
+        val (file_path, source) = entry
+        if lint_is_vendor_path(file_path):
+            continue
+        for d in extract_enum_declarations(source, file_path):
+            all_decls.push(d)
+
+    var findings: [DuplicateEnumVariantFinding] = []
+    var i = 0
+    val total = all_decls.len()
+    while i < total:
+        val first = all_decls[i]
+        var j = i + 1
+        while j < total:
+            val second = all_decls[j]
+            if first.name == second.name and first.file_path != second.file_path:
+                val divergences = enum_variant_order_divergences(first.variants, second.variants)
+                if divergences.len() > 0:
+                    val detail = divergences.join(", ")
+                    val msg = "enum `{first.name}` is declared in multiple terminal modules with divergent variant order: {first.file_path}:{first.line_num} vs {second.file_path}:{second.line_num} (divergent variants: {detail}); keep one terminal declaration and re-export it"
+                    findings.push(DuplicateEnumVariantFinding(
+                        code: "W-DUP-ENUM-001",
+                        enum_name: first.name,
+                        first_path: first.file_path,
+                        first_line: first.line_num,
+                        second_path: second.file_path,
+                        second_line: second.line_num,
+                        divergent_variants: divergences,
+                        message: msg
+                    ))
+            j = j + 1
+        i = i + 1
+    findings
+
+pub fn check_duplicate_enum_variants_files(file_paths: [text]) -> [DuplicateEnumVariantFinding]:
+    """Read each source file on disk and check for duplicate terminal enums with divergent variant orders."""
+    var modules: [(text, text)] = []
+    for path in file_paths:
+        if lint_is_vendor_path(path):
+            continue
+        val content = file_read_text(path)
+        if content != "":
+            modules.push((path, content))
+    check_duplicate_enum_variants(modules)

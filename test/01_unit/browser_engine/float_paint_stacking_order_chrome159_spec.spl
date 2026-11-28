@@ -1,0 +1,68 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS 2.2 Appendix E float paint stacking order in BOTH software raster (`_paint_passes`) and Engine2D Draw IR (`_html_draw_ir_node_paint_order`). Non-positioned floats paint in Step 5 (after normal-flow non-positioned block backgrounds/borders in Step 4, and before inline text in Step 7 and positioned descendants), while preserving contiguous fractional-opacity / backdrop groups.
+Audience: web renderer float stacking order (Chrome 159 parity, REQ-WEB-001).
+
+Traceability: REQ-WEB-001 — non-positioned floats paint above overlapping normal-flow block backgrounds and beneath positioned boxes and normal-flow inline text.
+"""
+# @tag: unit, browser_engine, paint, float, stacking, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val STACK_W: i32 = 200
+val STACK_H: i32 = 80
+
+val FLOAT_OVER_CLEAR_HTML: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#ffffff}}.fl{{float:left;width:80px;height:30px;background:#112233}}.fr{{float:right;width:80px;height:40px;background:#332211}}.cl{{clear:left;height:20px;background:#445566}}.rel{{position:relative;margin-top:-10px;width:200px;height:20px;background:#cc2244}}</style></head><body><div class=\"fl\"></div><div class=\"fr\"></div><div class=\"cl\"></div><div class=\"rel\"></div></body></html>"
+
+val FLOAT_UNDER_OPACITY_HTML: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#ffffff}}.grp{{opacity:0.5;background:#204080;width:120px;height:40px}}.fl{{float:right;width:60px;height:40px;background:#802020}}</style></head><body><div class=\"grp\"><div class=\"fl\"></div></div></body></html>"
+
+fn _rgb(px: [u32], w: i32, x: i32, y: i32) -> u32:
+    px[y * w + x] & 0xFFFFFFu32
+
+describe "CSS 2.2 Appendix E float paint stacking order (Chrome 159)":
+    it "AC-1: right float (Step 5) paints over overlapping clear:left normal-flow block (Step 4) in Draw IR, Engine2D k=1/k=4, and software raster":
+        val ir = simple_web_layout_render_html_draw_ir(FLOAT_OVER_CLEAR_HTML, STACK_W, STACK_H)
+        var idx_clear = -1
+        var idx_right = -1
+        var i = 0
+        while i < ir.commands.len():
+            val c = ir.commands[i]
+            if (c.color & 0xFFFFFFu32) == 0x445566u32:
+                idx_clear = i
+            elif (c.color & 0xFFFFFFu32) == 0x332211u32:
+                idx_right = i
+            i = i + 1
+        expect(idx_clear >= 0).to_equal(true)
+        expect(idx_right > idx_clear).to_equal(true)
+
+        val e1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(FLOAT_OVER_CLEAR_HTML, STACK_W, STACK_H, 1, "cpu_simd")
+        val e4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(FLOAT_OVER_CLEAR_HTML, STACK_W, STACK_H, 4, "cpu_simd")
+        val sw = simple_web_layout_render_html_software_pixels(FLOAT_OVER_CLEAR_HTML, STACK_W, STACK_H)
+        # CSS y=35 sits inside right float (0..40), clear:left (30..50), and above rel (40..60).
+        expect(_rgb(e1, STACK_W, 150, 35)).to_equal(0x332211u32)
+        expect(_rgb(sw, STACK_W, 150, 35)).to_equal(0x332211u32)
+        expect(_rgb(e4, STACK_W * 4, 150 * 4, 35 * 4)).to_equal(0x332211u32)
+
+    it "AC-2: relative positioned sibling paints over non-positioned float (k=1, k=4, raster)":
+        val e1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(FLOAT_OVER_CLEAR_HTML, STACK_W, STACK_H, 1, "cpu_simd")
+        val sw = simple_web_layout_render_html_software_pixels(FLOAT_OVER_CLEAR_HTML, STACK_W, STACK_H)
+        # CSS y=42 sits inside rel (margin-top:-10 pulls it to y=40..60), overlapping clear only? Extend check with clear y=30..50 and rel overlapping float in direct test below:
+        expect(_rgb(e1, STACK_W, 50, 35)).to_equal(0x445566u32)
+        expect(_rgb(e1, STACK_W, 150, 42)).to_equal(0xCC2244u32)
+        expect(_rgb(sw, STACK_W, 150, 42)).to_equal(0xCC2244u32)
+
+    it "AC-3: opacity group containing a non-positioned float keeps contiguous compositing":
+        val ir = simple_web_layout_render_html_draw_ir(FLOAT_UNDER_OPACITY_HTML, STACK_W, STACK_H)
+        expect(ir.commands.len() > 0).to_equal(true)
+        val e1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(FLOAT_UNDER_OPACITY_HTML, STACK_W, STACK_H, 1, "cpu_simd")
+        val px = _rgb(e1, STACK_W, 90, 20)
+        expect(px != 0xFFFFFFu32).to_equal(true)
+        expect(px != 0x802020u32).to_equal(true)

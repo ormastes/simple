@@ -1,0 +1,277 @@
+# codex-impl: behavioral promotion oracle for the web renderable feature
+# inventory.
+#
+# Closes the lexical false-pass class recorded in
+# doc/08_tracking/bug/html_css_rendering_inventory_lexical_false_pass_2026-09-05.md:
+# the manifest traceability gate promoted a tag or property on the lexical
+# occurrence of its text in a fixture blob, which passes when the CSS is
+# commented out, renamed to an inert attribute, or otherwise never reaches the
+# renderer. Here a row is promoted only when the production renderer's
+# structured output — the Draw IR display list — changes on the row's focused
+# witness fixture versus its declaration-free control document. Lexical
+# occurrence is still reported as a secondary census signal for drift
+# diagnostics; it never promotes.
+
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.{
+    WebRenderableFeatureRow, WEB_FEATURE_CSS, WEB_RENDERABLE}
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_witness.{
+    web_feature_html_witness,
+    web_feature_css_witness_declaration,
+    web_feature_css_example_document}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_draw_ir_comparable,
+    simple_web_layout_draw_ir_compare_decision,
+    SimpleWebLayoutDrawIrResult}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrPoint, DrawIrStyleProp, DrawEdge}
+
+pub val WEB_RENDER_DECISION_OBSERVED: text = "render:observed"
+pub val WEB_RENDER_DECISION_STRUCTURAL: text = "render:structural"
+pub val WEB_RENDER_DECISION_ABSENT: text = "render:absent"
+pub val WEB_RENDER_DECISION_DECLINED: text = "render:declined"
+
+pub val WEB_FEATURE_ORACLE_VIEW_WIDTH: i32 = 320
+pub val WEB_FEATURE_ORACLE_VIEW_HEIGHT: i32 = 240
+
+pub class WebFeatureFixturePair:
+    fixture: text
+    control: text
+    # Structural rows (document/table scaffolding with no standalone sample)
+    # carry no pixel claim; the oracle verifies only document presence.
+    structural: bool
+
+pub class WebFeatureRenderVerdict:
+    row_id: text
+    comparable: bool
+    draw_ir_effect: bool
+    # Secondary census signal, mirroring the retired lexical gate's scans.
+    # True says the name textually occurs in the exercised fixture; it is
+    # never sufficient for promotion.
+    lexical_occurrence: bool
+    decision: text
+    fixture: text
+    control: text
+
+fn _empty_document() -> text:
+    "<html><body></body></html>"
+
+# The exercised document and its control for one inventory row. The fixture
+# and control differ only by the candidate feature, so a structured output
+# difference is attributable to the row itself.
+pub fn web_feature_fixture_pair(row: WebRenderableFeatureRow) -> WebFeatureFixturePair:
+    if row.kind == WEB_FEATURE_CSS:
+        val declaration = web_feature_css_witness_declaration(row.name)
+        if declaration == "":
+            return WebFeatureFixturePair(fixture: "", control: "", structural: false)
+        return WebFeatureFixturePair(
+            fixture: web_feature_css_example_document(row.name, declaration),
+            control: web_feature_css_example_document(row.name, ""),
+            structural: false)
+    val sample = web_feature_html_witness(row.name)
+    if sample == "":
+        return WebFeatureFixturePair(
+            fixture: _empty_document(), control: _empty_document(), structural: true)
+    WebFeatureFixturePair(
+        fixture: "<html><body>" + sample + "</body></html>",
+        control: _empty_document(),
+        structural: false)
+
+fn _is_name_char(ch: text) -> bool:
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-".contains(ch)
+
+# Mirror of the retired lexical gate's has_css_property regex
+# (?<![a-zA-Z-])prop\s*: over ASCII fixture text.
+fn _has_css_property(blob: text, prop: text) -> bool:
+    var i = 0
+    val last = blob.len() - prop.len()
+    while i <= last:
+        if blob.substring(i, i + prop.len()) == prop:
+            val prev_ok = i == 0 or not _is_name_char(blob.substring(i - 1, i))
+            if prev_ok:
+                var j = i + prop.len()
+                while j < blob.len() and blob.substring(j, j + 1) == " ":
+                    j = j + 1
+                if j < blob.len() and blob.substring(j, j + 1) == ":":
+                    return true
+        i = i + 1
+    false
+
+# Mirror of the retired lexical gate's has_html_tag regex <tag(\s|>|/).
+fn _has_html_tag(blob: text, tag: text) -> bool:
+    for part in blob.split("<"):
+        if part.starts_with(tag):
+            if part.len() == tag.len():
+                return true
+            val next = part.substring(tag.len(), tag.len() + 1)
+            if next == " " or next == ">" or next == "/":
+                return true
+    false
+
+pub fn web_feature_lexical_occurrence(row: WebRenderableFeatureRow, blob: text) -> bool:
+    if row.kind == WEB_FEATURE_CSS:
+        return _has_css_property(blob, row.name)
+    _has_html_tag(blob, row.name)
+
+fn _rect_text(r: DrawIrRect) -> text:
+    "(" + r.present.to_string() + " " + r.x.to_string() + "," + r.y.to_string() +
+        " " + r.width.to_string() + "x" + r.height.to_string() + ")"
+
+fn _i32_list_text(xs: [i32]) -> text:
+    var parts: [text] = []
+    for x in xs:
+        parts.push(x.to_string())
+    parts.join(",")
+
+fn _u32_list_text(xs: [u32]) -> text:
+    var parts: [text] = []
+    for x in xs:
+        parts.push(x.to_string())
+    parts.join(",")
+
+fn _i64_list_text(xs: [i64]) -> text:
+    var parts: [text] = []
+    for x in xs:
+        parts.push(x.to_string())
+    parts.join(",")
+
+fn _point_list_text(ps: [DrawIrPoint]) -> text:
+    var parts: [text] = []
+    for p in ps:
+        parts.push(p.x.to_string() + ":" + p.y.to_string())
+    parts.join(",")
+
+fn _style_props_text(ps: [DrawIrStyleProp]) -> text:
+    var parts: [text] = []
+    for p in ps:
+        parts.push(p.key + "=" + p.value)
+    parts.join(";")
+
+fn _edge_text(e: DrawEdge?) -> text:
+    if val edge = e:
+        return edge.id + "|" + edge.source + "|" + edge.target + "|" + edge.routing +
+            "|" + _point_list_text(edge.points) + "|" + _style_props_text(edge.style)
+    "-"
+
+# Canonical text form of one Draw IR command. Field-by-field text
+# serialization is deliberate: struct equality on DrawIrGlyphRunPayload is not
+# fieldwise in the current seed runtime, so `==` on commands is unreliable.
+# Producer identity fields (batch ids, generations) are excluded; everything
+# that reaches a rasterizer is included.
+fn _command_text(cmd: DrawIrCommand) -> text:
+    cmd.kind + "@" + cmd.component_id + " " + cmd.x.to_string() + "," + cmd.y.to_string() +
+        " " + cmd.width.to_string() + "x" + cmd.height.to_string() +
+        " #" + cmd.color.to_string() + " '" + cmd.text_value + "'" +
+        " adv=" + _i32_list_text(cmd.advance_widths) +
+        " br=" + _rect_text(cmd.border_rect) +
+        " cr=" + _rect_text(cmd.content_rect) +
+        " hr=" + _rect_text(cmd.hit_rect) +
+        " clip=" + _rect_text(cmd.clip_rect) +
+        " style=" + _style_props_text(cmd.computed_style) +
+        " edge=" + _edge_text(cmd.edge) +
+        " parent=" + cmd.parent_id +
+        " img=" + cmd.image_uri +
+        " pts=" + _point_list_text(cmd.points) +
+        " glyph=[" + _u32_list_text(cmd.glyph_run.glyph_ids) + ";" +
+            _i32_list_text(cmd.glyph_run.xs) + ";" +
+            _i32_list_text(cmd.glyph_run.ys) + ";" +
+            _i64_list_text(cmd.glyph_run.clusters) + ";" +
+            cmd.glyph_run.valid.to_string() + "]" +
+        " xf=" + cmd.has_transform.to_string() + "," + cmd.rotation_deg_milli.to_string() +
+            "," + cmd.scale_x_pct.to_string() + "," + cmd.scale_y_pct.to_string() +
+            "," + cmd.skew_x_deg_milli.to_string() + "," + cmd.skew_y_deg_milli.to_string() +
+            "," + cmd.transform_origin_x_pct.to_string() + "," + cmd.transform_origin_y_pct.to_string()
+
+# Canonical fingerprint of a rendered document's structured output: every Draw
+# IR command in paint order, serialized. Two renders of documents that differ
+# only by an inert lexical change (commented-out CSS, renamed attributes)
+# produce identical fingerprints; a real layout or paint effect does not.
+pub fn web_feature_draw_ir_fingerprint(result: SimpleWebLayoutDrawIrResult) -> text:
+    var parts: [text] = []
+    for batch in result.composition.batches:
+        for cmd in batch.commands:
+            parts.push(_command_text(cmd))
+    parts.join("\n")
+
+# Render the exercised document and its control through the production layout
+# and paint path and decide promotion from the structured output comparison.
+pub fn web_feature_render_pair_verdict(
+    row: WebRenderableFeatureRow, pair: WebFeatureFixturePair
+) -> WebFeatureRenderVerdict:
+    if pair.structural:
+        return WebFeatureRenderVerdict(
+            row_id: row.id,
+            comparable: true,
+            draw_ir_effect: false,
+            lexical_occurrence: web_feature_lexical_occurrence(row, pair.fixture),
+            decision: WEB_RENDER_DECISION_STRUCTURAL +
+                ":compared=document-presence:reason=no-standalone-sample",
+            fixture: pair.fixture,
+            control: pair.control)
+    if pair.fixture == "" or pair.control == "":
+        return WebFeatureRenderVerdict(
+            row_id: row.id,
+            comparable: false,
+            draw_ir_effect: false,
+            lexical_occurrence: false,
+            decision: WEB_RENDER_DECISION_DECLINED +
+                ":compared=none:reason=no-witness-fixture",
+            fixture: pair.fixture,
+            control: pair.control)
+    val feature = simple_web_layout_render_html_draw_ir_result(
+        pair.fixture, WEB_FEATURE_ORACLE_VIEW_WIDTH, WEB_FEATURE_ORACLE_VIEW_HEIGHT)
+    val control = simple_web_layout_render_html_draw_ir_result(
+        pair.control, WEB_FEATURE_ORACLE_VIEW_WIDTH, WEB_FEATURE_ORACLE_VIEW_HEIGHT)
+    if not simple_web_layout_draw_ir_comparable(feature):
+        return WebFeatureRenderVerdict(
+            row_id: row.id,
+            comparable: false,
+            draw_ir_effect: false,
+            lexical_occurrence: web_feature_lexical_occurrence(row, pair.fixture),
+            decision: WEB_RENDER_DECISION_DECLINED + ":compared=none:reason=feature:" +
+                simple_web_layout_draw_ir_compare_decision(feature),
+            fixture: pair.fixture,
+            control: pair.control)
+    if not simple_web_layout_draw_ir_comparable(control):
+        return WebFeatureRenderVerdict(
+            row_id: row.id,
+            comparable: false,
+            draw_ir_effect: false,
+            lexical_occurrence: web_feature_lexical_occurrence(row, pair.fixture),
+            decision: WEB_RENDER_DECISION_DECLINED + ":compared=none:reason=control:" +
+                simple_web_layout_draw_ir_compare_decision(control),
+            fixture: pair.fixture,
+            control: pair.control)
+    val effect = web_feature_draw_ir_fingerprint(feature) !=
+        web_feature_draw_ir_fingerprint(control)
+    val decision = if effect:
+        WEB_RENDER_DECISION_OBSERVED + ":compared=draw-ir:effect=structured-difference"
+    else:
+        WEB_RENDER_DECISION_ABSENT + ":compared=draw-ir:reason=no-structured-difference"
+    WebFeatureRenderVerdict(
+        row_id: row.id,
+        comparable: true,
+        draw_ir_effect: effect,
+        lexical_occurrence: web_feature_lexical_occurrence(row, pair.fixture),
+        decision: decision,
+        fixture: pair.fixture,
+        control: pair.control)
+
+# Full oracle for one inventory row: build its focused fixture pair and decide
+# behavioral promotion. Fail-closed: rows not classified renderable are
+# declined without a render, so a stale or inflated classification can never
+# be promoted by lexical occurrence alone.
+pub fn web_feature_render_verdict(row: WebRenderableFeatureRow) -> WebFeatureRenderVerdict:
+    if row.status != WEB_RENDERABLE:
+        return WebFeatureRenderVerdict(
+            row_id: row.id,
+            comparable: false,
+            draw_ir_effect: false,
+            lexical_occurrence: false,
+            decision: WEB_RENDER_DECISION_DECLINED +
+                ":compared=none:reason=row-not-renderable",
+            fixture: "",
+            control: "")
+    web_feature_render_pair_verdict(row, web_feature_fixture_pair(row))
+
+pub fn web_feature_render_promotes(verdict: WebFeatureRenderVerdict) -> bool:
+    verdict.decision.starts_with(WEB_RENDER_DECISION_OBSERVED)

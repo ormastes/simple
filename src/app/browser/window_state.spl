@@ -1,0 +1,408 @@
+# Pure interactive state, hit-testing, URL resolution, scroll clamping,
+# history navigation, and keyboard action routing for `simple browser --open`.
+#
+# Kept separate from `gui_window.spl` (which stays render-free to preserve the
+# JIT call boundary) and without any GUI window / winit imports so every route
+# is unit- and system-testable headlessly.
+
+use common.ui.key_code.{
+    winit_keycode_to_canon,
+    CANON_ESCAPE, CANON_R, CANON_F5, CANON_LEFT, CANON_RIGHT,
+    CANON_BACKSPACE, CANON_UP, CANON_DOWN, CANON_PAGEUP, CANON_PAGEDOWN,
+    CANON_HOME, CANON_END
+}
+use std.common.web.browser_renderer_protocol.{browser_text_input_overlay_empty}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time,
+    simple_web_layout_hit_test_index,
+    simple_web_layout_hit_test_index_node
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{HNode, HtmlChildIndex, attr_value}
+
+class BrowserWindowState:
+    url: text
+    history: [text]
+    history_idx: i32
+    scroll_y: i32
+    max_scroll_y: i32
+    width: i32
+    height: i32
+    cursor_x: i32
+    cursor_y: i32
+    hovered_target: text
+    status_message: text
+
+class BrowserHitTarget:
+    kind: text
+    target_key: text
+    href: text
+    button_id: text
+    button_label: text
+    max_scroll_y: i32
+
+class BrowserKeyEffect:
+    state: BrowserWindowState
+    should_close: bool
+    should_reload: bool
+    should_render: bool
+
+# reason: viewport pixel extents matching GuiRenderer physical pixel coordinates
+# @allow(primitive_api)
+pub fn browser_window_state_new(initial_url: text, width: i32, height: i32) -> BrowserWindowState:
+    BrowserWindowState(
+        url: initial_url,
+        history: [initial_url],
+        history_idx: 0,
+        scroll_y: 0,
+        max_scroll_y: 0,
+        width: width,
+        height: height,
+        cursor_x: 0,
+        cursor_y: 0,
+        hovered_target: "",
+        status_message: ""
+    )
+
+# reason: pixel scroll delta clamped against BrowserWindowState bounds
+# @allow(primitive_api)
+pub fn browser_window_state_clamp_scroll(state: BrowserWindowState, delta_y: i32) -> BrowserWindowState:
+    var next_y = state.scroll_y + delta_y
+    if next_y < 0:
+        next_y = 0
+    if state.max_scroll_y >= 0 and next_y > state.max_scroll_y:
+        next_y = state.max_scroll_y
+    BrowserWindowState(
+        url: state.url,
+        history: state.history,
+        history_idx: state.history_idx,
+        scroll_y: next_y,
+        max_scroll_y: state.max_scroll_y,
+        width: state.width,
+        height: state.height,
+        cursor_x: state.cursor_x,
+        cursor_y: state.cursor_y,
+        hovered_target: state.hovered_target,
+        status_message: state.status_message
+    )
+
+# reason: pixel scroll bounds from layout probe matching BrowserWindowState fields
+# @allow(primitive_api)
+pub fn browser_window_state_set_scroll(state: BrowserWindowState, next_y: i32, max_scroll_y: i32) -> BrowserWindowState:
+    var max_y = if max_scroll_y > 0: max_scroll_y else: 0
+    var clamped = next_y
+    if clamped < 0:
+        clamped = 0
+    if clamped > max_y:
+        clamped = max_y
+    BrowserWindowState(
+        url: state.url,
+        history: state.history,
+        history_idx: state.history_idx,
+        scroll_y: clamped,
+        max_scroll_y: max_y,
+        width: state.width,
+        height: state.height,
+        cursor_x: state.cursor_x,
+        cursor_y: state.cursor_y,
+        hovered_target: state.hovered_target,
+        status_message: state.status_message
+    )
+
+pub fn browser_window_state_navigate(state: BrowserWindowState, next_url: text) -> BrowserWindowState:
+    val trimmed = next_url.trim()
+    if trimmed == "":
+        return state
+    var truncated: [text] = []
+    var i: i32 = 0
+    while i <= state.history_idx and i < (state.history.len() as i32):
+        truncated.push(state.history[i])
+        i = i + 1
+    truncated.push(trimmed)
+    BrowserWindowState(
+        url: trimmed,
+        history: truncated,
+        history_idx: (truncated.len() as i32) - 1,
+        scroll_y: 0,
+        max_scroll_y: 0,
+        width: state.width,
+        height: state.height,
+        cursor_x: state.cursor_x,
+        cursor_y: state.cursor_y,
+        hovered_target: "",
+        status_message: "navigate:{trimmed}"
+    )
+
+pub fn browser_window_state_back(state: BrowserWindowState) -> BrowserWindowState:
+    if state.history_idx <= 0:
+        return state
+    val prev_idx = state.history_idx - 1
+    val prev_url = state.history[prev_idx]
+    BrowserWindowState(
+        url: prev_url,
+        history: state.history,
+        history_idx: prev_idx,
+        scroll_y: 0,
+        max_scroll_y: 0,
+        width: state.width,
+        height: state.height,
+        cursor_x: state.cursor_x,
+        cursor_y: state.cursor_y,
+        hovered_target: "",
+        status_message: "back:{prev_url}"
+    )
+
+pub fn browser_window_state_forward(state: BrowserWindowState) -> BrowserWindowState:
+    if state.history_idx + 1 >= (state.history.len() as i32):
+        return state
+    val next_idx = state.history_idx + 1
+    val next_url = state.history[next_idx]
+    BrowserWindowState(
+        url: next_url,
+        history: state.history,
+        history_idx: next_idx,
+        scroll_y: 0,
+        max_scroll_y: 0,
+        width: state.width,
+        height: state.height,
+        cursor_x: state.cursor_x,
+        cursor_y: state.cursor_y,
+        hovered_target: "",
+        status_message: "forward:{next_url}"
+    )
+
+# reason: viewport physical pixel dimensions from GuiRenderer resize event
+# @allow(primitive_api)
+pub fn browser_window_state_resize(state: BrowserWindowState, width: i32, height: i32) -> BrowserWindowState:
+    BrowserWindowState(
+        url: state.url,
+        history: state.history,
+        history_idx: state.history_idx,
+        scroll_y: state.scroll_y,
+        max_scroll_y: state.max_scroll_y,
+        width: width,
+        height: height,
+        cursor_x: state.cursor_x,
+        cursor_y: state.cursor_y,
+        hovered_target: state.hovered_target,
+        status_message: state.status_message
+    )
+
+pub fn browser_resolve_relative_url(base_url: text, href: text) -> text:
+    val target = href.trim()
+    if target == "" or target.starts_with("javascript:"):
+        return ""
+    if (
+        target.starts_with("http://") or target.starts_with("https://") or
+        target.starts_with("file://") or target.starts_with("simple://")
+    ):
+        return target
+    if target.starts_with("#"):
+        val hash_idx = base_url.index_of("#")
+        val stem = if hash_idx >= 0: base_url.substring(0, hash_idx) else: base_url
+        return stem + target
+    val scheme_sep = base_url.index_of("://")
+    if scheme_sep < 0:
+        return target
+    val after_scheme = scheme_sep + 3
+    val rel_slash = base_url.substring(after_scheme, base_url.byte_len()).index_of("/")
+    val origin = if rel_slash >= 0:
+        base_url.substring(0, after_scheme + rel_slash)
+    else:
+        base_url
+    if target.starts_with("/"):
+        return origin + target
+    val last_slash = base_url.last_index_of("/")
+    val dir_base = if last_slash >= after_scheme:
+        base_url.substring(0, last_slash + 1)
+    else:
+        origin + "/"
+    dir_base + target
+
+fn _collect_button_text(nodes: [HNode], child_index: HtmlChildIndex, node_i: i32) -> text:
+    var out = ""
+    var c = child_index.first_child[node_i]
+    while c >= 0:
+        if nodes[c].tag == "#text":
+            val t = nodes[c].text_trimmed
+            if t != "":
+                if out != "":
+                    out = out + " " + t
+                else:
+                    out = t
+        c = child_index.next_sibling[c]
+    out
+
+# reason: viewport dimensions and pointer coordinates matching simple_web_layout_hit_test_index
+# @allow(primitive_api)
+pub fn browser_hit_test_link_or_button(
+    html: text, width: i32, height: i32, scroll_y: i32, x: i32, y: i32
+) -> BrowserHitTarget:
+    if html == "" or width <= 0 or height <= 0:
+        return BrowserHitTarget(kind: "", target_key: "", href: "", button_id: "", button_label: "", max_scroll_y: 0)
+    val layout_res = simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+        html, width, height, 0, scroll_y, browser_text_input_overlay_empty()
+    )
+    val max_scroll = layout_res.max_scroll_y
+    val hit_key = simple_web_layout_hit_test_index(layout_res.hit_index, x, y)
+    val hit_node = simple_web_layout_hit_test_index_node(layout_res.hit_index, x, y)
+    val nodes = layout_res.hit_index.nodes
+    val child_index = layout_res.hit_index.child_index
+    var cur = hit_node
+    while cur >= 0 and cur < (nodes.len() as i32):
+        val nd = nodes[cur]
+        if nd.tag == "a":
+            val href = attr_value(nd.attrs_raw, "href").trim()
+            if href != "":
+                return BrowserHitTarget(
+                    kind: "link",
+                    target_key: hit_key,
+                    href: href,
+                    button_id: nd.id_attr,
+                    button_label: _collect_button_text(nodes, child_index, cur),
+                    max_scroll_y: max_scroll
+                )
+        elif nd.tag == "button":
+            return BrowserHitTarget(
+                kind: "button",
+                target_key: hit_key,
+                href: "",
+                button_id: nd.id_attr,
+                button_label: _collect_button_text(nodes, child_index, cur),
+                max_scroll_y: max_scroll
+            )
+        elif nd.tag == "input":
+            val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+            if input_type == "button" or input_type == "submit" or input_type == "reset":
+                val label = attr_value(nd.attrs_raw, "value")
+                return BrowserHitTarget(
+                    kind: "button",
+                    target_key: hit_key,
+                    href: "",
+                    button_id: nd.id_attr,
+                    button_label: if label != "": label else: input_type,
+                    max_scroll_y: max_scroll
+                )
+        cur = nd.parent as i32
+    BrowserHitTarget(
+        kind: "",
+        target_key: hit_key,
+        href: "",
+        button_id: "",
+        button_label: "",
+        max_scroll_y: max_scroll
+    )
+
+# reason: pointer click coordinates in viewport pixels from GuiWindowEvent
+# @allow(primitive_api)
+pub fn browser_apply_click_result(
+    state: BrowserWindowState, html: text, x: i32, y: i32
+) -> (BrowserWindowState, bool):
+    val hit = browser_hit_test_link_or_button(
+        html, state.width, state.height, state.scroll_y, x, y
+    )
+    var updated = browser_window_state_set_scroll(state, state.scroll_y, hit.max_scroll_y)
+    if hit.kind == "link":
+        val target_url = browser_resolve_relative_url(updated.url, hit.href)
+        if target_url != "":
+            return (browser_window_state_navigate(updated, target_url), true)
+    elif hit.kind == "button":
+        val label = if hit.button_label != "": hit.button_label else: hit.button_id
+        updated = BrowserWindowState(
+            url: updated.url,
+            history: updated.history,
+            history_idx: updated.history_idx,
+            scroll_y: updated.scroll_y,
+            max_scroll_y: updated.max_scroll_y,
+            width: updated.width,
+            height: updated.height,
+            cursor_x: x,
+            cursor_y: y,
+            hovered_target: hit.target_key,
+            status_message: "button:{label}"
+        )
+        return (updated, false)
+    (updated, false)
+
+# reason: pointer hover coordinates in viewport pixels from GuiWindowEvent
+# @allow(primitive_api)
+pub fn browser_apply_hover_result(
+    state: BrowserWindowState, html: text, x: i32, y: i32
+) -> BrowserWindowState:
+    val hit = browser_hit_test_link_or_button(
+        html, state.width, state.height, state.scroll_y, x, y
+    )
+    val hovered = if hit.kind != "": hit.target_key else: ""
+    val next_max = if hit.max_scroll_y > 0: hit.max_scroll_y else: state.max_scroll_y
+    BrowserWindowState(
+        url: state.url,
+        history: state.history,
+        history_idx: state.history_idx,
+        scroll_y: state.scroll_y,
+        max_scroll_y: next_max,
+        width: state.width,
+        height: state.height,
+        cursor_x: x,
+        cursor_y: y,
+        hovered_target: hovered,
+        status_message: state.status_message
+    )
+
+# reason: raw winit virtual keycode matching common.ui.key_code.winit_keycode_to_canon
+# @allow(primitive_api)
+pub fn browser_apply_key_event(state: BrowserWindowState, keycode: i64) -> BrowserKeyEffect:
+    val canon = winit_keycode_to_canon(keycode)
+    if canon == CANON_ESCAPE:
+        return BrowserKeyEffect(state: state, should_close: true, should_reload: false, should_render: false)
+    if canon == CANON_R or canon == CANON_F5:
+        return BrowserKeyEffect(state: state, should_close: false, should_reload: true, should_render: true)
+    if canon == CANON_LEFT or canon == CANON_BACKSPACE:
+        val backed = browser_window_state_back(state)
+        return BrowserKeyEffect(
+            state: backed,
+            should_close: false,
+            should_reload: false,
+            should_render: backed.history_idx != state.history_idx
+        )
+    if canon == CANON_RIGHT:
+        val fwd = browser_window_state_forward(state)
+        return BrowserKeyEffect(
+            state: fwd,
+            should_close: false,
+            should_reload: false,
+            should_render: fwd.history_idx != state.history_idx
+        )
+    val page_step = if state.height > 120: state.height * 4 / 5 else: 120
+    var delta = 0
+    if canon == CANON_DOWN:
+        delta = 60
+    elif canon == CANON_UP:
+        delta = -60
+    elif canon == CANON_PAGEDOWN:
+        delta = page_step
+    elif canon == CANON_PAGEUP:
+        delta = 0 - page_step
+    elif canon == CANON_HOME:
+        val at_top = browser_window_state_clamp_scroll(state, 0 - state.scroll_y)
+        return BrowserKeyEffect(
+            state: at_top,
+            should_close: false,
+            should_reload: false,
+            should_render: at_top.scroll_y != state.scroll_y
+        )
+    elif canon == CANON_END:
+        val at_end = browser_window_state_clamp_scroll(state, state.max_scroll_y - state.scroll_y)
+        return BrowserKeyEffect(
+            state: at_end,
+            should_close: false,
+            should_reload: false,
+            should_render: at_end.scroll_y != state.scroll_y
+        )
+    if delta != 0:
+        val scrolled = browser_window_state_clamp_scroll(state, delta)
+        return BrowserKeyEffect(
+            state: scrolled,
+            should_close: false,
+            should_reload: false,
+            should_render: scrolled.scroll_y != state.scroll_y
+        )
+    BrowserKeyEffect(state: state, should_close: false, should_reload: false, should_render: false)

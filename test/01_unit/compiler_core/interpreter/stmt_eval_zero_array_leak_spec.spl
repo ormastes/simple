@@ -1,0 +1,138 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# bug: doc/08_tracking/bug/core_interp_per_iteration_array_leak_2026-11-14.md
+#
+# Pins the Remaining items from core_interp_per_iteration_array_leak_2026-11-14.md:
+# - eval_stmts.spl eliminates expr_get(...) on hot statement paths in favor of
+#   scalar AST accessors (expr_get_tag, expr_get_left, expr_get_right, expr_get_str, expr_get_int).
+# - ast_stmt.spl and decl_nodes.spl expose zero-allocation indexed body accessors
+#   (stmt_body_len/at, elif_body_len/at, elif_else_len/at, arm_body_len/at),
+#   and eval.spl / eval_stmts.spl iterate statement/elif/arm bodies without copying arrays.
+#
+# @jit_spec_entry
+# The live-array counters observe runtime heap objects on the JIT lane; semantic
+# scenarios pass on both interpret and jit lanes.
+
+use std.spec.step
+use std.io_runtime.{read_file_text}
+
+use compiler.core.ast.{ast_reset, stmt_block_stmt, stmt_expr_stmt, stmt_body_len, stmt_body_at}
+use compiler.core.ast.{elif_new, elif_body_len, elif_body_at, elif_else_len, elif_else_at}
+use compiler.core.ast.{arm_new, arm_body_len, arm_body_at}
+use compiler.core.ast_expr.{expr_int_lit}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error}
+use compiler.core.interpreter.value.{val_get_int}
+
+extern fn rt_heap_live_count_by_kind(kind: i64) -> i64
+
+val HEAP_KIND_ARRAY: i64 = 2
+
+fn live_arrays() -> i64:
+    rt_heap_live_count_by_kind(HEAP_KIND_ARRAY)
+
+fn interp_int(src: text, name: text) -> i64:
+    val result = core_interpret(src, name)
+    if eval_has_error(): return -999
+    val_get_int(result)
+
+describe "zero-allocation indexed AST body accessors":
+    it "reads stmt, elif, and arm bodies by index without array allocations":
+        step("Build synthetic stmt, elif, and arm body entries")
+        ast_reset()
+        val e1 = expr_int_lit(11, 0)
+        val e2 = expr_int_lit(22, 0)
+        val e3 = expr_int_lit(33, 0)
+        val s1 = stmt_expr_stmt(e1, 0)
+        val s2 = stmt_expr_stmt(e2, 0)
+        val s3 = stmt_expr_stmt(e3, 0)
+        val blk = stmt_block_stmt([s1, s2], 0)
+        val el = elif_new(e1, [s1, s2], [s3])
+        val arm = arm_new(e1, -1, [s2, s3])
+
+        expect(stmt_body_len(blk)).to_equal(2)
+        expect(stmt_body_at(blk, 0)).to_equal(s1)
+        expect(stmt_body_at(blk, 1)).to_equal(s2)
+        expect(stmt_body_at(blk, 2)).to_equal(-1)
+
+        expect(elif_body_len(el)).to_equal(2)
+        expect(elif_body_at(el, 0)).to_equal(s1)
+        expect(elif_body_at(el, 1)).to_equal(s2)
+        expect(elif_else_len(el)).to_equal(1)
+        expect(elif_else_at(el, 0)).to_equal(s3)
+
+        expect(arm_body_len(arm)).to_equal(2)
+        expect(arm_body_at(arm, 0)).to_equal(s2)
+        expect(arm_body_at(arm, 1)).to_equal(s3)
+        expect(arm_body_at(arm, 2)).to_equal(-1)
+
+        step("Verify repeated indexed reads allocate zero arrays")
+        val before = live_arrays()
+        var j = 0
+        var acc = 0
+        while j < 1000:
+            acc = acc + stmt_body_len(blk) + stmt_body_at(blk, 0) + stmt_body_at(blk, 1)
+            acc = acc + elif_body_len(el) + elif_body_at(el, 0) + elif_else_len(el) + elif_else_at(el, 0)
+            acc = acc + arm_body_len(arm) + arm_body_at(arm, 0) + arm_body_at(arm, 1)
+            j = j + 1
+        val delta = live_arrays() - before
+        expect(acc > 0).to_equal(true)
+        expect(delta).to_equal(0)
+
+describe "core interpreter hot statement paths eliminate expr_get and body copies":
+    it "keeps expr_get out of eval_stmts.spl and uses indexed body loops":
+        val stmts_src = read_file_text("src/compiler/10.frontend/core/interpreter/eval_stmts.spl")
+        val eval_src = read_file_text("src/compiler/10.frontend/core/interpreter/eval.spl")
+        expect(stmts_src).to_not_contain("expr_get(")
+        expect(stmts_src).to_contain("stmt_body_len(")
+        expect(stmts_src).to_contain("elif_body_len(")
+        expect(stmts_src).to_contain("arm_body_len(")
+        expect(eval_src).to_contain("eval_stmt_body_block(")
+        expect(eval_src).to_contain("arm_body_len(")
+
+    it "preserves semantics for expr stmt, assign, compound assign, range for, if/else, match, and block":
+        val src = """
+fn noop(v: i64) -> i64:
+    v + 1
+
+var acc: i64 = 0
+for i in 0..10:
+    noop(i)
+    if i % 2 == 0:
+        acc += i
+    else:
+        acc = acc + 1
+    match i % 3:
+        case 0:
+            acc = acc + 2
+        case _:
+            acc = acc + 0
+acc
+"""
+        # Even i in 0..10: 0+2+4+6+8 = 20; odd i (1,3,5,7,9): +5 -> 25; i%3==0 (0,3,6,9): +8 -> 33.
+        expect(interp_int(src, "stmt_eval_zero_leak_semantics.spl")).to_equal(33)
+
+    it "keeps per-iteration array growth low across compound assign, expr stmt, if/else, and match":
+        val src = """
+fn step_fn(x: i64) -> i64:
+    x
+
+var acc: i64 = 0
+for i in 0..3000:
+    step_fn(i)
+    if i >= 0:
+        acc += 1
+    else:
+        acc = acc + 0
+    match i % 2:
+        case 0:
+            acc = acc + 1
+        case _:
+            acc = acc + 0
+acc
+"""
+        val before = live_arrays()
+        val result = core_interpret(src, "stmt_eval_zero_leak_bound.spl")
+        val per_iteration = (live_arrays() - before) / 3000
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(4500)
+        expect(per_iteration < 4).to_equal(true)

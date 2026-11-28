@@ -1,0 +1,63 @@
+# Purpose and audience: executable specification evidence for the compiler frontend team.
+# @req REQ-SSPEC-UNIT
+#
+# A free function cannot be named `pass`.
+#
+# `pass` is a statement keyword and `pass(message)` is the pass-with-message
+# statement, so a bare `pass(4)` can never reach a user function. The
+# declaration used to be accepted and the call then lowered as `()(4)`, which
+# the seed JIT turned into an indirect call through a non-pointer (SIGSEGV).
+# Members stay legal: `T.pass(..)` / `obj.pass()` are reached through `.`.
+#
+# Tracks: seed_jit_call_to_function_named_pass_segfaults_2026-11-28
+#
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+#
+# Exercises the self-hosted frontend in-process via parse_and_build_module
+# (same pattern as layer_decl_parse_spec.spl); the seed's own parser is pinned
+# by src/compiler_rust/parser/tests/functions.rs.
+
+use std.spec.step
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.parser.{parser_has_errors, parser_get_errors}
+
+fn errors_text() -> text:
+    parser_get_errors().join("\n")
+
+describe "free function named pass":
+    it "rejects a free 'fn pass' with a reserved-keyword diagnostic":
+        # @req REQ-SSPEC-UNIT
+        step("rejects a free 'fn pass' with a reserved-keyword diagnostic")
+        val source = "fn pass(o: i64) -> i64:\n    o + 1\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "fn_pass_free.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+        expect(errors_text().contains("reserved keyword 'pass' cannot be used as a function name")).to_equal(true)
+
+    it "rejects a public free 'pub fn pass'":
+        # @req REQ-SSPEC-UNIT
+        step("rejects a public free 'pub fn pass'")
+        val source = "pub fn pass(o: i64) -> i64:\n    o + 1\n"
+        val module = parse_and_build_module(source, "fn_pass_pub.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+        expect(errors_text().contains("reserved keyword 'pass' cannot be used as a function name")).to_equal(true)
+
+    it "keeps 'pass' legal as a static and instance method name":
+        # @req REQ-SSPEC-UNIT
+        step("keeps 'pass' legal as a static and instance method name")
+        val source = "class R:\n    ok: bool\n\n    static fn pass(n: i64) -> R:\n        R(ok: true)\n\n    fn pass(self) -> bool:\n        self.ok\n\nfn main() -> i64:\n    val r = R.pass(1)\n    0\n"
+        val module = parse_and_build_module(source, "fn_pass_method.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("main")).to_equal(true)
+
+    it "keeps the pass statement and a pass-prefixed name legal":
+        # @req REQ-SSPEC-UNIT
+        step("keeps the pass statement and a pass-prefixed name legal")
+        val source = "fn passthrough(o: i64) -> i64:\n    pass\n    o\n\nfn main() -> i64:\n    passthrough(4)\n"
+        val module = parse_and_build_module(source, "fn_pass_stmt.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("passthrough")).to_equal(true)

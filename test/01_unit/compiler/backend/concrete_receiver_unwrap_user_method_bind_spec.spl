@@ -1,0 +1,153 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Reproducing spec for
+# doc/08_tracking/bug/concrete_receiver_unwrap_returns_receiver_word_2026-08-25.md
+#
+# A user-defined class method named `unwrap`, called on a receiver whose type
+# is KNOWN and local (not erased), must bind to that user method. On the
+# 2026-08-25 seed, the cranelift backend instead routed the call to the builtin
+# unwrap helper (`rt_unwrap_or_self`, a runtime function that returns its
+# argument), so `a.unwrap()` on `a: Aaa` printed a pointer-shaped heap word
+# instead of the value the method body returns. There was no build error and
+# no runtime error: exit 0 with a wrong number. The byte-identical body under
+# a different name (`unwrap_ctl`) returned correctly, isolating the fault to
+# the resolution of the NAME `unwrap` — builtin routing won over a
+# same-module, concretely-typed user method.
+#
+# Root cause (seed): the last-resort builtin fallback in
+# src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs
+# (`try_compile_builtin_method_call`) maps the bare method segment `unwrap`
+# to an enum-helper runtime symbol for ANY receiver whose user-method
+# resolution did not bind earlier, with no check that the receiver is an
+# Optional/Result. The fix family named in the bug doc's 2026-11-11 addendum
+# (09b9c429c972, 7e8e1748490e, 28852ec7e3d6, efafcb91aed9) made the
+# Optional/Result helper routing type-directed and symmetric across the
+# LLVM/Cranelift backends, so a concretely-typed class receiver now resolves
+# to the user method on every backend. The pure-Simple MIR lowering carries
+# the same invariant by design (type-directed builtin arms only; a user
+# method is never replaced — src/compiler/50.mir/_MirLoweringExpr/
+# method_calls_literals.spl).
+#
+# This spec embeds the two-module fixture (class `Aaa` with `unwrap` in one
+# module, the probe in another) and native-builds it through the compiler
+# binary under test, then asserts the exact transcript. A regression shows
+# up as CONCRETE_UNWRAP printing a pointer-shaped word (a THEFT verdict in
+# the oracle classifier), never as a crash — the defect is silent.
+#
+# Re-verification recipe (from the repo root of any checkout containing this
+# spec):
+#
+#   1. Fresh-seed interpreter/JIT lanes (seconds, no linker needed):
+#        SIMPLE_EXECUTION_MODE=interpret <seed> run test/fixture/erased_unwrap_oracle/concrete_unwrap_hijack.spl
+#        SIMPLE_EXECUTION_MODE=jit       <seed> run test/fixture/erased_unwrap_oracle/concrete_unwrap_hijack.spl
+#      Both must print CONCRETE_UNWRAP=111 plus the controls below.
+#
+#   2. Cranelift native lane (the historical defect lane), either directly:
+#        <seed> native-build --backend=cranelift \
+#          test/fixture/erased_unwrap_oracle/concrete_unwrap_hijack.spl -o <bin>
+#        <bin>   # must print CONCRETE_UNWRAP=111
+#      or through the full gate:
+#        sh scripts/check/check-erased-receiver-unwrap-oracle.shs --seed <seed>
+#      which classifies the same fixture's `hijack_probe` row
+#      (expected: verdict=OK, `PASS — 9 case(s) checked`).
+#
+#   3. This spec, against a scratch-built seed or a stage candidate:
+#        SIMPLE_SPEC_COMPILER=<abs-path-to-seed> bin/simple test \
+#          test/01_unit/compiler/backend/concrete_receiver_unwrap_user_method_bind_spec.spl
+#
+# NOTE (Windows host): as recorded in the bug doc's addenda, cranelift
+# `native-build` from the seed stalls past 280 s on some Windows hosts
+# (host-level seed defect, tracked separately), so lanes 2 and 3 may need a
+# Linux host or WSL to produce a verdict. Lanes 1 always run.
+
+use std.spec.step
+
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val AAA_MOD = """class Aaa:
+    var v: i64
+
+    fn unwrap() -> i64:
+        111
+
+    fn ping() -> i64:
+        1
+
+    fn unwrap_ctl() -> i64:
+        111
+"""
+
+val MAIN_MOD = """use aaa_mod.{Aaa}
+
+class Payload:
+    var n: i64
+
+class Holder:
+    var owner: Payload?
+
+    fn take() -> i64:
+        val p = self.owner.unwrap()
+        p.n
+
+fn main():
+    val a = Aaa(v: 1)
+    print("CONTROL_PING=" + a.ping().to_string() + "\\n")
+    print("NAME_CONTROL=" + a.unwrap_ctl().to_string() + "\\n")
+    print("CONCRETE_UNWRAP=" + a.unwrap().to_string() + "\\n")
+    val h = Holder(owner: Payload(n: 4242))
+    print("ERASED_UNWRAP=" + h.take().to_string() + "\\n")
+"""
+
+val EXPECTED = "CONTROL_PING=1\nNAME_CONTROL=111\nCONCRETE_UNWRAP=111\nERASED_UNWRAP=4242"
+
+fn work_dir() -> text:
+    val base = env_get("TMPDIR")
+    val root = if base == "": "/tmp" else: base
+    val dir = root + "/simple-spec-concrete-receiver-unwrap-bind"
+    dir_create_all(dir)
+    dir
+
+# The compiler under test: `SIMPLE_SPEC_COMPILER` (a rebuilt seed or a stage
+# candidate; the runner refuses a SIMPLE_BINARY that is not itself), else
+# `SIMPLE_BINARY`, else the deployed `bin/simple` — which may be a stale seed
+# that predates the fix and then fails this spec for the wrong reason.
+fn compiler_binary() -> text:
+    val spec_compiler = env_get("SIMPLE_SPEC_COMPILER")
+    if spec_compiler != "":
+        return spec_compiler
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == "": "bin/simple" else: configured
+
+fn native_build(dir: text, exe: text) -> (text, text, i64):
+    env_set("SIMPLE_NATIVE_BUILD_RUST", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    process_run(compiler_binary(), ["native-build", "--backend", "cranelift", "--cache-dir", dir + "/cache",
+        "--source", dir, "--entry-closure", "--entry", dir + "/main.spl", "-o", exe])
+
+describe "a user method named unwrap on a concretely-typed class receiver binds to the user method":
+
+    """`a.unwrap()` on `a: Aaa`, with `Aaa` imported from another module, must
+    reach the user method and return 111. The builtin enum-helper routing must
+    not shadow it: the historical defect returned the receiver word itself (a
+    heap-pointer-shaped integer), silently, with exit 0. The `ping` control
+    proves user methods bind at all here; the byte-identical `unwrap_ctl`
+    body isolates the fault to the name `unwrap`; the erased-receiver
+    `ERASED_UNWRAP` reference proves the Optional unwrap still binds to the
+    builtin helper it needs."""
+
+    it "natively compiles the two-module fixture and gets the exact transcript":
+        step("write the two modules")
+        val dir = work_dir()
+        assert_true(file_write(dir + "/aaa_mod.spl", AAA_MOD))
+        assert_true(file_write(dir + "/main.spl", MAIN_MOD))
+
+        step("native-build through the compiler binary")
+        val exe = dir + "/main.bin"
+        val built = native_build(dir, exe)
+        assert_equal(built[2], 0)
+
+        step("the concrete receiver gets the field value, not a receiver word")
+        val ran = process_run(exe, [])
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), EXPECTED)

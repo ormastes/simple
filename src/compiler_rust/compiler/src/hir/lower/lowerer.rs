@@ -46,6 +46,16 @@ pub(super) struct GenericIdentityParamSpec {
     pub same_type_params: Vec<(usize, String)>,
 }
 
+/// A parameter declared as a word array: its name, array nesting depth and
+/// numeric leaf element (`data: [[i64]]` is `data`, 2, `i64`). `name` is empty
+/// for a slot that is not a parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WordArraySlot {
+    pub name: String,
+    pub depth: usize,
+    pub leaf: TypeId,
+}
+
 pub struct Lowerer {
     pub(super) module: HirModule,
     pub(super) globals: HashMap<String, TypeId>,
@@ -237,12 +247,12 @@ pub struct Lowerer {
     /// enum-slot check consumes it only for a receiver declared in the file
     /// being lowered; the float-into-int check consumes every row.
     pub(super) method_param_type_names: HashMap<String, Vec<Option<String>>>,
-    /// Declared numeric element type per array parameter (`[i64]`, `List<u32>`),
+    /// Declared word-array shape per array parameter (`[i64]`, `List<u32>`, `[[i64]]`, `[i64]?`),
     /// parallel to `fn_param_type_names` / `method_param_type_names`, keyed the
     /// same way. Lets the `[u8]`-into-word-array check see a slot whose type is
     /// known only by its AST spelling.
-    pub(super) fn_param_array_elems: HashMap<String, Vec<Option<TypeId>>>,
-    pub(super) method_param_array_elems: HashMap<String, Vec<Option<TypeId>>>,
+    pub(super) fn_param_array_elems: HashMap<String, Vec<Option<WordArraySlot>>>,
+    pub(super) method_param_array_elems: HashMap<String, Vec<Option<WordArraySlot>>>,
     /// `Owner.method` keys of `method_param_type_names` declared `static`:
     /// only these rows are checked at a `Type.method(args)` call, so an
     /// instance method called with an explicit receiver never shifts slots.
@@ -1553,6 +1563,40 @@ impl Lowerer {
         let own = self.flatten_emitted_symbol(current, name);
         let imported = self.flatten_emitted_symbol(Some(&source_owner), &source_name);
         (own != imported).then_some([own, imported])
+    }
+
+    /// True when the flattened unit declares a free function `name` that the
+    /// function being lowered can NOT see: its module neither defines `name`
+    /// nor imports it (selectively, or through a glob / re-export facade).
+    ///
+    /// Flattening merges every imported module's functions into one namespace,
+    /// so codegen finds such a function under its bare name and binds an
+    /// erased-receiver `x.name()` to it. For a text-only builtin
+    /// (`byte_len`, `char_count`) that turned `fn f(x): x.byte_len()` into a
+    /// call of an unrelated module's `fn byte_len(data: [u8])`
+    /// (seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28).
+    pub(super) fn flatten_free_fn_out_of_scope(&self, name: &str) -> bool {
+        if !self.flatten_fn_owners.contains_key(name) {
+            return false;
+        }
+        let current = self.current_function_owner.as_deref();
+        if self.flatten_owner_defines(current, name) {
+            return false;
+        }
+        let importer = current.unwrap_or("<entry>");
+        if self
+            .flatten_owner_import_bindings
+            .get(importer)
+            .is_some_and(|bindings| bindings.contains_key(name))
+        {
+            return false;
+        }
+        !self
+            .flatten_owner_glob_sources
+            .get(importer)
+            .into_iter()
+            .flatten()
+            .any(|glob_owner| self.flatten_reexport_definer(importer, glob_owner, name).is_some())
     }
 
     pub(super) fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {

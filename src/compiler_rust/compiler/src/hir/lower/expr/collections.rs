@@ -702,6 +702,7 @@ impl Lowerer {
                 if let Some(field_ty) = trusted_field_types.as_ref().and_then(|t| t.get(field_index)) {
                     self.reject_callable_for_enum_slot(*field_ty, &value, &format!("field `{name}.{field_name}`"))?;
                     self.reject_float_join_for_int_slot(*field_ty, &value, &format!("field `{name}.{field_name}`"))?;
+                    self.reject_array_element_mismatch(*field_ty, &value, &format!("field `{name}.{field_name}`"))?;
                 }
                 out.push(value);
             } else if let Some(binding) = &spread_binding {

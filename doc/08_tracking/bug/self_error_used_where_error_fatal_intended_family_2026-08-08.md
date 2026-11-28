@@ -549,3 +549,29 @@ The SSpec, compiler/core/MCP checks and native smokes are unrun pending a
 qualified self-hosted producer. No seed test is substituted, and the broader
 diagnostic family remains open.
 
+## Final `for-in` non-array iterable site follow-up, 2026-11-28 (`work/p2-compiler-mir-borrow-20261128`)
+
+Audited all remaining `self.error(` call sites across `src/compiler/50.mir/**`
+after W4-4 (`469b8fa6eb2`). Exactly 7 real `self.error(` sites remained:
+
+- **Converted to `self.error_fatal` (1 site):**
+  - `src/compiler/50.mir/mir_lowering_stmts.spl:6489` (`lower_for_iterator`,
+    `iter_unsupported_msg` for unsupported non-array `for-in` iterables). The
+    site immediately drops the loop body and emits `rt_panic(msg)`, so it was
+    always intended to be fatal and previously depended on the deprecated
+    message-prefix allowlist (`for-in over non-array iterables`) while leaving
+    `MirError.fatal == false`.
+- **Verified intentionally non-fatal (6 sites, preserved):**
+  - `src/compiler/50.mir/_MirLowering/asm_and_targets.spl:520,576` (`note:` backend version advisories)
+  - `src/compiler/50.mir/_MirLowering/function_lowering.spl:1936` (`E-MIR-TYPE-Any` warning under non-critical profile; critical uses `error_fatal` at `:1934`)
+  - `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:4893` (unreachable match arm warning)
+  - `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:6071` (non-exhaustive enum match warning; documented deliberate deferral)
+  - `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:6453` (`Option.None` fallback warning with immediate `none_disc = 1` recovery)
+
+Added direct `MirLowering.lower_for_iterator` fatal-flag + span + driver
+collection regression coverage and zero-`self.error(` audit for
+`mir_lowering_stmts.spl` in
+`test/01_unit/compiler/mir/mir_error_fatal_enforcement_spec.spl`. Status stays
+`fix-implemented-verification-pending` awaiting native Stage 2/AOT compiler
+verification.
+

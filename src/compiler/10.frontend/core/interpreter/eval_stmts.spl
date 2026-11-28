@@ -15,17 +15,18 @@
 
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
-use compiler.core.ast.{arm_get_body, arm_get_guard, arm_get_pattern, elif_get_body, elif_get_cond}
-use compiler.core.ast.{elif_get_else, expr_get}
+use compiler.core.ast.{arm_body_len, arm_body_at, arm_get_body, arm_get_guard, arm_get_pattern, elif_body_len, elif_body_at, elif_get_cond}
+use compiler.core.ast.{elif_else_len, elif_else_at}
 use compiler.core.ast_expr.{EXPR_CALL, EXPR_EXISTS_CHECK, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE}
+use compiler.core.ast_expr.{expr_get_int, expr_get_left, expr_get_right, expr_get_span, expr_get_str, expr_get_tag}
 use compiler.core.ast_expr.{expr_owner_int, expr_owner_int_set}
 use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_BIND, STMT_BLOCK, STMT_BREAK, STMT_COMPOUND_ASSIGN}
 use compiler.core.ast_stmt.{STMT_CONTINUE, STMT_DEFER, STMT_ERRDEFER, STMT_EXPR, STMT_FOR}
 use compiler.core.ast_stmt.{STMT_IF, STMT_LABELED_LOOP, STMT_MATCH, STMT_RECEIVE, STMT_RETURN}
 use compiler.core.ast_stmt.{STMT_VAL_DECL, STMT_VAR_DECL, STMT_WHILE}
-use compiler.core.{stmt_get_body, stmt_get_expr, stmt_get_name, stmt_get_span, stmt_get_tag, stmt_get_type}
+use compiler.core.{stmt_body_len, stmt_body_at, stmt_get_body, stmt_get_expr, stmt_get_name, stmt_get_span, stmt_get_tag, stmt_get_type}
 use compiler.core.interpreter.eval.{EVAL_STMT_COMPTIME, EVAL_STMT_LAZY_VAL_DECL, EVAL_STMT_STATIC_FOR, coverage_owner_file, coverage_span_decision_id, interp_coverage_enabled}
-use compiler.core.interpreter.eval.{eval_block, eval_break_label, eval_breaking, eval_continue_label, eval_continuing}
+use compiler.core.interpreter.eval.{eval_block, eval_stmt_body_block, eval_break_label, eval_breaking, eval_continue_label, eval_continuing}
 use compiler.core.interpreter.eval.{eval_control_condition, eval_current_decl_id, eval_defer_depth, eval_defer_depths, eval_defer_eids}
 use compiler.core.interpreter.eval.{eval_errdefer_depths, eval_errdefer_eids, eval_expr, eval_had_error, eval_option_binding_value}
 use compiler.core.interpreter.eval.{eval_return_value, eval_returning, eval_set_error, eval_warnings, match_pattern}
@@ -161,14 +162,12 @@ fn eval_stmt_expr(sid: i64) -> i64:
 
     # Check if this is a function call with ignored return value (deduplicated per sid)
     if eid >= 0 and not eval_ignored_return_sid_seen(sid):
-        val e_node = expr_get(eid)
-        val e_tag = e_node.tag
+        val e_tag = expr_get_tag(eid)
         if e_tag == EXPR_CALL:
-            val callee_eid = e_node.left
-            val callee_node = expr_get(callee_eid)
-            val callee_tag = callee_node.tag
+            val callee_eid = expr_get_left(eid)
+            val callee_tag = expr_get_tag(callee_eid)
             if callee_tag == EXPR_IDENT:
-                val fn_name = callee_node.s_val
+                val fn_name = expr_get_str(callee_eid)
                 val ret_type = func_lookup_return_type(fn_name)
                 val is_void = ret_type == 0
                 val is_unknown = ret_type == -1
@@ -222,8 +221,7 @@ fn eval_stmt_val_decl(sid: i64) -> i64:
         # chosen presence; a bare Result is not an optional binding carrier.
         var explicit_presence = false
         if init_eid >= 0:
-            val original_init = expr_get(init_eid)
-            explicit_presence = original_init.tag == EXPR_EXISTS_CHECK
+            explicit_presence = expr_get_tag(init_eid) == EXPR_EXISTS_CHECK
         if not explicit_presence and val_is_struct(init_val):
             val carrier_name = val_get_struct_name(init_val)
             if carrier_name == "Result::Ok" or carrier_name == "Result::Err":
@@ -279,22 +277,20 @@ fn eval_stmt_var_decl(sid: i64) -> i64:
     init_val
 
 fn eval_stmt_assign(sid: i64) -> i64:
-    # Field accessors, not stmt_get (see eval_stmt).
+    # Field accessors, not stmt_get/expr_get (see eval_stmt).
     val target_eid = stmt_get_expr(sid)
-    val value_stmts = stmt_get_body(sid)
-    if value_stmts.len() == 0:
+    if stmt_body_len(sid) == 0:
         eval_set_error("assignment missing value")
         return -1
-    val value_eid = value_stmts[0]
+    val value_eid = stmt_body_at(sid, 0)
 
     val incoming = eval_expr(value_eid)
     if eval_had_error: return -1
     val new_val = val_copy_if_value_struct(incoming)
 
-    val target_node = expr_get(target_eid)
-    val target_tag = target_node.tag
+    val target_tag = expr_get_tag(target_eid)
     if target_tag == EXPR_IDENT:
-        val name = target_node.s_val
+        val name = expr_get_str(target_eid)
         val ok = env_assign(name, new_val)
         if ok == false:
             val self_vid = env_lookup("self")
@@ -314,8 +310,8 @@ fn eval_stmt_assign(sid: i64) -> i64:
         return new_val
 
     if target_tag == EXPR_FIELD_ACCESS:
-        val base_eid = target_node.left
-        val field_name = target_node.s_val
+        val base_eid = expr_get_left(target_eid)
+        val field_name = expr_get_str(target_eid)
         val base_val = eval_mutable_value_place(base_eid)
         if eval_had_error: return -1
         if val_is_struct(base_val):
@@ -341,8 +337,8 @@ fn eval_stmt_assign(sid: i64) -> i64:
             return new_val
 
     if target_tag == EXPR_INDEX:
-        val base_eid2 = target_node.left
-        val idx_eid = target_node.right
+        val base_eid2 = expr_get_left(target_eid)
+        val idx_eid = expr_get_right(target_eid)
         val base_place = eval_prepare_value_place(base_eid2)
         if eval_had_error: return -1
         val idx_val = eval_expr(idx_eid)
@@ -367,17 +363,15 @@ fn eval_stmt_assign(sid: i64) -> i64:
     -1
 
 fn eval_stmt_compound_assign(sid: i64) -> i64:
-    # Field accessors, not stmt_get (see eval_stmt).
+    # Field accessors, not stmt_get/expr_get (see eval_stmt).
     val target_eid = stmt_get_expr(sid)
     val op = stmt_get_type(sid)
-    val value_stmts = stmt_get_body(sid)
-    if value_stmts.len() == 0:
+    if stmt_body_len(sid) == 0:
         eval_set_error("compound assignment missing value")
         return -1
-    val value_eid = value_stmts[0]
+    val value_eid = stmt_body_at(sid, 0)
 
-    val target_node = expr_get(target_eid)
-    val target_tag = target_node.tag
+    val target_tag = expr_get_tag(target_eid)
     # The statement form supports identifier targets only; refuse any other
     # target before running the right-hand side's side effects.
     if target_tag != EXPR_IDENT:
@@ -387,7 +381,7 @@ fn eval_stmt_compound_assign(sid: i64) -> i64:
     val rhs_val = eval_expr(value_eid)
     if eval_had_error: return -1
     if target_tag == EXPR_IDENT:
-        val name = target_node.s_val
+        val name = expr_get_str(target_eid)
         val old_val = env_lookup(name)
         if old_val < 0:
             eval_set_error("undefined variable: " + name)
@@ -434,8 +428,8 @@ fn record_stmt_control_decision(sid: i64, taken: bool):
 fn eval_stmt_if(sid: i64) -> i64:
     val elif_idx = stmt_get_type(sid)
     val cond_eid = elif_get_cond(elif_idx)
-    val then_stmts = elif_get_body(elif_idx)
-    val else_stmts = elif_get_else(elif_idx)
+    val then_len = elif_body_len(elif_idx)
+    val else_len = elif_else_len(elif_idx)
 
     var decision_id: i64 = -1
     if interp_coverage_enabled():
@@ -449,23 +443,27 @@ fn eval_stmt_if(sid: i64) -> i64:
     if taken:
         env_push_scope()
         var last_val = val_make_nil()
-        for sid2 in then_stmts:
+        var ti: i64 = 0
+        while ti < then_len:
             if eval_had_error: break
             if eval_returning: break
             if eval_breaking: break
             if eval_continuing: break
-            last_val = eval_stmt(sid2)
+            last_val = eval_stmt(elif_body_at(elif_idx, ti))
+            ti = ti + 1
         env_pop_scope()
         return last_val
-    if else_stmts.len() > 0:
+    if else_len > 0:
         env_push_scope()
         var last_val2 = val_make_nil()
-        for sid2 in else_stmts:
+        var ei: i64 = 0
+        while ei < else_len:
             if eval_had_error: break
             if eval_returning: break
             if eval_breaking: break
             if eval_continuing: break
-            last_val2 = eval_stmt(sid2)
+            last_val2 = eval_stmt(elif_else_at(elif_idx, ei))
+            ei = ei + 1
         env_pop_scope()
         return last_val2
     val_make_nil()
@@ -473,17 +471,16 @@ fn eval_stmt_if(sid: i64) -> i64:
 fn eval_stmt_for(sid: i64) -> i64:
     val iter_name = stmt_get_name(sid)
     val iterable_eid = stmt_get_expr(sid)
-    val body_stmts = stmt_get_body(sid)
+    val body_len = stmt_body_len(sid)
 
     # Check if iterable is a range expression
-    val iterable_tag = expr_get(iterable_eid).tag
+    val iterable_tag = expr_get_tag(iterable_eid)
     if iterable_tag == EXPR_RANGE:
-        val range_node = expr_get(iterable_eid)
-        val start_val = eval_expr(range_node.left)
+        val start_val = eval_expr(expr_get_left(iterable_eid))
         if eval_had_error: return -1
-        val end_val = eval_expr(range_node.right)
+        val end_val = eval_expr(expr_get_right(iterable_eid))
         if eval_had_error: return -1
-        val inclusive = range_node.i_val
+        val inclusive = expr_get_int(iterable_eid)
         val start_n = val_get_int(start_val)
         val end_n = val_get_int(end_val)
 
@@ -507,12 +504,14 @@ fn eval_stmt_for(sid: i64) -> i64:
             eval_continue_label = ""
             env_push_scope()
             env_define(iter_name, val_make_int(current))
-            for sid2 in body_stmts:
+            var bi: i64 = 0
+            while bi < body_len:
                 if eval_had_error: break
                 if eval_returning: break
                 if eval_breaking: break
                 if eval_continuing: break
-                last_val = eval_stmt(sid2)
+                last_val = eval_stmt(stmt_body_at(sid, bi))
+                bi = bi + 1
             env_pop_scope()
             # Seed parity: checked increment — stop at i64::MAX instead of wrapping.
             if current == 9223372036854775807: break
@@ -542,12 +541,14 @@ fn eval_stmt_for(sid: i64) -> i64:
             eval_continue_label = ""
             env_push_scope()
             env_define(iter_name, val_copy_if_value_struct(elem_vid))
-            for sid2 in body_stmts:
+            var bi2: i64 = 0
+            while bi2 < body_len:
                 if eval_had_error: break
                 if eval_returning: break
                 if eval_breaking: break
                 if eval_continuing: break
-                last_val2 = eval_stmt(sid2)
+                last_val2 = eval_stmt(stmt_body_at(sid, bi2))
+                bi2 = bi2 + 1
             env_pop_scope()
         # Only clear break/continue if they target this loop (no label = targets innermost)
         if eval_breaking:
@@ -582,12 +583,14 @@ fn eval_stmt_for(sid: i64) -> i64:
             val ch = str_chars[char_idx]
             env_push_scope()
             env_define(iter_name, val_make_text(ch))
-            for sid2 in body_stmts:
+            var bi3: i64 = 0
+            while bi3 < body_len:
                 if eval_had_error: break
                 if eval_returning: break
                 if eval_breaking: break
                 if eval_continuing: break
-                last_val3 = eval_stmt(sid2)
+                last_val3 = eval_stmt(stmt_body_at(sid, bi3))
+                bi3 = bi3 + 1
             env_pop_scope()
             char_idx = char_idx + 1
         # Only clear break/continue if they target this loop (no label = targets innermost)
@@ -607,7 +610,7 @@ fn eval_stmt_for(sid: i64) -> i64:
 fn eval_stmt_static_for(sid: i64) -> i64:
     val sf_iter_name = stmt_get_name(sid)
     val sf_iterable_eid = stmt_get_expr(sid)
-    val sf_body_stmts = stmt_get_body(sid)
+    val sf_body_len = stmt_body_len(sid)
 
     val sf_iterable = eval_expr(sf_iterable_eid)
     if eval_had_error: return -1
@@ -624,12 +627,14 @@ fn eval_stmt_static_for(sid: i64) -> i64:
             eval_continue_label = ""
             env_push_scope()
             env_define(sf_iter_name, val_copy_if_value_struct(sf_elem_vid))
-            for sf_sid in sf_body_stmts:
+            var sf_bi: i64 = 0
+            while sf_bi < sf_body_len:
                 if eval_had_error: break
                 if eval_returning: break
                 if eval_breaking: break
                 if eval_continuing: break
-                sf_last_val = eval_stmt(sf_sid)
+                sf_last_val = eval_stmt(stmt_body_at(sid, sf_bi))
+                sf_bi = sf_bi + 1
             env_pop_scope()
         # Only clear break/continue if they target this loop (no label = targets innermost)
         if eval_breaking:
@@ -645,16 +650,18 @@ fn eval_stmt_static_for(sid: i64) -> i64:
 
 fn eval_stmt_comptime(sid: i64) -> i64:
     # Execute the body statements immediately (they run at module-load time)
-    val ct_body = stmt_get_body(sid)
+    val ct_body_len = stmt_body_len(sid)
     var ct_last = val_make_nil()
-    for ct_sid in ct_body:
+    var ct_bi: i64 = 0
+    while ct_bi < ct_body_len:
         if eval_had_error: break
-        ct_last = eval_stmt(ct_sid)
+        ct_last = eval_stmt(stmt_body_at(sid, ct_bi))
+        ct_bi = ct_bi + 1
     ct_last
 
 fn eval_stmt_while(sid: i64) -> i64:
     val cond_eid = stmt_get_expr(sid)
-    val body_stmts = stmt_get_body(sid)
+    val body_len = stmt_body_len(sid)
     var last_val = val_make_nil()
     var iterations: i64 = 0
     var decision_id: i64 = -1
@@ -674,12 +681,14 @@ fn eval_stmt_while(sid: i64) -> i64:
         eval_continuing = false
         eval_continue_label = ""
         env_push_scope()
-        for sid2 in body_stmts:
+        var bi: i64 = 0
+        while bi < body_len:
             if eval_had_error: break
             if eval_returning: break
             if eval_breaking: break
             if eval_continuing: break
-            last_val = eval_stmt(sid2)
+            last_val = eval_stmt(stmt_body_at(sid, bi))
+            bi = bi + 1
         env_pop_scope()
         iterations = iterations + 1
 
@@ -697,7 +706,7 @@ fn eval_stmt_while(sid: i64) -> i64:
 
 fn eval_stmt_match(sid: i64) -> i64:
     val scrutinee_eid = stmt_get_expr(sid)
-    val arm_ids = stmt_get_body(sid)
+    val arm_count = stmt_body_len(sid)
 
     val scrutinee = eval_expr(scrutinee_eid)
     if eval_had_error: return -1
@@ -705,14 +714,17 @@ fn eval_stmt_match(sid: i64) -> i64:
     # Exhaustiveness check: warn if enum variants are not all covered (memoized per sid)
     var inferred_type2 = eval_match_stmt_memo_get(sid)
     if not match_stmt_memo_found:
+        val arm_ids = stmt_get_body(sid)
         inferred_type2 = infer_match_enum_type(arm_ids)
         check_match_exhaustive(arm_ids, inferred_type2)
         eval_match_stmt_memo_put(sid, inferred_type2)
 
-    for arm_id in arm_ids:
+    var ai: i64 = 0
+    while ai < arm_count:
+        val arm_id = stmt_body_at(sid, ai)
         val pattern_eid = arm_get_pattern(arm_id)
         val guard_eid = arm_get_guard(arm_id)
-        val body_stmts = arm_get_body(arm_id)
+        val body_len = arm_body_len(arm_id)
 
         env_push_scope()
         val matched = match_pattern(scrutinee, pattern_eid)
@@ -720,20 +732,21 @@ fn eval_stmt_match(sid: i64) -> i64:
             if guard_eid >= 0:
                 var guard_decision_id: i64 = -1
                 if interp_coverage_enabled():
-                    guard_decision_id = coverage_span_decision_id(expr_get(guard_eid).span_id)
+                    guard_decision_id = coverage_span_decision_id(expr_get_span(guard_eid))
                 val guard_val = eval_control_condition(guard_eid, guard_decision_id)
                 if eval_had_error:
                     env_pop_scope()
                     return -1
                 val guard_taken = val_is_truthy(guard_val)
                 if interp_coverage_enabled():
-                    val guard_span = expr_get(guard_eid).span_id
+                    val guard_span = expr_get_span(guard_eid)
                     if span_is_valid(guard_span):
                         record_control_decision(
                             coverage_owner_file(), span_line(guard_span), span_col(guard_span),
                             span_start(guard_span) + 1, guard_taken)
                 if guard_taken == false:
                     env_pop_scope()
+                    ai = ai + 1
                     continue
             # BUG-2026-08-01-match-fallthrough follow-up: a wildcard/bare-binder
             # arm absorbs any variant, including ones added later. Report it
@@ -743,13 +756,16 @@ fn eval_stmt_match(sid: i64) -> i64:
                     inferred_type2, val_enum_variant_name(scrutinee), val_kind_name(val_get_kind(scrutinee))
                 )
             var last_val = val_make_nil()
-            for sid2 in body_stmts:
+            var bi: i64 = 0
+            while bi < body_len:
                 if eval_had_error: break
                 if eval_returning: break
-                last_val = eval_stmt(sid2)
+                last_val = eval_stmt(arm_body_at(arm_id, bi))
+                bi = bi + 1
             env_pop_scope()
             return last_val
         env_pop_scope()
+        ai = ai + 1
 
     # No arm matched. The statement form previously fell out here with NO
     # diagnostic at all, making a non-firing match an invisible no-op — the
@@ -758,7 +774,7 @@ fn eval_stmt_match(sid: i64) -> i64:
         inferred_type2,
         val_enum_variant_name(scrutinee),
         val_kind_name(val_get_kind(scrutinee)),
-        arm_ids
+        stmt_get_body(sid)
     )
     if match_fallthrough_get_abort():
         eval_set_error(eval_warnings[eval_warnings.len() - 1])
@@ -766,5 +782,4 @@ fn eval_stmt_match(sid: i64) -> i64:
     val_make_nil()
 
 fn eval_stmt_block(sid: i64) -> i64:
-    val body_stmts = stmt_get_body(sid)
-    eval_block(body_stmts, -1)
+    eval_stmt_body_block(sid)

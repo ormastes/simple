@@ -5,12 +5,116 @@
 use std.skia.entity.enums.{SkTextEncoding}
 use std.nogc_sync_mut.io.font_sffi.{font_face_current_generation}
 use std.common.encoding.utf8.{text_codepoints}
-use std.common.encoding.sfnt_glyf.{sfnt_glyf_measure_codepoint_advances}
+use std.common.encoding.sfnt_glyf.{sfnt_glyf_measure_codepoint_advances, sfnt_glyf_measure_codepoint_advances_kerned}
 use std.io_runtime.{file_exists, file_read_bytes_result}
 
-var _sk_cached_font_paths: [text] = ["", "", "", ""]
-var _sk_cached_font_blobs: [[u8]] = [[], [], [], []]
+var _sk_cached_font_paths: [text] = ["", "", "", "", "", "", "", ""]
+var _sk_cached_font_blobs: [[u8]] = [[], [], [], [], [], [], [], []]
 var _sk_cached_font_cursor: i64 = 0
+
+fn _sk_read_u16_be(buf: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 1 >= buf.len():
+        return 0
+    (((buf[offset] as i64) & 255) << 8) | ((buf[offset + 1] as i64) & 255)
+
+fn _sk_read_u32_be(buf: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 3 >= buf.len():
+        return 0
+    (((buf[offset] as i64) & 255) << 24) | (((buf[offset + 1] as i64) & 255) << 16) | (((buf[offset + 2] as i64) & 255) << 8) | ((buf[offset + 3] as i64) & 255)
+
+fn _sk_write_u16_be(mut out: [u8], offset: i64, value: i64):
+    out[offset] = ((value >> 8) & 255) as u8
+    out[offset + 1] = (value & 255) as u8
+
+fn _sk_write_u32_be(mut out: [u8], offset: i64, value: i64):
+    out[offset] = ((value >> 24) & 255) as u8
+    out[offset + 1] = ((value >> 16) & 255) as u8
+    out[offset + 2] = ((value >> 8) & 255) as u8
+    out[offset + 3] = (value & 255) as u8
+
+fn _sk_split_face_spec(spec: text) -> (text, i64):
+    val spec_bytes = spec.byte_len()
+    var at: i64 = spec_bytes - 1
+    var digits: i64 = 0
+    while at >= 0:
+        val ch = spec.char_code_at(at)
+        if ch == 35:
+            if digits == 0:
+                return (spec, 0)
+            var idx: i64 = 0
+            var k = at + 1
+            while k < spec_bytes:
+                idx = idx * 10 + (spec.char_code_at(k) - 48)
+                k = k + 1
+            return (spec.slice(0, at), idx)
+        if ch < 48 or ch > 57:
+            return (spec, 0)
+        digits = digits + 1
+        at = at - 1
+    (spec, 0)
+
+# Extract a standalone SFNT face blob when `bytes` is a TrueType collection ('ttcf').
+# Plain TTF/OTF blobs with `index == 0` are returned untouched.
+# reason: TrueType collection blob extraction boundary takes raw bytes and face index
+# @allow(primitive_api)
+pub fn sk_extract_ttc_face_blob(blob: [u8], index: i64) -> [u8]:
+    if blob.len() < 12:
+        return []
+    val magic = _sk_read_u32_be(blob, 0)
+    # 'ttcf' == 0x74746366 == 1953784678
+    if magic != 1953784678:
+        if index == 0:
+            return blob
+        return []
+    if blob.len() < 16 or index < 0:
+        return []
+    val num_fonts = _sk_read_u32_be(blob, 8)
+    if index >= num_fonts or 12 + (index + 1) * 4 > blob.len():
+        return []
+    val face_off = _sk_read_u32_be(blob, 12 + index * 4)
+    if face_off < 0 or face_off + 12 > blob.len():
+        return []
+    val num_tables = _sk_read_u16_be(blob, face_off + 4)
+    val dir_size = 12 + num_tables * 16
+    if num_tables <= 0 or num_tables > 512 or face_off + dir_size > blob.len():
+        return []
+    var total_size = dir_size
+    var ti = 0
+    while ti < num_tables:
+        val rec = face_off + 12 + ti * 16
+        val t_off = _sk_read_u32_be(blob, rec + 8)
+        val t_len = _sk_read_u32_be(blob, rec + 12)
+        if t_off < 0 or t_len < 0 or t_off > blob.len() or t_len > blob.len() - t_off:
+            return []
+        val padded = ((t_len + 3) / 4) * 4
+        total_size = total_size + padded
+        ti = ti + 1
+    var out: [u8] = [0u8; total_size]
+    # Copy 12-byte offset table header + 16-byte records skeleton
+    var hi = 0
+    while hi < 12:
+        out[hi] = blob[face_off + hi]
+        hi = hi + 1
+    var dst_off = dir_size
+    ti = 0
+    while ti < num_tables:
+        val src_rec = face_off + 12 + ti * 16
+        val dst_rec = 12 + ti * 16
+        var bi = 0
+        while bi < 8:
+            out[dst_rec + bi] = blob[src_rec + bi]
+            bi = bi + 1
+        val t_off = _sk_read_u32_be(blob, src_rec + 8)
+        val t_len = _sk_read_u32_be(blob, src_rec + 12)
+        _sk_write_u32_be(out, dst_rec + 8, dst_off)
+        _sk_write_u32_be(out, dst_rec + 12, t_len)
+        var ci = 0
+        while ci < t_len:
+            out[dst_off + ci] = blob[t_off + ci]
+            ci = ci + 1
+        dst_off = dst_off + ((t_len + 3) / 4) * 4
+        ti = ti + 1
+    out
 
 pub fn sk_default_vector_font_path() -> text:
     if file_exists("assets/fonts/NotoSans-Regular.ttf"):
@@ -25,20 +129,24 @@ pub fn sk_load_cached_font_bytes(path: text) -> [u8]:
     if path == "":
         return []
     var slot: i64 = 0
-    while slot < 4:
+    while slot < 8:
         if _sk_cached_font_paths[slot] == path and _sk_cached_font_blobs[slot].len() > 0:
             return _sk_cached_font_blobs[slot]
         slot = slot + 1
-    if not file_exists(path):
+    val parsed = _sk_split_face_spec(path)
+    val file_path = parsed.0
+    val face_idx = parsed.1
+    if not file_exists(file_path):
         return []
-    match file_read_bytes_result(path):
+    match file_read_bytes_result(file_path):
         case Ok(bytes):
-            if bytes.len() > 0:
-                val dst = _sk_cached_font_cursor % 4
+            val resolved = sk_extract_ttc_face_blob(bytes, face_idx)
+            if resolved.len() > 0:
+                val dst = _sk_cached_font_cursor % 8
                 _sk_cached_font_paths[dst] = path
-                _sk_cached_font_blobs[dst] = bytes
-                _sk_cached_font_cursor = (_sk_cached_font_cursor + 1) % 4
-            bytes
+                _sk_cached_font_blobs[dst] = resolved
+                _sk_cached_font_cursor = (_sk_cached_font_cursor + 1) % 8
+            resolved
         case Err(_):
             []
 
@@ -200,6 +308,11 @@ pub fn sk_font_with_ttf(path: text, size: f64) -> SkFont:
 # reason: internal Skia shaping boundary over codepoint indices and default-fallback bool
 # @allow(primitive_api)
 pub fn sk_font_measure_codepoints_advances(font: SkFont, cps: [i64], allow_default_fallback: bool) -> [f64]:
+    sk_font_measure_codepoints_advances_kerned(font, cps, false, allow_default_fallback)
+
+# reason: internal Skia shaping boundary over codepoint indices and kerning/default-fallback flags
+# @allow(primitive_api)
+pub fn sk_font_measure_codepoints_advances_kerned(font: SkFont, cps: [i64], apply_kern: bool, allow_default_fallback: bool) -> [f64]:
     val count = cps.len()
     if count == 0:
         return []
@@ -211,7 +324,7 @@ pub fn sk_font_measure_codepoints_advances(font: SkFont, cps: [i64], allow_defau
         path = sk_default_vector_font_path()
     val blob = sk_load_cached_font_bytes(path)
     if blob.len() > 0:
-        val measured = sfnt_glyf_measure_codepoint_advances(blob, cps, sz * sx)
+        val measured = sfnt_glyf_measure_codepoint_advances_kerned(blob, cps, sz * sx, apply_kern)
         if measured.len() == count:
             return measured
     var advs: [f64] = []
@@ -261,6 +374,16 @@ impl SkFont:
     fn measure_text(content: text) -> f64:
         val cps = text_codepoints(content)
         val advs = sk_font_measure_codepoints_advances(self, cps, false)
+        var total = 0.0
+        var i: i64 = 0
+        while i < advs.len():
+            total = total + advs[i]
+            i = i + 1
+        total
+
+    fn measure_text_kerned(content: text) -> f64:
+        val cps = text_codepoints(content)
+        val advs = sk_font_measure_codepoints_advances_kerned(self, cps, true, false)
         var total = 0.0
         var i: i64 = 0
         while i < advs.len():

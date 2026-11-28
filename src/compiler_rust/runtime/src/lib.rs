@@ -772,7 +772,7 @@ pub extern "C" fn rt_store_barrier() {
 // no implementation". `rt_read_cr3` returns 0 — the current address space on
 // the host is a fiction the specs never assert against.
 #[no_mangle]
-pub extern "C" fn rt_read_cr3() -> i64 {
+pub extern "C" fn rt_read_cr3() -> u64 {
     0
 }
 
@@ -805,23 +805,23 @@ pub extern "C" fn rt_black_box(value: i64) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_volatile_read_u8(addr: i64) -> i64 {
-    (addr as usize as *const u8).read_volatile() as i64
+pub unsafe extern "C" fn rt_volatile_read_u8(addr: i64) -> u8 {
+    (addr as usize as *const u8).read_volatile()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_volatile_read_u16(addr: i64) -> i64 {
-    (addr as usize as *const u16).read_volatile() as i64
+pub unsafe extern "C" fn rt_volatile_read_u16(addr: i64) -> u16 {
+    (addr as usize as *const u16).read_volatile()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_volatile_read_u32(addr: i64) -> i64 {
-    (addr as usize as *const u32).read_volatile() as i64
+pub unsafe extern "C" fn rt_volatile_read_u32(addr: i64) -> u32 {
+    (addr as usize as *const u32).read_volatile()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_volatile_read_u64(addr: i64) -> i64 {
-    (addr as usize as *const u64).read_volatile() as i64
+pub unsafe extern "C" fn rt_volatile_read_u64(addr: i64) -> u64 {
+    (addr as usize as *const u64).read_volatile()
 }
 
 #[no_mangle]

@@ -3519,6 +3519,8 @@ impl LlvmBackend {
                                 .map(|ty| {
                                     if *ty == cranelift_codegen::ir::types::I8 {
                                         self.context_ref().i8_type().into()
+                                    } else if *ty == cranelift_codegen::ir::types::I16 {
+                                        self.context_ref().i16_type().into()
                                     } else if *ty == cranelift_codegen::ir::types::I32 {
                                         self.context_ref().i32_type().into()
                                     } else {
@@ -3533,6 +3535,9 @@ impl LlvmBackend {
                             [] => self.context_ref().void_type().fn_type(&fallback_param_types, false),
                             [ret] if *ret == cranelift_codegen::ir::types::I8 => {
                                 self.context_ref().i8_type().fn_type(&fallback_param_types, false)
+                            }
+                            [ret] if *ret == cranelift_codegen::ir::types::I16 => {
+                                self.context_ref().i16_type().fn_type(&fallback_param_types, false)
                             }
                             [ret] if *ret == cranelift_codegen::ir::types::I32 => {
                                 self.context_ref().i32_type().fn_type(&fallback_param_types, false)

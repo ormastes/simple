@@ -166,9 +166,9 @@ static inline void up2_vwrite(int64_t address, int64_t value, int width) {
     else *(volatile uint64_t *)p = (uint64_t)value;
 }
 
-int64_t rt_volatile_read_u8(int64_t address) { return up2_vread(address, 1); }
-int64_t rt_volatile_read_u32(int64_t address) { return up2_vread(address, 4); }
-int64_t rt_volatile_read_u64(int64_t address) { return up2_vread(address, 8); }
+uint8_t rt_volatile_read_u8(int64_t address) { return (uint8_t)up2_vread(address, 1); }
+uint32_t rt_volatile_read_u32(int64_t address) { return (uint32_t)up2_vread(address, 4); }
+uint64_t rt_volatile_read_u64(int64_t address) { return (uint64_t)up2_vread(address, 8); }
 void rt_volatile_write_u8(int64_t address, int64_t value) { up2_vwrite(address, value, 1); }
 void rt_volatile_write_u32(int64_t address, int64_t value) { up2_vwrite(address, value, 4); }
 void rt_volatile_write_u64(int64_t address, int64_t value) { up2_vwrite(address, value, 8); }

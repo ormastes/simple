@@ -1,0 +1,59 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/mcp_server_rss_growth_long_session_2026-11-24.md
+"""
+# MCP Per-Request Transient Scope and Persistent State Promotion
+
+Guards the structural `transient_scope_begin` / `pause` / `promote` / `end`
+lifecycle in `src/app/mcp/main.spl` and `src/app/mcp/main_lazy_dispatch.spl`:
+- Requests run inside a transient scope by default, with `SIMPLE_MCP_REQUEST_SCOPE=0` opt-out.
+- Persistent cross-request globals (`_MCP_TRANSPORT_MODE`, `MCP_LOG_LEVEL`,
+  static tool caches, ctx caches, session state, visibility state, DAP/dialog state)
+  are promoted before ending the request scope.
+- `main.spl` retains zero function-local `use`s and keeps heavy handlers lazy.
+- `main_lazy_diag_tools.spl` reuses linear byte-sliced `strip_ansi` from `main_lazy_json.spl`.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+use app.mcp.main_lazy_dispatch.{mcp_lazy_promote_static_caches, mcp_lazy_promote_tool_state}
+
+describe "MCP per-request transient scope contract":
+    it "wraps serve iterations in transient_scope with SIMPLE_MCP_REQUEST_SCOPE=0 opt-out":
+        val main_src = read_file_text("src/app/mcp/main.spl")
+        expect(main_src).to_contain("SIMPLE_MCP_REQUEST_SCOPE")
+        expect(main_src).to_contain("transient_scope_begin()")
+        expect(main_src).to_contain("transient_scope_pause()")
+        expect(main_src).to_contain("transient_scope_end()")
+        expect(main_src).to_contain("transient_promote(MCP_LOG_LEVEL)")
+        expect(main_src).to_contain("mcp_lazy_promote_static_caches()")
+        expect(main_src).to_contain("mcp_lazy_promote_tool_state(touched_tool_name)")
+
+    it "keeps lazy dispatch promotion isolated in main_lazy_dispatch.spl":
+        val dispatch_src = read_file_text("src/app/mcp/main_lazy_dispatch.spl")
+        expect(dispatch_src).to_contain("pub fn mcp_lazy_promote_static_caches():")
+        expect(dispatch_src).to_contain("pub fn mcp_lazy_promote_tool_state(tool_name: text):")
+        expect(dispatch_src).to_contain("mcp_static_tools_promote_caches")
+        expect(dispatch_src).to_contain("mcp_ctx_promote_caches")
+        expect(dispatch_src).to_contain("mcp_session_state_promote")
+        expect(dispatch_src).to_contain("lsp_mcp_view_promote")
+        expect(dispatch_src).to_contain("dap_sessions_promote")
+        expect(dispatch_src).to_contain("dialog_snapshots_promote")
+
+    it "deduplicates per-char strip_ansi in main_lazy_diag_tools.spl":
+        val diag_src = read_file_text("src/app/mcp/main_lazy_diag_tools.spl")
+        expect(diag_src).to_contain("strip_ansi")
+        expect(diag_src).to_not_contain("fn strip_ansi(")
+
+    it "promotes static and ctx caches cleanly inside a transient scope":
+        val began = transient_scope_begin()
+        expect(began).to_equal(true)
+        var s = "persistent_log_level"
+        val paused = transient_scope_pause()
+        expect(paused).to_equal(true)
+        expect(transient_promote(s)).to_equal(true)
+        mcp_lazy_promote_static_caches()
+        mcp_lazy_promote_tool_state("simple_ctx_stats")
+        expect(transient_scope_end()).to_equal(true)
+        expect(s).to_equal("persistent_log_level")

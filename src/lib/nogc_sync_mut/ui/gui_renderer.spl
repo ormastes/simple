@@ -73,6 +73,7 @@ val GUI_EVT_FOCUSED: i64 = 5
 val GUI_EVT_UNFOCUSED: i64 = 6
 val GUI_EVT_SCALE_CHANGED: i64 = 7
 val GUI_EVT_KEYBOARD: i64 = 10
+val GUI_EVT_TEXT_INPUT: i64 = 11
 val GUI_EVT_MOUSE_BUTTON: i64 = 20
 val GUI_EVT_MOUSE_MOVED: i64 = 21
 val GUI_EVT_MOUSE_WHEEL: i64 = 22
@@ -87,6 +88,9 @@ class GuiWindowEvent:
     pressed: bool
     x: f64
     y: f64
+    mods: i64 = 0
+    text_ch: text = ""
+    scale_milli: i64 = 0
 
 impl GuiWindowEvent:
     static fn none() -> GuiWindowEvent:
@@ -114,8 +118,12 @@ class GuiRenderer:
     fp_wheel_y: i64
     fp_inner_width: i64
     fp_inner_height: i64
-    # Optional: backing scale factor * 1000 (0 when the provider predates it).
+    # Optional: backing scale factor * 1000 and modifier/text accessors
+    # (0 when the provider predates them).
     fp_scale_milli: i64
+    fp_key_shifted: i64
+    fp_text_len: i64
+    fp_text_byte: i64
     fp_staging: i64
     fp_stage_clear: i64
     fp_stage_fill_rect: i64
@@ -291,9 +299,12 @@ impl GuiRenderer:
             unsafe(capabilities: [ffi]):
                 l.close()
             return nil
-        # Optional accessor, resolved after the mandatory-ABI check so an old
-        # provider without it is not reported as missing a mandatory symbol.
+        # Optional accessors, resolved after the mandatory-ABI check so an old
+        # provider without them is not reported as missing a mandatory symbol.
         val fp_scale_milli = _gui_renderer_resolve(l, "rt_winit_window_scale_factor_milli")
+        val fp_key_shifted = _gui_renderer_resolve(l, "rt_winit_event_key_shifted")
+        val fp_text_len = _gui_renderer_resolve(l, "rt_winit_event_text_len")
+        val fp_text_byte = _gui_renderer_resolve(l, "rt_winit_event_text_byte")
         dbg_stage("gui", "winit_event_loop_create_start")
         # One retained mapping use keeps both native objects' destructors
         # callable even if a copied DynLib alias retires the mapping.
@@ -358,6 +369,9 @@ impl GuiRenderer:
             fp_inner_width: fp_inner_width,
             fp_inner_height: fp_inner_height,
             fp_scale_milli: fp_scale_milli,
+            fp_key_shifted: fp_key_shifted,
+            fp_text_len: fp_text_len,
+            fp_text_byte: fp_text_byte,
             fp_staging: fp_staging,
             fp_stage_clear: fp_stage_clear,
             fp_stage_fill_rect: fp_stage_fill_rect,
@@ -431,7 +445,36 @@ impl GuiRenderer:
             val sc = spl_wffi_call_i64(self.fp_key_scancode, [ev], 1)
             val kc = spl_wffi_call_i64(self.fp_key_keycode, [ev], 1)
             val kp = spl_wffi_call_i64(self.fp_key_pressed, [ev], 1)
-            out = GuiWindowEvent(native_id: ev, kind: ty, scancode: sc, keycode: kc, btn: 0, pressed: kp == 1, x: 0.0, y: 0.0)
+            var mods: i64 = 0
+            if self.fp_key_shifted != 0:
+                val shifted = spl_wffi_call_i64(self.fp_key_shifted, [ev], 1)
+                if shifted != 0:
+                    mods = 1
+            out = GuiWindowEvent(native_id: ev, kind: ty, scancode: sc, keycode: kc, btn: 0, pressed: kp == 1, x: 0.0, y: 0.0, mods: mods)
+        elif ty == GUI_EVT_TEXT_INPUT:
+            val kc = spl_wffi_call_i64(self.fp_key_keycode, [ev], 1)
+            var txt = ""
+            if self.fp_text_len != 0 and self.fp_text_byte != 0:
+                val tlen = spl_wffi_call_i64(self.fp_text_len, [ev], 1)
+                var ti: i64 = 0
+                while ti < tlen and ti < 64:
+                    val b = spl_wffi_call_i64(self.fp_text_byte, [ev, ti], 2)
+                    if b >= 32 and b < 127:
+                        val ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+                        val idx = (b - 32) as i32
+                        txt = txt + ascii[idx:idx + 1]
+                    ti = ti + 1
+            out = GuiWindowEvent(native_id: ev, kind: ty, scancode: 0, keycode: kc, btn: 0, pressed: true, x: 0.0, y: 0.0, text_ch: txt)
+        elif ty == GUI_EVT_SCALE_CHANGED:
+            var rw: i64 = 0
+            var rh: i64 = 0
+            if self.fp_inner_width != 0 and self.fp_inner_height != 0:
+                rw = spl_wffi_call_i64(self.fp_inner_width, [self.win], 1)
+                rh = spl_wffi_call_i64(self.fp_inner_height, [self.win], 1)
+            var sm: i64 = -1
+            if self.fp_scale_milli != 0:
+                sm = spl_wffi_call_i64(self.fp_scale_milli, [self.win], 1)
+            out = GuiWindowEvent(native_id: ev, kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: rw.to_f64(), y: rh.to_f64(), scale_milli: sm)
         elif ty == GUI_EVT_MOUSE_BUTTON:
             val btn = spl_wffi_call_i64(self.fp_mouse_button, [ev], 1)
             val mp = spl_wffi_call_i64(self.fp_mouse_pressed, [ev], 1)
@@ -631,6 +674,7 @@ export GUI_EVT_FOCUSED
 export GUI_EVT_UNFOCUSED
 export GUI_EVT_SCALE_CHANGED
 export GUI_EVT_KEYBOARD
+export GUI_EVT_TEXT_INPUT
 export GUI_EVT_MOUSE_BUTTON
 export GUI_EVT_MOUSE_MOVED
 export GUI_EVT_MOUSE_WHEEL

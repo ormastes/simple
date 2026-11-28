@@ -1219,6 +1219,19 @@ impl<'a> MirLowerer<'a> {
             })
         } else {
             // Indirect call through closure/function pointer
+            // A tuple (incl. unit `()`) is never callable. Lowering it as an
+            // indirect call jumps through a non-pointer and SIGSEGVs the JIT
+            // (`pass(4)` in expression position parses as `()(4)`).
+            if matches!(callee.kind, HirExprKind::Tuple(_))
+                || matches!(
+                    self.type_registry.and_then(|registry| registry.get(callee.ty)),
+                    Some(HirType::Tuple(_) | HirType::LabeledTuple(_))
+                )
+            {
+                return Err(MirLowerError::Unsupported(
+                    "value is not callable: the callee is a tuple/unit value, not a function".to_string(),
+                ));
+            }
             let callee_reg = self.lower_expr(callee)?;
 
             let (param_types, return_type, signature_declared) = self.function_signature_for_callee(callee, args);

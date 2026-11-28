@@ -1,0 +1,129 @@
+"""Binary-override bypass decision for the light-daemon lane.
+
+Audience: anyone editing `src/app/test_runner_new/binary_override.spl`,
+`test_runner_client.spl`'s bypass ladder, or `src/app/test_daemon/light_daemon.spl`.
+
+Why this spec exists (REPRODUCER). Bug:
+light_daemon_cannot_serve_pinned_native_exec_2026-11-03. The light daemon's
+v2 request carries a path, expiry, an environment digest and a generation —
+NO binary and no execution mode — and the daemon is pinned for life to the
+binary that spawned it with its environment frozen at spawn time. A pinned
+native run (a caller that selected WHICH binary/backend/toolchain the spec
+exercises via a SIMPLE_* selector) therefore can never ride the daemon lane.
+Recorded decision: KEEP the documented bypass — the client diverts every
+pinned run to the direct lane, where the caller's own environment reaches the
+spec. End-to-end repro on any host (build/p3cache scratch):
+
+    SIMPLE_BINARY=$PWD/build/p3cache/fresh-seed/simple.exe \\
+        build/p3cache/fresh-seed/simple.exe test <spec> --mode=interpreter --no-cache
+      -> "binary-override: SIMPLE_BINARY set; bypassing test daemon ..."
+      -> the spec body observes the pinned binary; verdict OK
+
+The wire shape and platform half of the decision are pinned by
+test/01_unit/app/test_daemon/light_daemon_pinned_bypass_spec.spl; this spec
+pins the client-side selector family and its diversion decision, which used
+to live unreadably in the bare-fn-main client (not importable by any spec)
+and now lives in `binary_override.spl` alongside `daemon_backlog.spl` and
+`no_examples_gate.spl`.
+
+# @req: REQ-SSPEC-APP
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+
+use app.test_runner_new.binary_override.{
+    binary_override_selector_vars,
+    binary_override_active_selectors,
+    binary_override_env_selectors,
+    binary_override_names
+}
+
+fn active_count(pairs: [(text, text)]) -> i64:
+    binary_override_active_selectors(pairs).len()
+
+fn env_view_matches_names_rendering() -> bool:
+    # True when the env-derived active selectors and the joined message form
+    # agree (names render in family order, comma+space separated).
+    binary_override_env_selectors().join(", ") == binary_override_names()
+
+describe "binary override selector family", :
+    it "is closed and carries every load-bearing name", :
+        # Membership IS the protection against a frozen daemon environment: a
+        # selector not named here is silently replayed from the daemon's
+        # spawn-time snapshot while the spec reports the selected name
+        # (measured 2026-08-04, three runs, one daemon: BRAVO -> BRAVO ->
+        # DEAD).
+        val required = [
+            "SIMPLE_TEST_BINARY", "SIMPLE_BINARY", "SIMPLE_BIN",
+            "SIMPLE_SEED_BINARY", "SIMPLE_SPEC_COMPILER",
+            "CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN",
+            "SIMPLEOS_QEMU_SIMPLE_BIN", "SIMPLEOS_DBFS_BOOT_QEMU_EXEC",
+            "SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE",
+            "SIMPLE_HOSTED_BROWSER_EXECUTABLE", "DEVHUB_MAIL_BIN",
+            "T32_PYTHON_BINARY", "T32_BACKEND_PREFERENCE", "LLVM_BUILD",
+            "SIMPLE_MMU_DIRECT_BACKEND", "SIMPLE_MMU_DEVICE_INITIATED_BACKEND",
+            "SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND", "SIMPLE_NATIVE_BUILD_TARGET",
+            "SIMPLE_ENGINE2D_RUNNER_MODE", "SIMPLE_ENGINE2D_FULL_MODE",
+            # the GPU-compiler provenance family travels together: the
+            # *_PATH/PRODUCER names select the artifact and the *_SHA256 names
+            # are the expected values checked against it.
+            "SIMPLE_GPU_COMPILER_PRODUCER", "SIMPLE_GPU_COMPILER_PRODUCER_SHA256",
+            "SIMPLE_GPU_COMPILER_RUNTIME_PATH", "SIMPLE_GPU_COMPILER_RUNTIME_SHA256",
+            "SIMPLE_GPU_COMPILER_BACKFILL_SHA256",
+            # PERF-7, 2026-09-13: without this name a daemon-served perf lane
+            # measured the CANDIDATE while reporting 10/10 green for the BASE.
+            "SIMPLE_PERF_SELF_BIN"]
+        val family = binary_override_selector_vars()
+        for name in required:
+            expect(name in family).to_equal(true)
+        # No spelling drift, no dead entries: the list must stay clean enough
+        # that the bypass message and every sabotage check agree on names.
+        for name in family:
+            expect(name.trim() == name and name != "").to_equal(true)
+
+    it "has no duplicates, so the env scan order is unambiguous", :
+        val family = binary_override_selector_vars()
+        var seen: [text] = []
+        for name in family:
+            expect(name in seen).to_equal(false)
+            seen.push(name)
+
+describe "binary override diversion decision", :
+    it "no pinned selector means no bypass", :
+        expect(active_count([])).to_equal(0)
+        expect(active_count([("SIMPLE_BINARY", ""), ("SIMPLE_BIN", "")])).to_equal(0)
+
+    it "any non-empty selector value diverts the run to the direct lane", :
+        expect(active_count([("SIMPLE_BINARY", "bravo")])).to_equal(1)
+        val pairs = [("SIMPLE_TEST_BINARY", ""), ("SIMPLE_BIN", "x"),
+                     ("LLVM_BUILD", ""), ("SIMPLE_PERF_SELF_BIN", "y")]
+        expect(binary_override_active_selectors(pairs).join(",")).to_equal("SIMPLE_BIN,SIMPLE_PERF_SELF_BIN")
+
+    it "an empty value is the only spelling of not-set", :
+        # A whitespace value is still a pin: every consumer of these names
+        # treats "" as absent and anything else as present, and the bypass
+        # must not second-guess that contract.
+        expect(active_count([("SIMPLE_BINARY", "")])).to_equal(0)
+        expect(active_count([("SIMPLE_BINARY", " ")])).to_equal(1)
+
+    it "active selectors keep input order so the bypass message is deterministic", :
+        val out_of_family_order = [("SIMPLE_BIN", "b"), ("SIMPLE_BINARY", "a")]
+        expect(binary_override_active_selectors(out_of_family_order).join(",")).to_equal("SIMPLE_BIN,SIMPLE_BINARY")
+
+    it "the env view agrees with the message rendering", :
+        # The unit lane exports no family selector, so both renderings are the
+        # empty string. (A selector exported by an outer harness would make
+        # this scenario observe it — which is why the pure decision above
+        # carries the pins and this scenario only checks the two I/O views
+        # agree, never that the env is empty.)
+        expect(env_view_matches_names_rendering()).to_equal(true)
+
+describe "client keeps only the I/O", :
+    it "the decision is delegated to binary_override.spl, not redefined locally", :
+        val client = read_file_text("src/app/test_runner_new/test_runner_client.spl")
+        expect(client).to_contain("use app.test_runner_new.binary_override.\{has_binary_override, binary_override_names}")
+        expect(client.contains("_binary_override_vars")).to_equal(false)
+        val decision = read_file_text("src/app/test_runner_new/binary_override.spl")
+        expect(decision).to_contain("for name in binary_override_selector_vars():")
+        expect(decision).to_contain("light_daemon_cannot_serve_pinned_native_exec_2026-11-03")

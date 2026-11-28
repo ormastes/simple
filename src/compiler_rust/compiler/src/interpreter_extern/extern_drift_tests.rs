@@ -405,8 +405,12 @@ fn posix_abi_serves_path_identity_externs() {
     for name in ["malloc", "free", "realpath", "readlink", "open", "read", "pread", "write", "close", "fsync"] {
         assert!(super::posix_abi::is_supported_name(name), "{name} not served by posix_abi");
     }
-    // retained_file_abi.spl's Linux branch declares exactly these three.
-    for name in ["statx", "openat", "geteuid"] {
+    // retained_file_abi.spl's Linux branch declares statx/openat/geteuid;
+    // linux_machine_policy_abi_v1.spl's Linux branch declares the rest.
+    for name in [
+        "statx", "openat", "geteuid", "getuid", "getgid", "getegid", "gettid", "getpid", "readlinkat", "fstatfs",
+        "ioctl", "sysconf",
+    ] {
         assert_eq!(
             super::posix_abi::is_supported_name(name),
             cfg!(target_os = "linux"),
