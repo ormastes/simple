@@ -63,9 +63,10 @@
 # Key text: `mt_key_type` is the SAME text the projector's `_key_var/_key_con/
 # _key_app` write for the same type (`v<n>:name`, `c<n>:name`,
 # `a<n>:ctor l<k>:args`); spec C "mt_key_type equals the projector key text"
-# pins it. Length framing here counts `text.len()` (characters); the projector
-# also has a byte-framed variant for non-ASCII names, which this model does
-# not produce.
+# pins it for ASCII names. Length framing here counts BYTES (`byte_len()`) and
+# `mt_from_key` scans bytes (`byte_len`, `byte_at`, `substring`): one unit
+# throughout. The projector default frames by characters and its byte-framed
+# variant agrees with this model; they differ only on non-ASCII names.
 #
 # Variable-change laws F1-F3 (every kind commutes with substitution, keeps
 # closedness, invents no variable), S1-S3, U1-U2, I1, K1-K3 are the laws the
@@ -408,8 +409,8 @@ fn mi_infer(gamma: [text], params: [MType], ret: MType, explicit: [MType],
 # ----------------------------------------------------------------------------
 
 fn mt_key_field(value: text) -> text:
-    """Length framing preserves arbitrary delimiter-bearing names."""
-    "{value.len()}:" + value
+    """Length framing (in BYTES, matching the byte scan of `mt_from_key`) preserves arbitrary delimiter-bearing names."""
+    "{value.byte_len()}:" + value
 
 fn mt_key_type(t: MType) -> text:
     """Structural identity: constructor tag, framed name, application arity."""
@@ -675,8 +676,8 @@ fn _mk_number(key: text, pos: i64) -> MKeyNum:
     var i = pos
     var n = 0
     var digits = 0
-    while i < key.len() and digits < 12:
-        val code = key.char_code_at(i)
+    while i < key.byte_len() and digits < 12:
+        val code = key.byte_at(i)
         if code == 58:
             break
         if code < 48 or code > 57:
@@ -684,16 +685,16 @@ fn _mk_number(key: text, pos: i64) -> MKeyNum:
         n = n * 10 + (code - 48)
         digits = digits + 1
         i = i + 1
-    if digits == 0 or i >= key.len() or key.char_code_at(i) != 58:
+    if digits == 0 or i >= key.byte_len() or key.byte_at(i) != 58:
         return _mk_num_bad()
     MKeyNum(value: n, next: i + 1, ok: true)
 
 fn _mk_parse(key: text, pos: i64) -> MKeyParse:
-    if pos >= key.len():
+    if pos >= key.byte_len():
         return _mk_bad()
-    val tag = key.char_at(pos)
+    val tag = key.substring(pos, pos + 1)
     val num = _mk_number(key, pos + 1)
-    if not num.ok or num.next + num.value > key.len():
+    if not num.ok or num.next + num.value > key.byte_len():
         return _mk_bad()
     val name = key.substring(num.next, num.next + num.value)
     var next = num.next + num.value
@@ -701,7 +702,7 @@ fn _mk_parse(key: text, pos: i64) -> MKeyParse:
         return MKeyParse(t: MType.Var(name), pos: next, ok: true)
     if tag == "c":
         return MKeyParse(t: MType.Con(name), pos: next, ok: true)
-    if tag != "a" or next >= key.len() or key.char_at(next) != "l":
+    if tag != "a" or next >= key.byte_len() or key.substring(next, next + 1) != "l":
         return _mk_bad()
     val count = _mk_number(key, next + 1)
     if not count.ok:
@@ -721,7 +722,7 @@ fn _mk_parse(key: text, pos: i64) -> MKeyParse:
 fn mt_from_key(key: text) -> MKeyParse:
     """Inverse of `mt_key_type`; `ok` is false on malformed or trailing input."""
     val p = _mk_parse(key, 0)
-    if not p.ok or p.pos != key.len():
+    if not p.ok or p.pos != key.byte_len():
         return _mk_bad()
     p
 
