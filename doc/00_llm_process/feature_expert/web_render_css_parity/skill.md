@@ -6044,7 +6044,7 @@ pins the border-box form, the default-UA gap is unfiled.
   in layout and in paint's `_html_box_device_extra_h` (it used `<`). AC-8.
 - **Floats still drop the fraction** (on base too): a 10.75px float paints
   1400..1439 at k=4, Chrome ..1442, and a `clear:both` sibling starts at 1440,
-  Chrome 1443. Bug: `doc/08_tracking/bug/web_render_float_fractional_height_dropped_2026-11-28.md`.
+  Chrome 1443. Bug: `doc/08_tracking/bug/db/web_render_float_fractional_height_dropped_2026-11-28.sdn` (fixed).
 - **Not covered, measured in the same sweep (k=4, unowned):**
   - a flex container or form control with an authored fractional height (other
     return paths);
@@ -6307,3 +6307,21 @@ pins the border-box form, the default-UA gap is unfiled.
 - **Bug shards:** `web_render_lcd_hinted_outline_not_freetype_exact_2026-11-28` (the af_latin
   port, the 13/14 px oracle question, the tools) and
   `web_render_inline_item_layoutunit_ceil_pen_2026-11-28` (layout hand-off).
+
+
+## 2026-11-28 — fractional float bottoms, fractional svg sizes, `middle` on the device row (`work/webrender-frac-float-svg-20261128`)
+
+- **Scope.** None of these cases is on a catalog page; the proof is three Chrome-measured specs at k = 1 and k = 4: `float_fractional_height_clear_chrome159_spec` (1/10 -> 10/10), `svg_fractional_size_and_middle_4x_chrome159_spec` (1/8 -> 8/8, in-development tag removed), `svg_fractional_size_interactions_chrome159_spec` (3/9 -> 9/9).
+- **Float (layout_engine).** The float context kept whole-px bottoms. `g_float_y1_frac` now holds the milli-px a float's exact margin-box bottom lies past `g_float_y1` (the float's returned end residual plus its bottom margin's fraction). Readers: `clear` on a block, a formatting-context root's auto height, a float moved down to another float's bottom. The float's top takes the cursor residual and its top margin in milli px and hands it to the float as its origin. Line boxes still read whole px, so text beside floats did not move.
+- **svg size.** One channel, three sources. (1) `presentational_attr_decls` truncated `width="40.5"` to `40px`; an svg's plain decimal now maps to `40.5px` and takes the authored-size path. (2) The replaced-box branch returns before the block return, so no fractional height was ever recorded for a replaced box: it now keeps the fraction of an authored or viewBox-ratio height (`svg_exact_content_size_milli`, 1/64 grid) as device extra height at k > 1, the snapped px at k = 1, and an end residual for the block cursor / float context. (3) The `<rect>` shapes were whole CSS px; with a fractional size they go on the device grid from the box's snapped origin at the exact scale (`device-rect`).
+- **`middle`.** `align_inline_line_device_dy` skipped middle boxes, so they sat on k x the CSS-snapped top: 1 device row high for 40x20, 3 for 40x21, svg and inline-block alike. Device top = floor((64 x device ascent - k x half x-height64 - 32 x device margin box + 32) / 64), against the ascent of the baseline-aligned boxes only (a top-aligned box on the same line must not raise it).
+- **Chrome facts worth keeping.**
+  - A replaced box's origin is pixel-snapped; its content keeps the exact scale from that origin. `width=50 viewBox="0 0 3 1"` at k = 4: box top 723.375 -> 723, content 66.625 rows: rows 723..788 full, row 789 blended. A row/column scan for the exact colour is therefore one px short of the box on the anti-aliased side: print the RGB at the edge before pinning.
+  - Half-px rule at k = 1: a box that starts on a whole px (a block, or an inline box taller than the strut) rounds its height half up (20.5px paints 21 rows); a box hanging from the whole-px baseline snaps its top, so the half stays out (12.5px paints 12 rows).
+  - A float's own box was already right at k = 4. It looked 3 rows short only because the block cleared 3 rows high painted over it. Put a gap (a bottom margin) between the two before blaming the float's height.
+- **Traps.**
+  - A headless capture with `--window-size=400,100` came back with everything below the first box blank; 300 px high is the floor that works.
+  - `tail -N` on a probe's output hides `print` debug lines of the first (k = 4) render; the k = 1 lines survive and make it look like the code path is not taken at k = 4.
+  - A `width` / `height` attribute reaches layout as `st.width_px` / `st.height_px`, never as an attribute: `attr_value(node.attrs_raw, "width")` branches in the replaced path are dead for sized elements.
+- **Open (bugs filed).** Float painted under a later block's background (`web_render_float_painted_under_later_block_background_2026-11-28`); text on a `top` / `bottom` line 2 device rows high at k = 4, inline-block `12.5px` below the strut at k = 1, `clear` with a top margin larger than the float, svg edge px not blended, `<br clear>` whole px (`web_render_fractional_layout_followups_2026-11-28`).
+- **Review catch (clamps).** Layout dropped the fraction under a min/max clamp but the svg paint path recomputed the exact size from the style, so `height:20.75px; max-height:20px` with a viewBox scaled to 20.75 and started 2 device rows low. An overflowing `<rect>` with no viewBox cannot show a scale error; a clamp case needs a viewBox whose rect fills it. The clamp now lives in `svg_exact_content_size_milli`, read by both sides (interactions spec AC-9).

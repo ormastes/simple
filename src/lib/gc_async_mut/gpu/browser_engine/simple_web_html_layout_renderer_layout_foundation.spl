@@ -668,7 +668,7 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         line_descent64 = middle_descent64
     var device_excess_milli = 0
     if g_layout_device_scale > 1:
-        device_excess_milli = align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, descent, any_valign, middle_ascent64, line_frac_milli, origin_frac_milli)
+        device_excess_milli = align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, descent, any_valign, middle_ascent64, line_frac_milli, origin_frac_milli, line_ascent64)
     var resolved_height = (line_ascent64 + line_descent64 + 32) / 64
     if line_height > resolved_height:
         resolved_height = line_height
@@ -2625,15 +2625,22 @@ pub fn form_control_device_extra_h(node: HNode, st: Style, rows: i32) -> i32:
 # height: above the baseline for a box that aligns on its bottom edge, below it
 # otherwise. A line holding a top/bottom/text-top/text-bottom box gets no
 # correction: its baseline also depends on the line height, which stays in CSS
-# px. A `middle` box has no baseline of its own; it only raises the line ascent
+# px. A `middle` box has no baseline of its own; it raises the line ascent
 # to `middle_ascent64` (1/64 CSS px) when its margin box reaches above
-# everything else.
+# everything else, and its midpoint sits half an x-height above the DEVICE
+# baseline (Chrome 159, 16px/1.5 Liberation Sans at k=4: a 40x20 box on device
+# rows 13..92, a 40x21 one on 11..94; k x the CSS-snapped top is 12 and 8).
+# `line_ascent64` is the CSS line ascent before its whole-px snap.
 # Returns the line's device height minus k x (css_ascent + css_descent) in milli
 # device px (a fraction is kept below the baseline), 0 for a line with a
 # valign box.
-fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, css_descent: i32, has_valign: bool, middle_ascent64: i32, line_frac_milli: i32 = 0, origin_frac_milli: i32 = 0) -> i32:
+fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, css_descent: i32, has_valign: bool, middle_ascent64: i32, line_frac_milli: i32 = 0, origin_frac_milli: i32 = 0, line_ascent64: i32 = 0) -> i32:
     val k = g_layout_device_scale
+    var middle_slots: [i32] = []
     var ascent = inline_line_strut_baseline_offset_device(line_style, k)
+    # The ascent of the baseline-aligned boxes alone: what a middle box
+    # centres on when a top/bottom box shares the line.
+    var baseline_ascent = ascent
     # Below the baseline in milli device px: the half leading above is floored
     # to whole device px, so a number line-height keeps its fraction here.
     var descent_milli = style_device_line_h_milli(line_style, k) - ascent * 1000
@@ -2646,6 +2653,7 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
         val node_index = nodes[i]
         val node_style = styles[node_index]
         if inline_atomic_valign(html_nodes[node_index], node_style) == "middle":
+            middle_slots.push(i)
             i = i + 1
             continue
         val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
@@ -2679,17 +2687,35 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
             node_descent_milli = style_device_line_h_milli(node_style, k) - node_ascent * 1000
         if node_ascent > ascent:
             ascent = node_ascent
+        if node_ascent > baseline_ascent and inline_atomic_valign(html_nodes[node_index], node_style) == "":
+            baseline_ascent = node_ascent
         if node_descent_milli > descent_milli:
             descent_milli = node_descent_milli
         i = i + 1
     val middle_ascent = (k * middle_ascent64 + 32) / 64
     if middle_ascent > ascent:
         ascent = middle_ascent
+    if middle_ascent > baseline_ascent:
+        baseline_ascent = middle_ascent
     val line_delta = if has_valign: 0 else: ascent - k * css_ascent
     # The line starts at the cursor's residual; its container already carries
     # the residual it started at (origin), so only the difference moves the
     # boxes (an svg after an h2 with 19.92px margins: device row 439, not 440).
     val line_start_dy = box_device_top_px(line_frac_milli * k) - box_device_top_px(origin_frac_milli * k)
+    # A middle box: its device top against k x the CSS-snapped top the CSS
+    # pass gave it. Beside a top/bottom box it still centres on the device
+    # baseline (Chrome 159: a 40x21 box beside a 41 px `top` one, rows 11..94).
+    val middle_half_x64 = if middle_slots.len() > 0: inline_middle_half_x_height_64(line_style) else: 0
+    val device_ascent64 = baseline_ascent * 64
+    i = 0
+    while i < middle_slots.len():
+        val slot = middle_slots[i]
+        val middle_node = nodes[slot]
+        val css_margin_box = margin_ts[slot] + bh[middle_node] + margin_bs[slot]
+        val css_top = _floor_div_i32(line_ascent64 - middle_half_x64 - css_margin_box * 32 + 32, 64)
+        val device_top = _floor_div_i32(device_ascent64 - k * middle_half_x64 - (k * css_margin_box + box_device_extra_h_at(middle_node)) * 32 + 32, 64)
+        box_device_inline_dy_record(html_nodes.len() as i32, middle_node, device_top - k * css_top + (if has_valign: 0 else: line_start_dy))
+        i = i + 1
     # A control hangs from the device baseline by its own device baseline.
     i = 0
     while i < widget_nodes.len():
@@ -3860,3 +3886,52 @@ pub fn authored_height_frac_milli(st: Style, root_font_px: i32) -> i32:
     val lu_milli = (exact * 64 / 1000) * 1000 / 64
     val frac = lu_milli - st.height_px.to_i64() * 1000
     if frac > 0 and frac < 1000: frac as i32 else: 0
+
+# Exact used CONTENT size [width, height] of `<svg>` `node` in milli CSS px on
+# Chrome's 1/64 grid (Chrome 159: `width=40.5 height=20.3` is 40.5 x 20.296875,
+# `width=50 viewBox="0 0 3 1"` is 50 x 16.65625), given the whole-px content
+# width layout gave it. A `width` / `height` attribute arrives as the style's
+# px size. The width falls back to `content_w_px`; the height is 0 when it is
+# neither authored nor a viewBox ratio (the caller keeps its whole-px box).
+# min- / max- width and height clamp to their whole px (`height:20.75px;
+# max-height:20px` is 20 px, and its viewBox scales to that), so layout and
+# paint read the same clamped size.
+# reason: style and box width in, milli CSS px out; all are layout scalars.
+# @allow(primitive_api)
+pub fn svg_exact_content_size_milli(node: HNode, st: Style, root_font_px: i32, content_w_px: i32) -> [i64]:
+    val inset_x = if st.border_box: st.pad_l + st.pad_r + st.border_l + st.border_r else: 0
+    val inset_y = if st.border_box: st.pad_t + st.pad_b + st.border_t + st.border_b else: 0
+    val max_w: i64 = if st.max_width_px > 0: (st.max_width_px - inset_x).to_i64() * 1000 else: 9223372036854775807
+    val min_w: i64 = if st.min_width_px > 0: (st.min_width_px - inset_x).to_i64() * 1000 + (if st.min_width_milli > 0: st.min_width_milli.to_i64() else: 0) else: 0
+    val max_h: i64 = if st.max_height_px > 0: (st.max_height_px - inset_y).to_i64() * 1000 else: 9223372036854775807
+    val min_h: i64 = if st.min_height_px > 0: (st.min_height_px - inset_y).to_i64() * 1000 else: 0
+    var w: i64 = content_w_px.to_i64() * 1000
+    if st.width_px > 0 and st.width_milli > 0:
+        w = (st.width_px - inset_x).to_i64() * 1000 + st.width_milli.to_i64()
+    var h: i64 = 0
+    if st.height_px > 0:
+        h = (st.height_px - inset_y).to_i64() * 1000 + authored_height_frac_milli(st, root_font_px).to_i64()
+        if h > max_h:
+            h = max_h
+        if h < min_h:
+            h = min_h
+        # An auto width follows the exact height through the viewBox ratio.
+        val ratio_box = svg_ratio_view_box_milli(node.attrs_raw)
+        if st.width_px == 0 and not st.width_zero and h % 1000 != 0 and ratio_box.len() == 4 and ratio_box[2] < 2147483648 and h < 33554432000:
+            w = ((h * ratio_box[2] / ratio_box[3]) * 64 / 1000) * 1000 / 64
+    if w > max_w:
+        w = max_w
+    if w < min_w:
+        w = min_w
+    if st.height_px <= 0:
+        val view_box = svg_ratio_view_box_milli(node.attrs_raw)
+        if view_box.len() == 4 and w > 0 and w < 33554432000 and view_box[3] < 2147483648 and view_box[2] > 0:
+            h = ((w * view_box[3] / view_box[2]) * 64 / 1000) * 1000 / 64
+            if h > max_h:
+                h = max_h
+            if h < min_h:
+                h = min_h
+    var out: [i64] = []
+    out.push(w)
+    out.push(h)
+    out
