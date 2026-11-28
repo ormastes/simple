@@ -26,7 +26,9 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{extract
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{parse_html, build_child_index}
 use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
-use std.io_runtime.{write_file, time_now_unix_micros}
+use std.io_runtime.{env_get, file_write_bytes, write_file, time_now_unix_micros}
+use common.ui.glass.theme.{is_glass_theme}
+use std.common.image.png_encode.{encode_argb_to_png_rgb}
 use nogc_sync_mut.ui.theme_package.{resolve_theme_alias, theme_package_render_snapshot}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
 use common.ui.wm_chrome_theme.{
@@ -79,6 +81,26 @@ pub fn browser_theme_composed_css(theme_id: text) -> text:
     if installed_css != "":
         return installed_css
     generate_css(theme_id)
+
+# reason: Predicate checking whether a resolved Engine2D backend name runs on CPU.
+@allow(primitive_api)
+pub fn browser_backend_is_cpu_raster(gpu_backend_name: text) -> bool:
+    """Return true when the resolved Engine2D backend rasterizes on CPU."""
+    val normalized = gpu_backend_name.trim().lower()
+    normalized == "software" or normalized == "cpu" or normalized == "cpu_simd" or normalized == "simd_cpu" or normalized == "cpu-simd"
+
+pub fn browser_cpu_raster_css_overrides(theme_id: text) -> text:
+    """Return fast CSS overrides suppressing multi-pass overlays, blurs, and deep shadow stacks on CPU rasterizers."""
+    val canonical = resolve_theme_alias(theme_id)
+    var css = "body::before, body::after {{ display: none !important; content: none !important; opacity: 1 !important; background: none !important; }}\n"
+    css = "{css}.widget-panel, .widget-panel.focused, .widget-menubar, .widget-statusbar, .widget-tab-bar, .widget-tabs, .widget-input, .widget-textfield, .widget-textarea, .table-filter, .widget-button, .widget-dialog, .widget-progress .progress-bar {{ backdrop-filter: none !important; -webkit-backdrop-filter: none !important; box-shadow: none !important; }}\n"
+    if is_glass_theme(canonical):
+        val is_light_glass = canonical.contains("light") or canonical == "fluid" or canonical == "liquid"
+        if is_light_glass:
+            css = "{css}body {{ background: linear-gradient(180deg, #F0F0F5 0%, #E6E8F0 100%) !important; }}\n"
+        else:
+            css = "{css}body {{ background: linear-gradient(180deg, #101320 0%, #171b2b 100%) !important; }}\n"
+    css
 
 pub fn web_render_engine_is_known(name: text) -> bool:
     """Loud-fail gate for `--web-engine`: only the two real WebRenderBackend
@@ -540,7 +562,10 @@ class BrowserBackend:
         else:
             raw_body
         val theme = state.tree.theme_name()
-        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body, browser_theme_composed_css(theme), "", self.width, self.height).with_root_attrs(wm_root_data_attrs(theme))
+        val base_css = browser_theme_composed_css(theme)
+        val use_cpu_fast = browser_backend_is_cpu_raster(self.gpu_backend_name) and env_get("SIMPLE_BROWSER_CPU_FULL_GLASS") != "1"
+        val effective_css = if use_cpu_fast: base_css + "\n" + browser_cpu_raster_css_overrides(theme) else: base_css
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body, effective_css, "", self.width, self.height).with_root_attrs(wm_root_data_attrs(theme))
         self.last_semantic_snapshot_json = semantic_ui_snapshot_to_json(browser_semantic_snapshot(state))
         val profile = web_render_optimization_profile(req)
         val themed_cache_key = browser_theme_cache_key(
@@ -808,6 +833,13 @@ class BrowserBackend:
             out[i] = self.framebuffer.pixels[i].to_u32()
             i = i + 1
         return out
+
+    fn snapshot_png(path: text) -> bool:
+        """Write the current framebuffer to a PNG file via pure-Simple RGB encoding."""
+        val png_bytes = encode_argb_to_png_rgb(self.pixels_argb_u32(), self.width, self.height)
+        if png_bytes.len() == 0:
+            return false
+        return file_write_bytes(path, png_bytes)
 
     fn snapshot_ppm(path: text) -> bool:
         """Write the current framebuffer to a PPM (P3 ASCII) file.
