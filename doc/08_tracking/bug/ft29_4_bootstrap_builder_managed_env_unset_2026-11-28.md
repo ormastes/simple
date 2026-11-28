@@ -14,12 +14,12 @@ variables are unset, so the specs failed with a bare assertion. The tools are ge
 unavailable there; nothing in the compiler was wrong.
 
 ## Fix
-`builder_qualifier_precondition()` / `phase4_binding_precondition()` return a reason when the
+`builder_qualifier_precondition()` / `phase4_binding_precondition()` return a reason only when the variable is unset (a set-but-broken qualifier still hard-fails by assertion) and the
 binding is absent; each `it` then does `fail("precondition: <reason>")` and returns, which the
 runner reports as BLOCKED (`parse_blocked_examples`). With the binding present the original
 assertions run unchanged (nothing weakened).
 
 ## Tests
 - Repro: the two specs (before: failed 0/7, 0/3; after: BLOCKED 7, 3).
-- Prevention: `test/01_unit/app/bootstrap_builder/managed_preconditions_spec.spl` (2/2).
+- Prevention: `managed_preconditions_spec.spl` covers pure `*_reason` helpers (bound and unbound).
 - Verified in-scope execution still needs a managed bootstrap run (not available here).
