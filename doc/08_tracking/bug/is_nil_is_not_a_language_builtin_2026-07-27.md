@@ -171,3 +171,10 @@ STILL OPEN, unchanged: the per-engine failure-phase parity for unresolved
 methods and the `is_nil`-specific diagnostic pointing at `== nil`
 (`src/compiler/**` + Rust seed). That is a compiler-owner decision, not a
 bounded fix; no source change made by this sweep.
+
+## Pure-Simple Compiler Diagnostic & 70.backend Audit (2026-11-28, Lane C)
+
+- **Decision (b) implemented in Pure-Simple semantics:** Added `unresolved_method_diagnostic_v1` and `unresolved_method_unknown_receiver_diagnostic_v1` in `src/compiler/35.semantics/resolve_strategies.spl` (re-exported from `src/compiler/35.semantics/__init__.spl`) and wired them into `MethodResolver.resolve_method`. When `.is_nil()` fails to resolve on any ordinary receiver (`i64`, `text`, `[T]`, `T?`, struct without `is_nil`, or unknown receiver), `MethodResolver` emits a compile-time error with source-level type spellings (`text`, `[i64]`, `i64?`, struct name) pointing callers at `== nil` or `.?`, while preserving all user-defined `Value.is_nil()` instance methods.
+- **`src/compiler/70.backend/` audit:** Verified `src/compiler/70.backend/backend_types.spl` has 0 `.is_nil()` calls (`Value.is_nil()` lives in `src/compiler/00.common/runtime_value_v1.spl`), and remaining `is_nil` identifiers in `70.backend/` are legitimate `rt_value_is_nil` / `value_is_nil` FFI helpers (`sffi_minimal.spl`, `cranelift_codegen_adapter.spl`).
+- **Verification:** `test/01_unit/compiler/semantics/is_nil_method_diagnostic_spec.spl` (5/5 PASS).
+- **Remaining:** Rust seed JIT failure-phase parity (`src/compiler_rust/`) is outside Lane C scope; status updated to `fix-implemented-verification-pending`.

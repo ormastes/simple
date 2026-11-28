@@ -150,25 +150,47 @@ fn _ufr_split_top_level(inner: text) -> [text]:
 # Per-Function Escape Detection
 # ============================================================================
 
+# Strip inline `# ...` comment and optional wrapper (`T?` or `Option<T>`) from
+# an `extern fn ... -> TYPE` return spelling so `text?` / `bool?` / `i64?` /
+# `Option<text>` are classified by their underlying value type rather than
+# falsely treated as named opaque handle types.
+fn _ufr_unwrap_return_type(ret: text) -> text:
+    var t = ret.trim()
+    val comment_idx = t.find("#")
+    if comment_idx >= 0:
+        t = t.substring(0, comment_idx).trim()
+    var changed = true
+    while changed:
+        changed = false
+        if t.ends_with("?"):
+            t = t.substring(0, t.byte_len() - 1).trim()
+            changed = true
+        elif t.starts_with("Option<") and t.ends_with(">"):
+            t = t.substring(7, t.byte_len() - 1).trim()
+            changed = true
+    t
+
 # Return types that CANNOT be an opaque handle, so an acquire-verb call
 # returning one of them is a value constructor, not a resource acquire.
 #
 # Deliberately narrow, and fail-closed: only `bool` and concrete array types
-# qualify. `Any` is NOT listed — it is genuinely used as a handle type here
-# (`rt_mutex_new`/`rt_rwlock_new` both return `Any`), so excluding it would
-# fail OPEN on real resources. Neither is `i64`, the Opaque Handle Pattern's
-# usual handle representation. An extern this pass cannot find a declaration
-# for keeps being flagged: no type information means no license to silence.
+# qualify (including optional `bool?` / `[u8]?` / `Option<bool>`). `Any` is
+# NOT listed — it is genuinely used as a handle type here (`rt_mutex_new` /
+# `rt_rwlock_new` both return `Any`), so excluding it would fail OPEN on real
+# resources. Neither is `i64`, the Opaque Handle Pattern's usual handle
+# representation. An extern this pass cannot find a declaration for keeps
+# being flagged if its name carries a known resource family token.
 fn _ufr_is_nonhandle_return_type(ret: text) -> bool:
-    val t = ret.trim()
+    val t = _ufr_unwrap_return_type(ret)
     t == "bool" or t.starts_with("[")
 
 # Return types that are opaque-handle shaped: `Any` (used by rt_mutex_new /
 # rt_rwlock_new) or a named non-primitive type (`FileHandle`, `Ptr`, ...).
-# Primitives (i64, bool, text, ...) and arrays are values; an acquire-verb
-# extern returning one is only a resource acquire if its family is known.
+# Primitives (i64, bool, text, ...) — including optional `text?` / `i64?` /
+# `Option<text>` — and arrays are values; an acquire-verb extern returning
+# one is only a resource acquire if its family is known.
 fn _ufr_is_resource_return_type(ret: text) -> bool:
-    val t = ret.trim()
+    val t = _ufr_unwrap_return_type(ret)
     if t == "" or t.starts_with("[") or t.starts_with("("):
         return false
     val prims = ["bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
