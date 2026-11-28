@@ -1,6 +1,6 @@
 # Static-AOP directory match cache: how a pointcut becomes a reusable shard
 
-> Purpose: document and pin the pure contract in
+> Purpose: document and pin the pure contract in `src/compiler/00.common/cache_contract/aspect_match_shard_v1.spl`.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Static-AOP directory match cache: how a pointcut becomes a reusable shard
 
-Purpose: document and pin the pure contract in
+Purpose: document and pin the pure contract in `src/compiler/00.common/cache_contract/aspect_match_shard_v1.spl`.
 
 ## At a Glance
 
@@ -25,8 +25,9 @@ Purpose: document and pin the pure contract in
 
 ## Purpose and audience
 
-Purpose: document and pin the pure contract in
-`src/compiler/00.common/cache_contract/aspect_match_shard_v1.spl`. A directory
+Purpose: document and pin the pure contract in `src/compiler/00.common/cache_contract/aspect_match_shard_v1.spl`.
+
+A directory
 publishes its join-point facts under one SHA-256 facts key; a pointcut selector
 (`execution(...)`, `attr(...)`, `within(...)` combined with `!`, `&`, `|` and
 parentheses) is parsed once into a canonical digest; the pair names a match
@@ -55,12 +56,25 @@ Plan: doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-2
 Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
 Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md
 
-## Decision inventory (MC/DC)
+## Decision inventory (decision/condition, both outcomes)
 
 Line numbers refer to `aspect_match_shard_v1.spl` at the commit this spec
-was written against. "DTO" marks a site reachable only through a
-hand-constructed public struct (the parser never produces that shape); those
-are covered, not excluded.
+was written against. "DTO" marks a site reached only through a
+hand-constructed public struct, not through `pointcut_selector_parse_v1`;
+those are covered, not excluded. Five sites are worth knowing about because
+they are not dead code, just not reachable from a well-formed parse: the
+stale-facts key check (L363/L369) is reachable from a byte decode at
+`directory_join_point_table_v3.spl:108`; L407 is an xxh3 collision
+guard on a cache hit; the unknown atom form at L356 is the total-function
+tail of `_node_matches`; and the `aop_digest_known_v1(f.facts_key)` condition
+at L400 is redundant with the facts-key check. See
+`doc/08_tracking/bug/aspect_match_shard_unknown_atom_fail_open_2026-11-28.md`.
+
+Requirement ids map to the plan
+(`doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md`):
+REQ-AOP-SHARD-A01..A04 are rows A-01..A-04 of
+`doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md`;
+REQ-AOP-SHARD-COV is row AW-0b.
 
 | Line | Decision | Conditions | Covering scenario |
 |------|----------|------------|-------------------|
@@ -72,6 +86,7 @@ are covered, not excluded.
 | 201 | `not ok` | c1 | `foo{` / every identifier |
 | 205 | `s.len() == 0` in `_is_path` | c1 | `within()` |
 | 207-208 | path character class / `not ok` | ident, `.`, `/`, `*` | `within(a.b)`, `within(a/b/*)`, `within(a-b)` |
+| 222 | `p < cs.len() and cs[p] == " "` (`_skip_ws`) | c1, c2 | `attr( x )` vs `attr(x)` |
 | 237, 240, 242 | atom word scan, empty word, bare name | c1, c2 | bare `bar_close`, empty selector |
 | 246 | `r < len and cs[r] != ")"` | c1, c2 | `attr(x` (unclosed) |
 | 247, 249 | skip spaces / unclosed argument | c1 | `attr( x )`, `attr(x` |
@@ -79,6 +94,7 @@ are covered, not excluded.
 | 259-269 | `within` path checks, `/*` tree form, bad star | c1, c2 | `within(b.*)`, `within(a*)`, `within(/*)`, `within(a*b)` |
 | 275-285 | `!` and parenthesised groups, inner failure, missing `)` | c1, c2 | `!call(x)`, `(call(x))`, `(attr(x)`, `(attr(x) attr(y))` |
 | 289-305 | `&` / `|` loops, right operand failure | c1, c2 | `attr(x) & call(y)`, `attr(x) | call(y)` |
+| 309, 310 | `_canon` atom and `not` forms | c1 | any parsed atom; `!attr(logged)` |
 | 315 | `not` or `within_tree` needs the universe | c1, c2 | `!attr(logged)`, `within(b.*)`, `attr(logged)` |
 | 324-332 | parse ok and fully consumed; root is an atom | c1, c2 | `foo{`, `attr(x) attr(y)`, expressions vs atoms |
 | 341 | owner file has no directory | c1 | root-level `top.spl` under `within(a)` |
@@ -86,6 +102,7 @@ are covered, not excluded.
 | 355 | `d == operand or d.starts_with(operand + "/")` | c1, c2 | `within(b.*)` over `b/z.spl` and `b/c/z.spl` |
 | 359 | `not supported or kind != "forward"` | c1, c2 | unsupported selector; `inline` join point |
 | 363, 369 | facts key no longer matches the facts | c1 | DTO facts carrying another directory's key |
+| 382 | `_selector_matches` per join point | c1 | matching and non-matching join points in every directory fixture |
 | 384 | `supported and complete and facts_current` | c1..c3 | unsupported, incomplete, tampered facts |
 | 400 | cacheable: supported, complete, both digests known, key present | c1..c5 | unsupported; incomplete; DTO selector digest; DTO facts key |
 | 402 | empty key | c1 | DTO facts carrying another directory's key |
@@ -344,9 +361,11 @@ expect(no_new.reuse).to_equal([])
 #### selector digest excludes advice body while apply key includes it
 
 - Derive apply keys that differ only in advice body or only in base body
-- Each body change yields a distinct apply key
+- The selector digest and match key ignore the advice body; each body change yields a distinct apply key
    - Exec capture: after_step
-   - Evidence: execution result verified by 2 expected checks
+   - Evidence: execution result verified by 4 expected checks
+   - Expected: shard_x.selector_digest equals `shard_y.selector_digest`
+   - Expected: shard_x.match_digest equals `shard_y.match_digest`
    - Expected: a == b is false
    - Expected: a == c is false
 
@@ -354,7 +373,7 @@ expect(no_new.reuse).to_equal([])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -363,7 +382,13 @@ step("Derive apply keys that differ only in advice body or only in base body")
 val a = advice_apply_key_v1("m", advice("x"), "b1")
 val b = advice_apply_key_v1("m", advice("y"), "b1")
 val c = advice_apply_key_v1("m", advice("x"), "b9")
-step("Each body change yields a distinct apply key")
+step("The selector digest and match key ignore the advice body; each body change yields a distinct apply key")
+val sel = pointcut_selector_parse_v1("attr(logged)")
+val facts = dir_a([])
+val shard_x = pointcut_match_shard_compute_v1(sel, facts)
+val shard_y = pointcut_match_shard_compute_v1(pointcut_selector_parse_v1("attr(logged)"), facts)
+expect(shard_x.selector_digest).to_equal(shard_y.selector_digest)
+expect(shard_x.match_digest).to_equal(shard_y.match_digest)
 expect(a == b).to_equal(false)
 expect(a == c).to_equal(false)
 ```
@@ -546,9 +571,9 @@ expect(p1.facts_key == p2.facts_key).to_equal(false)
 #### rejects unsupported selectors and incomplete inventories as non-cacheable
 
 - Parse selectors the static facts cannot answer, and acquire over an incomplete inventory
-   - Expected: rejected("call(foo)") is true
-   - Expected: rejected("attr(x) &") is true
-   - Expected: rejected("within(a*)") is true
+   - Expected: shape("call(foo)") equals `REJECTED`
+   - Expected: shape("attr(x) &") equals `REJECTED`
+   - Expected: shape("within(a*)") equals `REJECTED`
 - The acquire is not cacheable and the cache stays empty
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
@@ -565,9 +590,9 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-AOP-SHARD-A04
 step("Parse selectors the static facts cannot answer, and acquire over an incomplete inventory")
-expect(rejected("call(foo)")).to_equal(true)
-expect(rejected("attr(x) &")).to_equal(true)
-expect(rejected("within(a*)")).to_equal(true)
+expect(shape("call(foo)")).to_equal(REJECTED)
+expect(shape("attr(x) &")).to_equal(REJECTED)
+expect(shape("within(a*)")).to_equal(REJECTED)
 val inc = directory_join_point_facts_v1("a", ["a/x.spl"], [], [], false)
 val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
     pointcut_selector_parse_v1("attr(logged)"), inc)
@@ -701,16 +726,16 @@ expect(attr.needs_universe).to_equal(false)
 - Every one is unsupported with no nodes and a universe requirement
    - Exec capture: after_step
    - Evidence: execution result verified by 10 expected checks
-   - Expected: rejected("") is true
-   - Expected: rejected("attr(x") is true
-   - Expected: rejected("attr(a.b)") is true
-   - Expected: rejected("execution(*)") is true
-   - Expected: rejected("execution(a.b*)") is true
-   - Expected: rejected("execution(a.b)") is true
-   - Expected: rejected("within()") is true
-   - Expected: rejected("within(a-b)") is true
-   - Expected: rejected("within(/*)") is true
-   - Expected: rejected("within(a*b)") is true
+   - Expected: shape("") equals `REJECTED`
+   - Expected: shape("attr(x") equals `REJECTED`
+   - Expected: shape("attr(a.b)") equals `REJECTED`
+   - Expected: shape("execution(*)") equals `REJECTED`
+   - Expected: shape("execution(a.b*)") equals `REJECTED`
+   - Expected: shape("execution(a.b)") equals `REJECTED`
+   - Expected: shape("within()") equals `REJECTED`
+   - Expected: shape("within(a-b)") equals `REJECTED`
+   - Expected: shape("within(/*)") equals `REJECTED`
+   - Expected: shape("within(a*b)") equals `REJECTED`
 
 
 <details>
@@ -723,16 +748,16 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-AOP-SHARD-A04
 step("Parse atoms with an empty, unclosed, or out-of-alphabet argument")
 step("Every one is unsupported with no nodes and a universe requirement")
-expect(rejected("")).to_equal(true)
-expect(rejected("attr(x")).to_equal(true)
-expect(rejected("attr(a.b)")).to_equal(true)
-expect(rejected("execution(*)")).to_equal(true)
-expect(rejected("execution(a.b*)")).to_equal(true)
-expect(rejected("execution(a.b)")).to_equal(true)
-expect(rejected("within()")).to_equal(true)
-expect(rejected("within(a-b)")).to_equal(true)
-expect(rejected("within(/*)")).to_equal(true)
-expect(rejected("within(a*b)")).to_equal(true)
+expect(shape("")).to_equal(REJECTED)
+expect(shape("attr(x")).to_equal(REJECTED)
+expect(shape("attr(a.b)")).to_equal(REJECTED)
+expect(shape("execution(*)")).to_equal(REJECTED)
+expect(shape("execution(a.b*)")).to_equal(REJECTED)
+expect(shape("execution(a.b)")).to_equal(REJECTED)
+expect(shape("within()")).to_equal(REJECTED)
+expect(shape("within(a-b)")).to_equal(REJECTED)
+expect(shape("within(/*)")).to_equal(REJECTED)
+expect(shape("within(a*b)")).to_equal(REJECTED)
 ```
 
 </details>
@@ -743,14 +768,14 @@ expect(rejected("within(a*b)")).to_equal(true)
 - Every one is unsupported; a valid prefix never leaks a partial selector
    - Exec capture: after_step
    - Evidence: execution result verified by 8 expected checks
-   - Expected: rejected("!call(x)") is true
-   - Expected: rejected("(call(x))") is true
-   - Expected: rejected("(attr(x)") is true
-   - Expected: rejected("(attr(x) attr(y))") is true
-   - Expected: rejected("attr(x) & call(y)") is true
-   - Expected: rejected("attr(x) | call(y)") is true
-   - Expected: rejected("attr(x) attr(y)") is true
-   - Expected: rejected("foo{") is true
+   - Expected: shape("!call(x)") equals `REJECTED`
+   - Expected: shape("(call(x))") equals `REJECTED`
+   - Expected: shape("(attr(x)") equals `REJECTED`
+   - Expected: shape("(attr(x) attr(y))") equals `REJECTED`
+   - Expected: shape("attr(x) & call(y)") equals `REJECTED`
+   - Expected: shape("attr(x) | call(y)") equals `REJECTED`
+   - Expected: shape("attr(x) attr(y)") equals `REJECTED`
+   - Expected: shape("foo{") equals `REJECTED`
 
 
 <details>
@@ -763,14 +788,14 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-AOP-SHARD-A04
 step("Parse operators whose operand is unsupported, unbalanced groups and trailing text")
 step("Every one is unsupported; a valid prefix never leaks a partial selector")
-expect(rejected("!call(x)")).to_equal(true)
-expect(rejected("(call(x))")).to_equal(true)
-expect(rejected("(attr(x)")).to_equal(true)
-expect(rejected("(attr(x) attr(y))")).to_equal(true)
-expect(rejected("attr(x) & call(y)")).to_equal(true)
-expect(rejected("attr(x) | call(y)")).to_equal(true)
-expect(rejected("attr(x) attr(y)")).to_equal(true)
-expect(rejected("foo{")).to_equal(true)
+expect(shape("!call(x)")).to_equal(REJECTED)
+expect(shape("(call(x))")).to_equal(REJECTED)
+expect(shape("(attr(x)")).to_equal(REJECTED)
+expect(shape("(attr(x) attr(y))")).to_equal(REJECTED)
+expect(shape("attr(x) & call(y)")).to_equal(REJECTED)
+expect(shape("attr(x) | call(y)")).to_equal(REJECTED)
+expect(shape("attr(x) attr(y)")).to_equal(REJECTED)
+expect(shape("foo{")).to_equal(REJECTED)
 ```
 
 </details>
@@ -899,14 +924,15 @@ expect(ids(f, "within(a)")).to_equal([])
 - Construct a supported selector whose only atom has a form the evaluator does not know
 - The evaluator falls through to false for every join point
    - Exec capture: after_step
-   - Evidence: execution result verified by 1 expected check
+   - Evidence: execution result verified by 2 expected checks
+   - Expected: shard.complete is true
    - Expected: shard.sorted_matching_ids equals `[]`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -918,6 +944,8 @@ val odd = PointcutSelectorV1(source: "mystery", form: "mystery", operand: "m", s
     root: 0, needs_universe: false, selector_digest: known.selector_digest)
 val shard = pointcut_match_shard_compute_v1(odd, dir_a([]))
 step("The evaluator falls through to false for every join point")
+# LATENT FAIL-OPEN: this shard is complete = true although the atom was never evaluated; today only the parser builds selectors so the form cannot occur, but AW-3 builds selectors outside the parser. Filed: doc/08_tracking/bug/aspect_match_shard_unknown_atom_fail_open_2026-11-28.md
+expect(shard.complete).to_equal(true)
 expect(shard.sorted_matching_ids).to_equal([])
 ```
 
@@ -1398,20 +1426,21 @@ Requirements covered by the scenarios in this manual:
 - `REQ-AOP-SHARD-A03`
 - `REQ-AOP-SHARD-A04`
 - `REQ-AOP-SHARD-COV`
+- `REQ-AOP-SHARD-A01..A04`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ea471587536686ae5cfd528ff0923388ca20ebdf08a1b936b0e2f260035d70e5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `2d8158cbb6ed0e855a3e86087fb72835f65bb534f3b940d27b310bc3da23dd53`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ea471587536686ae5cfd528ff0923388ca20ebdf08a1b936b0e2f260035d70e5`.
+Source SHA-256: `2d8158cbb6ed0e855a3e86087fb72835f65bb534f3b940d27b310bc3da23dd53`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ea471587536686ae5cfd528ff0923388ca20ebdf08a1b936b0e2f260035d70e5`  
+Source SHA-256: `2d8158cbb6ed0e855a3e86087fb72835f65bb534f3b940d27b310bc3da23dd53`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 

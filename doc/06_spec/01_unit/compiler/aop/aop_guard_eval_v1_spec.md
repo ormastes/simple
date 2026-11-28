@@ -1,6 +1,6 @@
 # AOP guard evaluation: which `@when` / `@cfg` branches a directory's facts saw
 
-> Purpose: document and pin
+> Purpose: document and pin `src/compiler/80.driver/cache/aop_guard_eval_v1.spl`.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # AOP guard evaluation: which `@when` / `@cfg` branches a directory's facts saw
 
-Purpose: document and pin
+Purpose: document and pin `src/compiler/80.driver/cache/aop_guard_eval_v1.spl`.
 
 ## At a Glance
 
@@ -25,8 +25,9 @@ Purpose: document and pin
 
 ## Purpose and audience
 
-Purpose: document and pin
-`src/compiler/80.driver/cache/aop_guard_eval_v1.spl`. Before a directory's
+Purpose: document and pin `src/compiler/80.driver/cache/aop_guard_eval_v1.spl`.
+
+Before a directory's
 join-point facts can be cached, the compiler must record which conditional
 branches (`@when` / `@elif` / `@else` / `@cfg`) were active for the target it
 compiled. This module turns one module source into a list of `GuardEvalV1`
@@ -53,10 +54,11 @@ conditional source can silently produce a cacheable shard.
 
 Research: doc/01_research/local/dir_tldr_aspect.md
 Plan: doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (AW-0b)
+Requirements: REQ-AOP-GUARD-EVAL, REQ-AOP-GUARD-UNEVAL and REQ-AOP-GUARD-MODULE all map to plan row AW-0b.
 Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
 Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md
 
-## Decision inventory (MC/DC)
+## Decision inventory (decision/condition, both outcomes)
 
 Line numbers refer to `aop_guard_eval_v1.spl` at the commit this spec was
 written against.
@@ -231,13 +233,13 @@ expect(linux_root.root_digest == windows_root.root_digest).to_equal(false)
 - The result is one unevaluable record naming the atom
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
-   - Expected: evals[0].guard.kind equals `when`
+   - Expected: exprs(evals) equals `["when|unevaluable:unsupported target cfg condition atom: flavor="x"|false|fa... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -245,9 +247,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("Evaluate @when(flavor=x), whose key the target evaluator does not know")
 val evals = on_linux("@when(flavor=\"x\"):\nfn a():\n    1\n@end\n")
 step("The result is one unevaluable record naming the atom")
-expect(single_unevaluable(evals,
-    "unevaluable:unsupported target cfg condition atom: flavor=\"x\"")).to_equal(true)
-expect(evals[0].guard.kind).to_equal("when")
+expect(exprs(evals)).to_equal(["when|unevaluable:unsupported target cfg condition atom: flavor=\"x\"|false|false"])
 ```
 
 </details>
@@ -258,8 +258,8 @@ expect(evals[0].guard.kind).to_equal("when")
 - Each yields one unevaluable record with the frontend's error
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
-   - Expected: single_unevaluable(orphan_elif, "unevaluable:@elif without @when at line 1") is true
-   - Expected: single_unevaluable(orphan_else, "unevaluable:@else without @when at line 1") is true
+   - Expected: exprs(orphan_elif) equals `["when|unevaluable:@elif without @when at line 1|false|false"]`
+   - Expected: exprs(orphan_else) equals `["when|unevaluable:@else without @when at line 1|false|false"]`
 
 
 <details>
@@ -274,8 +274,8 @@ step("Evaluate a source whose only directive is @elif, then one whose only direc
 val orphan_elif = on_linux("@elif(os=\"linux\"):\nfn a():\n    1\n")
 val orphan_else = on_linux("@else:\nfn a():\n    1\n")
 step("Each yields one unevaluable record with the frontend's error")
-expect(single_unevaluable(orphan_elif, "unevaluable:@elif without @when at line 1")).to_equal(true)
-expect(single_unevaluable(orphan_else, "unevaluable:@else without @when at line 1")).to_equal(true)
+expect(exprs(orphan_elif)).to_equal(["when|unevaluable:@elif without @when at line 1|false|false"])
+expect(exprs(orphan_else)).to_equal(["when|unevaluable:@else without @when at line 1|false|false"])
 ```
 
 </details>
@@ -285,14 +285,15 @@ expect(single_unevaluable(orphan_else, "unevaluable:@else without @when at line 
 - Evaluate a @when with no @end, then a valid chain with an empty target OS
 - Both fail closed with the evaluator's reason
    - Exec capture: after_step
-   - Evidence: execution result verified by 1 expected check
-   - Expected: single_unevaluable(unclosed, "unevaluable:unclosed @when block") is true
+   - Evidence: execution result verified by 2 expected checks
+   - Expected: exprs(unclosed) equals `["when|unevaluable:unclosed @when block|false|false"]`
+   - Expected: exprs(no_target) equals `["when|unevaluable:explicit target cfg OS and architecture are required|false... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -301,9 +302,8 @@ step("Evaluate a @when with no @end, then a valid chain with an empty target OS"
 val unclosed = on_linux("@when(os=\"linux\"):\nfn a():\n    1\n")
 val no_target = aop_source_guard_evals_v1(WHEN_ELSE_SOURCE, "", "x86_64")
 step("Both fail closed with the evaluator's reason")
-expect(single_unevaluable(unclosed, "unevaluable:unclosed @when block")).to_equal(true)
-expect(single_unevaluable(no_target,
-    "unevaluable:explicit target cfg OS and architecture are required")).to_equal(true)
+expect(exprs(unclosed)).to_equal(["when|unevaluable:unclosed @when block|false|false"])
+expect(exprs(no_target)).to_equal(["when|unevaluable:explicit target cfg OS and architecture are required|false|false"])
 ```
 
 </details>
@@ -378,8 +378,8 @@ expect(evals[1].active).to_equal(not is_windows)
 - Each yields one unevaluable record naming why there was no source
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
-   - Expected: single_unevaluable(aop_module_guard_evals_v1(""), "no-source-path") is true
-   - Expected: single_unevaluable(aop_module_guard_evals_v1(missing), "unreadable:" + missing) is true
+   - Expected: exprs(aop_module_guard_evals_v1("")) equals `["when|no-source-path|false|false"]`
+   - Expected: exprs(aop_module_guard_evals_v1(missing)) equals `["when|unreadable:" + missing + "|false|false"]`
 
 
 <details>
@@ -393,8 +393,8 @@ Reproduction: this block contains the complete executable scenario source.
 step("Evaluate an empty module path and a path that does not exist")
 val missing = "test/fixtures/compiler/aop_guard_eval/does_not_exist.spl"
 step("Each yields one unevaluable record naming why there was no source")
-expect(single_unevaluable(aop_module_guard_evals_v1(""), "no-source-path")).to_equal(true)
-expect(single_unevaluable(aop_module_guard_evals_v1(missing), "unreadable:" + missing)).to_equal(true)
+expect(exprs(aop_module_guard_evals_v1(""))).to_equal(["when|no-source-path|false|false"])
+expect(exprs(aop_module_guard_evals_v1(missing))).to_equal(["when|unreadable:" + missing + "|false|false"])
 ```
 
 </details>
@@ -402,26 +402,29 @@ expect(single_unevaluable(aop_module_guard_evals_v1(missing), "unreadable:" + mi
 #### the guard profile names the detected host OS and architecture
 
 - Read the guard profile on this host
-- The profile is <os>/<arch> of the detected host target
+- The profile is exactly <os>/<arch>: two non-empty parts joined by one slash
    - Exec capture: after_step
-   - Evidence: execution result verified by 2 expected checks
-   - Expected: profile.starts_with(cfg_detect_os() + "/") is true
-   - Expected: profile.ends_with("/" + cfg_detect_arch()) is true
+   - Evidence: execution result verified by 3 expected checks
+   - Expected: parts.len() equals `2)  # oracle: exactly one "/" separates <os> from <arch>`
+   - Expected: parts[0].len() > 0 is true
+   - Expected: parts[1].len() > 0 is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-AOP-GUARD-MODULE
 step("Read the guard profile on this host")
 val profile = aop_guard_profile_v1()
-step("The profile is <os>/<arch> of the detected host target")
-expect(profile.starts_with(cfg_detect_os() + "/")).to_equal(true)
-expect(profile.ends_with("/" + cfg_detect_arch())).to_equal(true)
+step("The profile is exactly <os>/<arch>: two non-empty parts joined by one slash")
+val parts = profile.split("/")
+expect(parts.len()).to_equal(2)  # oracle: exactly one "/" separates <os> from <arch>
+expect(parts[0].len() > 0).to_equal(true)
+expect(parts[1].len() > 0).to_equal(true)
 ```
 
 </details>
@@ -452,15 +455,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `36733b1380ad910b8fcf2d537ebaf0e4bf2297adb0876883506a5e2a3cd13603`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `1684f574fcf65c36b4401af35b63c7f893095147c59e92e4777d59ce7aabfadd`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `36733b1380ad910b8fcf2d537ebaf0e4bf2297adb0876883506a5e2a3cd13603`.
+Source SHA-256: `1684f574fcf65c36b4401af35b63c7f893095147c59e92e4777d59ce7aabfadd`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `36733b1380ad910b8fcf2d537ebaf0e4bf2297adb0876883506a5e2a3cd13603`  
+Source SHA-256: `1684f574fcf65c36b4401af35b63c7f893095147c59e92e4777d59ce7aabfadd`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 

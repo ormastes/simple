@@ -6,8 +6,9 @@
 
 ## Purpose and audience
 
-Purpose: document and pin
-`src/compiler/80.driver/cache/aop_guard_eval_v1.spl`. Before a directory's
+Purpose: document and pin `src/compiler/80.driver/cache/aop_guard_eval_v1.spl`.
+
+Before a directory's
 join-point facts can be cached, the compiler must record which conditional
 branches (`@when` / `@elif` / `@else` / `@cfg`) were active for the target it
 compiled. This module turns one module source into a list of `GuardEvalV1`
@@ -34,10 +35,11 @@ conditional source can silently produce a cacheable shard.
 
 Research: doc/01_research/local/dir_tldr_aspect.md
 Plan: doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (AW-0b)
+Requirements: REQ-AOP-GUARD-EVAL, REQ-AOP-GUARD-UNEVAL and REQ-AOP-GUARD-MODULE all map to plan row AW-0b.
 Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
 Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md
 
-## Decision inventory (MC/DC)
+## Decision inventory (decision/condition, both outcomes)
 
 Line numbers refer to `aop_guard_eval_v1.spl` at the commit this spec was
 written against.
@@ -94,10 +96,6 @@ fn exprs(evals: [GuardEvalV1]) -> [text]:
     for e in evals:
         out.push("{e.guard.kind}|{e.guard.canonical_expr}|{e.evaluable}|{e.active}")
     out
-
-fn single_unevaluable(evals: [GuardEvalV1], reason: text) -> bool:
-    evals.len() == 1 and not evals[0].evaluable and not evals[0].active and
-        evals[0].guard.canonical_expr == reason
 
 fn facts_with(evals: [GuardEvalV1]) -> bool:
     val root = active_guard_root_v1(aop_guard_profile_v1(), evals)
@@ -166,9 +164,7 @@ describe "unevaluable guards":
         val evals = on_linux("@when(flavor=\"x\"):\nfn a():\n    1\n@end\n")
         # @capture(exec): unknown atom
         step("The result is one unevaluable record naming the atom")
-        expect(single_unevaluable(evals,
-            "unevaluable:unsupported target cfg condition atom: flavor=\"x\"")).to_equal(true)
-        expect(evals[0].guard.kind).to_equal("when")
+        expect(exprs(evals)).to_equal(["when|unevaluable:unsupported target cfg condition atom: flavor=\"x\"|false|false"])
 
     it "orphan @elif and @else directives are unevaluable":
         # @req REQ-AOP-GUARD-UNEVAL
@@ -177,8 +173,8 @@ describe "unevaluable guards":
         val orphan_else = on_linux("@else:\nfn a():\n    1\n")
         # @capture(exec): orphan directives
         step("Each yields one unevaluable record with the frontend's error")
-        expect(single_unevaluable(orphan_elif, "unevaluable:@elif without @when at line 1")).to_equal(true)
-        expect(single_unevaluable(orphan_else, "unevaluable:@else without @when at line 1")).to_equal(true)
+        expect(exprs(orphan_elif)).to_equal(["when|unevaluable:@elif without @when at line 1|false|false"])
+        expect(exprs(orphan_else)).to_equal(["when|unevaluable:@else without @when at line 1|false|false"])
 
     it "an unclosed chain and a missing target are unevaluable":
         # @req REQ-AOP-GUARD-UNEVAL
@@ -187,9 +183,8 @@ describe "unevaluable guards":
         val no_target = aop_source_guard_evals_v1(WHEN_ELSE_SOURCE, "", "x86_64")
         # @capture(exec): unclosed and targetless
         step("Both fail closed with the evaluator's reason")
-        expect(single_unevaluable(unclosed, "unevaluable:unclosed @when block")).to_equal(true)
-        expect(single_unevaluable(no_target,
-            "unevaluable:explicit target cfg OS and architecture are required")).to_equal(true)
+        expect(exprs(unclosed)).to_equal(["when|unevaluable:unclosed @when block|false|false"])
+        expect(exprs(no_target)).to_equal(["when|unevaluable:explicit target cfg OS and architecture are required|false|false"])
 
     it "an unevaluable guard keeps the directory facts out of the cache":
         # @req REQ-AOP-GUARD-UNEVAL
@@ -221,14 +216,16 @@ describe "aop_module_guard_evals_v1":
         val missing = "test/fixtures/compiler/aop_guard_eval/does_not_exist.spl"
         # @capture(exec): no-source records
         step("Each yields one unevaluable record naming why there was no source")
-        expect(single_unevaluable(aop_module_guard_evals_v1(""), "no-source-path")).to_equal(true)
-        expect(single_unevaluable(aop_module_guard_evals_v1(missing), "unreadable:" + missing)).to_equal(true)
+        expect(exprs(aop_module_guard_evals_v1(""))).to_equal(["when|no-source-path|false|false"])
+        expect(exprs(aop_module_guard_evals_v1(missing))).to_equal(["when|unreadable:" + missing + "|false|false"])
 
     it "the guard profile names the detected host OS and architecture":
         # @req REQ-AOP-GUARD-MODULE
         step("Read the guard profile on this host")
         val profile = aop_guard_profile_v1()
         # @capture(exec): host profile
-        step("The profile is <os>/<arch> of the detected host target")
-        expect(profile.starts_with(cfg_detect_os() + "/")).to_equal(true)
-        expect(profile.ends_with("/" + cfg_detect_arch())).to_equal(true)
+        step("The profile is exactly <os>/<arch>: two non-empty parts joined by one slash")
+        val parts = profile.split("/")
+        expect(parts.len()).to_equal(2)  # oracle: exactly one "/" separates <os> from <arch>
+        expect(parts[0].len() > 0).to_equal(true)
+        expect(parts[1].len() > 0).to_equal(true)

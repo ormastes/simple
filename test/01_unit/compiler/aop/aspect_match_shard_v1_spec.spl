@@ -8,8 +8,9 @@
 
 ## Purpose and audience
 
-Purpose: document and pin the pure contract in
-`src/compiler/00.common/cache_contract/aspect_match_shard_v1.spl`. A directory
+Purpose: document and pin the pure contract in `src/compiler/00.common/cache_contract/aspect_match_shard_v1.spl`.
+
+A directory
 publishes its join-point facts under one SHA-256 facts key; a pointcut selector
 (`execution(...)`, `attr(...)`, `within(...)` combined with `!`, `&`, `|` and
 parentheses) is parsed once into a canonical digest; the pair names a match
@@ -38,12 +39,25 @@ Plan: doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-2
 Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
 Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md
 
-## Decision inventory (MC/DC)
+## Decision inventory (decision/condition, both outcomes)
 
 Line numbers refer to `aspect_match_shard_v1.spl` at the commit this spec
-was written against. "DTO" marks a site reachable only through a
-hand-constructed public struct (the parser never produces that shape); those
-are covered, not excluded.
+was written against. "DTO" marks a site reached only through a
+hand-constructed public struct, not through `pointcut_selector_parse_v1`;
+those are covered, not excluded. Five sites are worth knowing about because
+they are not dead code, just not reachable from a well-formed parse: the
+stale-facts key check (L363/L369) is reachable from a byte decode at
+`directory_join_point_table_v3.spl:108`; L407 is an xxh3 collision
+guard on a cache hit; the unknown atom form at L356 is the total-function
+tail of `_node_matches`; and the `aop_digest_known_v1(f.facts_key)` condition
+at L400 is redundant with the facts-key check. See
+`doc/08_tracking/bug/aspect_match_shard_unknown_atom_fail_open_2026-11-28.md`.
+
+Requirement ids map to the plan
+(`doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md`):
+REQ-AOP-SHARD-A01..A04 are rows A-01..A-04 of
+`doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md`;
+REQ-AOP-SHARD-COV is row AW-0b.
 
 | Line | Decision | Conditions | Covering scenario |
 |------|----------|------------|-------------------|
@@ -55,6 +69,7 @@ are covered, not excluded.
 | 201 | `not ok` | c1 | `foo{` / every identifier |
 | 205 | `s.len() == 0` in `_is_path` | c1 | `within()` |
 | 207-208 | path character class / `not ok` | ident, `.`, `/`, `*` | `within(a.b)`, `within(a/b/*)`, `within(a-b)` |
+| 222 | `p < cs.len() and cs[p] == " "` (`_skip_ws`) | c1, c2 | `attr( x )` vs `attr(x)` |
 | 237, 240, 242 | atom word scan, empty word, bare name | c1, c2 | bare `bar_close`, empty selector |
 | 246 | `r < len and cs[r] != ")"` | c1, c2 | `attr(x` (unclosed) |
 | 247, 249 | skip spaces / unclosed argument | c1 | `attr( x )`, `attr(x` |
@@ -62,6 +77,7 @@ are covered, not excluded.
 | 259-269 | `within` path checks, `/*` tree form, bad star | c1, c2 | `within(b.*)`, `within(a*)`, `within(/*)`, `within(a*b)` |
 | 275-285 | `!` and parenthesised groups, inner failure, missing `)` | c1, c2 | `!call(x)`, `(call(x))`, `(attr(x)`, `(attr(x) attr(y))` |
 | 289-305 | `&` / `|` loops, right operand failure | c1, c2 | `attr(x) & call(y)`, `attr(x) | call(y)` |
+| 309, 310 | `_canon` atom and `not` forms | c1 | any parsed atom; `!attr(logged)` |
 | 315 | `not` or `within_tree` needs the universe | c1, c2 | `!attr(logged)`, `within(b.*)`, `attr(logged)` |
 | 324-332 | parse ok and fully consumed; root is an atom | c1, c2 | `foo{`, `attr(x) attr(y)`, expressions vs atoms |
 | 341 | owner file has no directory | c1 | root-level `top.spl` under `within(a)` |
@@ -69,6 +85,7 @@ are covered, not excluded.
 | 355 | `d == operand or d.starts_with(operand + "/")` | c1, c2 | `within(b.*)` over `b/z.spl` and `b/c/z.spl` |
 | 359 | `not supported or kind != "forward"` | c1, c2 | unsupported selector; `inline` join point |
 | 363, 369 | facts key no longer matches the facts | c1 | DTO facts carrying another directory's key |
+| 382 | `_selector_matches` per join point | c1 | matching and non-matching join points in every directory fixture |
 | 384 | `supported and complete and facts_current` | c1..c3 | unsupported, incomplete, tampered facts |
 | 400 | cacheable: supported, complete, both digests known, key present | c1..c5 | unsupported; incomplete; DTO selector digest; DTO facts key |
 | 402 | empty key | c1 | DTO facts carrying another directory's key |
@@ -165,9 +182,12 @@ fn apply_keys(cache: PointcutMatchCacheV1, key: text, adv: AdviceFacetsV1,
 fn ids(f: DirectoryJoinPointFactsV1, selector: text) -> [text]:
     pointcut_match_shard_compute_v1(pointcut_selector_parse_v1(selector), f).sorted_matching_ids
 
-fn rejected(selector: text) -> bool:
+# Parse result as one comparable value: supported|form|needs_universe|node count.
+val REJECTED = "false|unsupported|true|0"
+
+fn shape(selector: text) -> text:
     val s = pointcut_selector_parse_v1(selector)
-    not s.supported and s.form == "unsupported" and s.needs_universe and s.nodes.len() == 0
+    "{s.supported}|{s.form}|{s.needs_universe}|{s.nodes.len()}"
 
 fn single_shard_cache(key: text, shard: PointcutMatchShardV1) -> PointcutMatchCacheV1:
     var shards: Dict<text, PointcutMatchShardV1> = {}
@@ -287,8 +307,14 @@ describe "A-01 advice body edit":
         val a = advice_apply_key_v1("m", advice("x"), "b1")
         val b = advice_apply_key_v1("m", advice("y"), "b1")
         val c = advice_apply_key_v1("m", advice("x"), "b9")
-        # @capture(exec): three distinct apply keys
-        step("Each body change yields a distinct apply key")
+        # @capture(exec): equal selector digests, distinct apply keys
+        step("The selector digest and match key ignore the advice body; each body change yields a distinct apply key")
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val facts = dir_a([])
+        val shard_x = pointcut_match_shard_compute_v1(sel, facts)
+        val shard_y = pointcut_match_shard_compute_v1(pointcut_selector_parse_v1("attr(logged)"), facts)
+        expect(shard_x.selector_digest).to_equal(shard_y.selector_digest)
+        expect(shard_x.match_digest).to_equal(shard_y.match_digest)
         expect(a == b).to_equal(false)
         expect(a == c).to_equal(false)
 
@@ -373,9 +399,9 @@ describe "A-04 conservative fallback":
     it "rejects unsupported selectors and incomplete inventories as non-cacheable":
         # @req REQ-AOP-SHARD-A04
         step("Parse selectors the static facts cannot answer, and acquire over an incomplete inventory")
-        expect(rejected("call(foo)")).to_equal(true)
-        expect(rejected("attr(x) &")).to_equal(true)
-        expect(rejected("within(a*)")).to_equal(true)
+        expect(shape("call(foo)")).to_equal(REJECTED)
+        expect(shape("attr(x) &")).to_equal(REJECTED)
+        expect(shape("within(a*)")).to_equal(REJECTED)
         val inc = directory_join_point_facts_v1("a", ["a/x.spl"], [], [], false)
         val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
             pointcut_selector_parse_v1("attr(logged)"), inc)
@@ -437,30 +463,30 @@ describe "pointcut selector grammar":
         step("Parse atoms with an empty, unclosed, or out-of-alphabet argument")
         # @capture(exec): every malformed atom is unsupported
         step("Every one is unsupported with no nodes and a universe requirement")
-        expect(rejected("")).to_equal(true)
-        expect(rejected("attr(x")).to_equal(true)
-        expect(rejected("attr(a.b)")).to_equal(true)
-        expect(rejected("execution(*)")).to_equal(true)
-        expect(rejected("execution(a.b*)")).to_equal(true)
-        expect(rejected("execution(a.b)")).to_equal(true)
-        expect(rejected("within()")).to_equal(true)
-        expect(rejected("within(a-b)")).to_equal(true)
-        expect(rejected("within(/*)")).to_equal(true)
-        expect(rejected("within(a*b)")).to_equal(true)
+        expect(shape("")).to_equal(REJECTED)
+        expect(shape("attr(x")).to_equal(REJECTED)
+        expect(shape("attr(a.b)")).to_equal(REJECTED)
+        expect(shape("execution(*)")).to_equal(REJECTED)
+        expect(shape("execution(a.b*)")).to_equal(REJECTED)
+        expect(shape("execution(a.b)")).to_equal(REJECTED)
+        expect(shape("within()")).to_equal(REJECTED)
+        expect(shape("within(a-b)")).to_equal(REJECTED)
+        expect(shape("within(/*)")).to_equal(REJECTED)
+        expect(shape("within(a*b)")).to_equal(REJECTED)
 
     it "fails closed on malformed expressions":
         # @req REQ-AOP-SHARD-A04
         step("Parse operators whose operand is unsupported, unbalanced groups and trailing text")
         # @capture(exec): every malformed expression is unsupported
         step("Every one is unsupported; a valid prefix never leaks a partial selector")
-        expect(rejected("!call(x)")).to_equal(true)
-        expect(rejected("(call(x))")).to_equal(true)
-        expect(rejected("(attr(x)")).to_equal(true)
-        expect(rejected("(attr(x) attr(y))")).to_equal(true)
-        expect(rejected("attr(x) & call(y)")).to_equal(true)
-        expect(rejected("attr(x) | call(y)")).to_equal(true)
-        expect(rejected("attr(x) attr(y)")).to_equal(true)
-        expect(rejected("foo{")).to_equal(true)
+        expect(shape("!call(x)")).to_equal(REJECTED)
+        expect(shape("(call(x))")).to_equal(REJECTED)
+        expect(shape("(attr(x)")).to_equal(REJECTED)
+        expect(shape("(attr(x) attr(y))")).to_equal(REJECTED)
+        expect(shape("attr(x) & call(y)")).to_equal(REJECTED)
+        expect(shape("attr(x) | call(y)")).to_equal(REJECTED)
+        expect(shape("attr(x) attr(y)")).to_equal(REJECTED)
+        expect(shape("foo{")).to_equal(REJECTED)
 
 # @manual_section: Selector algebra (A-04)
 describe "A-04 selector algebra":
@@ -518,6 +544,8 @@ describe "A-04 selector algebra":
         val shard = pointcut_match_shard_compute_v1(odd, dir_a([]))
         # @capture(exec): unknown form evaluates false
         step("The evaluator falls through to false for every join point")
+        # LATENT FAIL-OPEN: this shard is complete = true although the atom was never evaluated; today only the parser builds selectors so the form cannot occur, but AW-3 builds selectors outside the parser. Filed: doc/08_tracking/bug/aspect_match_shard_unknown_atom_fail_open_2026-11-28.md
+        expect(shard.complete).to_equal(true)
         expect(shard.sorted_matching_ids).to_equal([])
 
     it "negation over an incomplete directory is not cacheable":
