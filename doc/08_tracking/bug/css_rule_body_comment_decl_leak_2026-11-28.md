@@ -1,7 +1,7 @@
 # CSS declarations inside `/* */` rule-body comments leak into the cascade
 ## Registered 2026-11-28 by p3sweep5 lane (found while closing html_css_rendering_inventory_lexical_false_pass_2026-09-05)
 
-**Status:** OPEN
+**Status:** fix-implemented-verification-pending (2026-11-28, `work/webrender-css-comment-frac-20261128`: `_css_strip_comments` in `simple_web_html_layout_renderer_core_css_rules.spl`; pinned by `css_rule_body_comment_chrome159_spec`)
 **Severity:** P3
 **Lane observed:** Windows x86_64, tree-built seed
 

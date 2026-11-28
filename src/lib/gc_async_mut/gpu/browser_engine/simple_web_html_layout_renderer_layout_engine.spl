@@ -4,7 +4,7 @@ use std.gc_async_mut.gpu.browser_engine.layout_table.{
     simple_web_collect_table_rows, simple_web_fixed_table_cell_span,
     simple_web_fixed_table_column_count, table_distribute_auto_columns
 }
-use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_layout}
+use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_layout, contain_value_contains_paint}
 use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signed}
 # Text is measured by CODEPOINT, never by UTF-8 byte length. `text.len()` is a
 # BYTE count while `char_code_at(i)` is CODEPOINT indexed, so the old
@@ -412,7 +412,7 @@ fn float_ctx_establishes_bfc(nodes: [HNode], styles: [Style], i: i32, st: Style)
     # `contain: layout` makes the box an independent formatting context. It is
     # also the boundary `layout_selected` re-lays-out WITHOUT going through
     # `layout()`, so its floats must not outlive that partial pass.
-    nodes[i].attrs_raw.len() > 0 and node_contain_layout(nodes[i])
+    st.contain_layout or (nodes[i].attrs_raw.len() > 0 and node_contain_layout(nodes[i]))
 
 # An explicit zero flex-basis (`flex: 1`, `flex: 2 1 0`, `flex-basis: 0`):
 # the basis wins over `width`, so the flex base size is the item's padding
@@ -5050,10 +5050,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         cy = cy + (kept_breaks - 1) * break_line_h
                     # `<br clear>` / `br { clear }`: the next line starts
                     # below the floats it names.
+                    # The float's bottom keeps its fraction (as for a cleared
+                    # block): 30.75px puts the next line at 30.75, not 31.
                     if cst.clear_mode != 0:
                         val br_clear_y = float_ctx_clear_bottom(cst.clear_mode)
-                        if br_clear_y > cy:
-                            cy = br_clear_y
+                        val br_clear_frac = float_ctx_clear_bottom_frac(cst.clear_mode)
+                        if br_clear_y > -2147483648 and br_clear_y.to_i64() * 1000 + br_clear_frac.to_i64() > cy.to_i64() * 1000 + cy_frac.to_i64():
+                            cy = br_clear_y + cursor_advance_px(0, br_clear_frac)
+                            cy_frac = cursor_advance_frac(0, br_clear_frac)
                     if inline_x > max_inline_x:
                         max_inline_x = inline_x
                     in_inline_run = false
@@ -6083,7 +6087,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     not st.position_absolute and not st.position_fixed and st.float_mode == 0 and
                     not st.overflow_hidden and not st.overflow_auto_y and not st.overflow_scroll_y and
                     st.pad_t == 0 and st.border_t == 0 and
-                    not st.contain_layout and not st.contain_paint and
+                    not st.contain_layout and not node_contain_layout(nodes[i]) and
+                    not contain_value_contains_paint(attr_value(nodes[i].attrs_raw, "contain")) and
                     not nodes[i].has_widget_panel_class
                 )
                 val hypo_milli = if parent_top_collapses:
