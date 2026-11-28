@@ -1,0 +1,248 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# HIR imports: every member of an explicit brace list binds
+
+doc/08_tracking/bug/hir_unresolved_first_decl_is_decimal_digit_full_closure_2026-09-04.md:
+in the full Stage-3 closure, HIR lowering dropped exactly ONE member of the
+explicit 18-name `use compiler.driver.driver_compile_vhdl_util.\{...\}` list
+per build, and which member it dropped varied between runs on identical
+source (`_is_decimal_digit` in one run, `_simple_integer_width` in the next).
+Both the explicit-list and the wildcard forms failed; the tree carried a
+wildcard import plus a local duplicate of `_is_decimal_digit` as the
+workaround.
+
+These examples pin the contract the defect violated, against modules shaped
+like the real pair and lowered through the real driver path
+(`module_surfaces_from_modules` + `hirlowering_for_module` + `lower_module`):
+
+- the provider's FIRST declaration is `_is_decimal_digit`, preceded only by
+  a comment header -- the exact shape named in the bug doc;
+- the provider exports more names than the consumer's list names (the real
+  module exports ~40; the list names 18), so the import is a true subset;
+- the consumer uses EVERY member of its explicit list in one function, and
+  after lowering every one of them is bound in the consumer's symbol table;
+- names the list does NOT name stay unbound (an explicit list is precise);
+- with enough glob-imported filler names to force multi-entry hash chains in
+  the per-importer registration memo (1280 entries across a 4096-bucket
+  table -- birthday-paradox collisions, several entries deep),
+  all 18 explicit members still bind -- the collision regime where the
+  defect's chain-table family mis-reported.
+
+The expensive lowerings run ONCE at module load (not per example): the spec
+would otherwise re-parse the whole fixture closure for every `it`.
+
+Re-verification recipe (authoritative, full closure — a warm HIR cache makes
+modules skip lowering, so both cache dirs MUST be fresh):
+
+    export SIMPLE_LIB=$PWD/src
+    export SIMPLE_BINARY=$PWD/build/p3cache/fresh-seed/simple.exe
+    export SIMPLE_HIR_CACHE_DIR=<fresh-dir> TMPDIR=<fresh-dir>
+    # Under concurrently-building sibling lanes:
+    export SIMPLE_MIR_SHARDING=0
+    export SIMPLE_BUILD_MEMORY_RESERVE_BYTES=12884901888
+    build/p3cache/fresh-seed/simple.exe native-build \
+      --backend cranelift \
+      --source src/compositions/cuda_disabled --source src/compiler \
+      --source src/app --source src/lib --source src/os --source src/plugins \
+      --entry-closure --entry src/app/cli/bootstrap_main.spl \
+      --runtime-bundle core-c-bootstrap --timeout 7200 --threads 16 \
+      --cache-dir <fresh-native-cache> --output <out>
+
+Verdict rule (from the bug doc): any `unresolved name` from the explicit list
+while lowering driver_compile_vhdl_expr.spl = defect LIVE; a clean full
+closure = resolver repaired. As of 2026-11-28 the closure lowers clean with
+the explicit list restored (wildcard workaround and local duplicate removed),
+and this spec pins the member-binding contract at unit scale.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:imports
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+# The 18 names the consumer imports, verbatim from the restored
+# driver_compile_vhdl_expr.spl use statement (the construct under test).
+val explicit_members = [
+    "_is_decimal_digit", "_is_decimal_literal", "_simple_decimal_to_i64",
+    "_simple_split_top_level", "_simple_find_top_level", "_simple_is_wrapped_parenthesized",
+    "_simple_vhdl_identifier", "_simple_param_vhdl_name",
+    "vhdl_text_list_contains", "_text_list_index",
+    "_simple_type_to_vhdl", "_simple_integer_width", "_simple_integer_type_for_width",
+    "_simple_implicit_width_type_error", "_simple_strip_return",
+    "_simple_enum_alias_type_name", "_simple_enum_alias_variants", "_simple_enum_alias_payloads"
+]
+
+# Additional provider names (not imported by the consumer) so the provider
+# surface is larger than the import list, mirroring the real module (~40).
+val extra_provider_names = [
+    "_is_ascii_letter", "_simple_join_text", "_simple_decimal_digit_value",
+    "_simple_find_matching_paren", "_text_list_index_from",
+    "_simple_is_implicit_width_integer_type", "_simple_enum_name_from_header",
+    "_simple_enum_variant_name", "_simple_enum_variant_payload_type",
+    "_simple_skip_enum_block", "_simple_enum_block_has_payload",
+    "_simple_vhdl_unsupported_parity_gap", "_simple_vhdl_line_looks_like_memory",
+    "_simple_decorator_payload", "_simple_entity_generic_block",
+    "_simple_generic_type_to_vhdl", "_simple_generic_default_to_vhdl",
+    "_simple_port_name_from_decl", "_simple_clock_ports",
+    "_simple_clocked_assignment", "_simple_clocked_labeled_assignments",
+    "_simple_clock_config", "_simple_clock_token_value", "_simple_reset_value"
+]
+
+fn text_fn(name: text) -> text:
+    "pub fn " + name + "(a: text) -> text:\n    a\n\n"
+
+# The provider source: a comment header, then `_is_decimal_digit` as the
+# FIRST declaration (the bug doc's named shape), then every other name.
+# `pub` keeps the fixture on the explicit public-import lane; the dropped
+# member in the original defect was a private fn, but the per-name
+# registration machinery under test is identical for public callables.
+fn provider_source() -> text:
+    var src = ""
+    var h = 0
+    while h < 16:
+        src = src + "# Provider header line " + h.to_string() + " -- mirrors the real file's comment header.\n"
+        h = h + 1
+    src = src + text_fn("_is_decimal_digit")
+    for name in extra_provider_names:
+        src = src + text_fn(name)
+    for name in explicit_members:
+        if name != "_is_decimal_digit":
+            src = src + text_fn(name)
+    src
+
+# The consumer source: the exact 18-name explicit brace import, then one
+# function that calls every listed member (so a dropped member is a hard
+# `unresolved name` lowering error, as it was in the Stage-3 closure).
+fn consumer_source(with_fillers: bool, filler_count: i64) -> text:
+    var src = ""
+    if with_fillers:
+        var f = 0
+        while f < filler_count:
+            src = src + "use probe.filler" + f.to_string() + ".*\n"
+            f = f + 1
+    src = src + "use probe.driver.vhdl_util.\{" + explicit_members.join(", ") + "\}\n\n"
+    src = src + "fn consume() -> i64:\n"
+    src = src + "    val joined = "
+    var i = 0
+    while i < explicit_members.len():
+        if i > 0:
+            src = src + " + "
+        src = src + explicit_members[i] + "(\"a\")"
+        i = i + 1
+    src = src + "\n    joined.len()\n"
+    src
+
+fn filler_source(index: i64, width: i64) -> text:
+    var src = ""
+    var n = 0
+    while n < width:
+        src = src + "pub fn f" + index.to_string() + "_" + n.to_string() + "(a: text) -> text:\n    a\n\n"
+        n = n + 1
+    src
+
+struct LoweredConsumer:
+    errors: [text]
+    lowering: HirLowering?
+
+fn lower_consumer(with_fillers: bool, filler_count: i64, filler_width: i64) -> LoweredConsumer:
+    val log = Logger(level: 0)
+    var module_names: [text] = ["probe.driver.vhdl_util", "probe.driver.vhdl_expr"]
+    var module_srcs: [text] = [provider_source(), consumer_source(with_fillers, filler_count)]
+    var f = 0
+    while f < filler_count:
+        module_names.push("probe.filler" + f.to_string())
+        module_srcs.push(filler_source(f, filler_width))
+        f = f + 1
+    var modules: Dict<text, Module> = {}
+    var files: [SourceFile] = []
+    var i = 0
+    while i < module_names.len():
+        val path = module_names[i].replace(".", "/") + ".spl"
+        modules[module_names[i]] = parse_full_frontend(module_srcs[i], path, module_names[i], log)
+        files.push(SourceFile(path: path, content: module_srcs[i], module_name: module_names[i]))
+        i = i + 1
+    val surfaces_result = module_surfaces_from_modules(modules, files)
+    if surfaces_result.is_err():
+        return LoweredConsumer(errors: ["surface build failed: " + surfaces_result.unwrap_err()], lowering: None)
+    val surfaces = surfaces_result.unwrap()
+    var errors: [text] = []
+    var consumer_lowering: HirLowering? = None
+    i = 0
+    while i < module_names.len():
+        # Only the provider and consumer are lowered. The glob-imported
+        # fillers exist to populate the consumer's registration memo; that
+        # path reads the frozen SURFACES, never the fillers' HIR, so lowering
+        # 4000+ trivial filler bodies would add nothing but wall time.
+        if with_fillers and not module_names[i].starts_with("probe.filler"):
+            val path = module_names[i].replace(".", "/") + ".spl"
+            var lowering = hirlowering_for_module(path, surfaces)
+            val _hir = lowering.lower_module(modules[module_names[i]])
+            for e in lowering.errors:
+                errors.push(module_names[i] + ": " + e.message)
+            if module_names[i] == "probe.driver.vhdl_expr":
+                consumer_lowering = Some(lowering)
+        elif not with_fillers:
+            val path = module_names[i].replace(".", "/") + ".spl"
+            var lowering = hirlowering_for_module(path, surfaces)
+            val _hir = lowering.lower_module(modules[module_names[i]])
+            for e in lowering.errors:
+                errors.push(module_names[i] + ": " + e.message)
+            if module_names[i] == "probe.driver.vhdl_expr":
+                consumer_lowering = Some(lowering)
+        i = i + 1
+    LoweredConsumer(errors: errors, lowering: consumer_lowering)
+
+fn member_binding_problems(result: LoweredConsumer, members: [text]) -> [text]:
+    var problems: [text] = []
+    if result.lowering.is_none():
+        problems.push("no consumer lowering")
+        return problems
+    val lowering = result.lowering!
+    for m in members:
+        if not lowering.symbols.lookup_or_invalid(m).is_valid():
+            problems.push("member not bound: " + m)
+    problems
+
+# The two expensive fixture closures lower ONCE here, at module load.
+val plain_result = lower_consumer(false, 0, 0)
+# 8 filler modules x 160 names = 1280 glob-registered names across the
+# registration memo's 4096 buckets: birthday-paradox collisions leave
+# several chains multi-entry deep (and the memo-tables spec pins exact
+# same-bucket behavior), so every probe here walks a real chain.
+val stress_result = lower_consumer(true, 8, 160)
+
+describe "explicit 18-name import list from a provider whose first declaration is _is_decimal_digit":
+    it "lowers every module with zero diagnostics and binds all 18 members":
+        print "diagnostics: " + plain_result.errors.join(" | ")
+        expect(plain_result.errors.len()).to_equal(0)
+        expect(member_binding_problems(plain_result, explicit_members).join(",")).to_equal("")
+
+    it "keeps names outside the list unbound (an explicit list is precise)":
+        expect(plain_result.errors.len()).to_equal(0)
+        val lowering = plain_result.lowering!
+        expect(lowering.symbols.lookup_or_invalid("_is_ascii_letter").is_valid()).to_equal(false)
+        expect(lowering.symbols.lookup_or_invalid("_simple_reset_value").is_valid()).to_equal(false)
+
+    it "binds all 18 members with 1280 glob-registered filler names forcing memo hash chains":
+        print "diagnostics: " + stress_result.errors.join(" | ")
+        expect(stress_result.errors.len()).to_equal(0)
+        expect(member_binding_problems(stress_result, explicit_members).join(",")).to_equal("")
+
+    it "still binds every filler name it glob-imported alongside the explicit list":
+        expect(stress_result.errors.len()).to_equal(0)
+        var sample: [text] = []
+        var f = 0
+        while f < 8:
+            sample.push("f" + f.to_string() + "_" + (f * 159 % 160).to_string())
+            f = f + 1
+        expect(member_binding_problems(stress_result, sample).join(",")).to_equal("")

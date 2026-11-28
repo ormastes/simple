@@ -24,6 +24,7 @@ use std.gc_async_mut.gpu.browser_engine.script.script_runner.{ScriptRunner, run_
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{
     script_host_apply_action_to_route
 }
+use std.gc_async_mut.gpu.browser_engine.script.simple_script_vm.{SimpleScriptDomVm}
 use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptFetchRequest,
     ScriptFetchResponse, fetch_send, script_fetch_to_net_request,
     script_response_from_net}
@@ -41,6 +42,7 @@ pub class SimpleScriptExecutor:
         _dom_dirty      - true if Simple code mutated the DOM
         fetch_dispatch  - optional FetchDispatch for fetch() API
         _runner         - canonical browser Simple/JavaScript runner
+        dom_vm          - constrained in-process Simple DOM script VM
     """
     _dom_root: BeDomNode
     _dom_generation: DomDocumentGeneration?
@@ -53,9 +55,11 @@ pub class SimpleScriptExecutor:
     _callback_count: i64
     fetch_dispatch: FetchDispatch?
     _runner: ScriptRunner
+    dom_vm: SimpleScriptDomVm
 
     static fn new(event_loop: EventLoop, console_buf: ConsoleBuffer) -> SimpleScriptExecutor:
         """Create a SimpleScriptExecutor with empty DOM root."""
+        val vm = SimpleScriptDomVm.new(console_buf)
         SimpleScriptExecutor(
             _dom_root: BeDomNode.element("div"),
             _dom_generation: None,
@@ -67,7 +71,8 @@ pub class SimpleScriptExecutor:
             _callback_sources: [],
             _callback_count: 0,
             fetch_dispatch: None,
-            _runner: ScriptRunner.new()
+            _runner: ScriptRunner.new(),
+            dom_vm: vm
         )
 
     me install_document_state(
@@ -89,6 +94,9 @@ pub class SimpleScriptExecutor:
         self._dom_root = dom_root
         self._dom_generation = Some(generation)
         self._dom_identity_index = Some(index)
+        var vm = self.dom_vm
+        vm.install_document(dom_root, replaces_document)
+        self.dom_vm = vm
         # Assign on a local before storing back: chained field assignment
         # (self._runner.x = ...) fails under the interpreter with
         # "invalid assignment: cannot assign field on non-object value".

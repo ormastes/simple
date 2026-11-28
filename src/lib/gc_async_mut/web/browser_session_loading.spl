@@ -36,6 +36,9 @@ use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{canvas_get_context_si
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{
     event_loop_clock_micros
 }
+use std.gc_async_mut.gpu.browser_engine.script.simple_script_vm.{
+    simple_script_is_dom_statement, simple_script_source_uses_dom
+}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     BROWSER_MAX_DOCUMENT_SUBRESOURCES, BROWSER_MAX_RESOURCE_BYTES,
     browser_resource_size_allowed
@@ -616,6 +619,27 @@ impl BrowserSession:
             if line == "simple3d.submit_webgpu":
                 submit_simple3d_webgpu = true
                 continue
+            if simple_script_is_dom_statement(line) or simple_script_source_uses_dom(script_source):
+                var vm = self.simple_script_executor.dom_vm
+                vm.install_document(self.current_dom, false)
+                val ok = vm.execute(script_source)
+                if not ok:
+                    self._simple_script_warning(load, "simple script error: {vm.error}")
+                else:
+                    if vm.title_dirty:
+                        self._set_simple_script_title(vm.title)
+                        vm.title_dirty = false
+                    if vm.dom_dirty:
+                        val next_dom = vm.dom
+                        val vm_structural = vm.structural_dirty
+                        vm.dom_dirty = false
+                        vm.structural_dirty = false
+                        self.simple_script_executor.dom_vm = vm
+                        val _ = self._publish_runtime_body_candidate(next_dom, vm_structural)
+                    else:
+                        self.simple_script_executor.dom_vm = vm
+                    self._sync_simple_script_scroll_tops()
+                break
             self._simple_script_warning(load, "simple script unsupported command: {line}")
         if has_simple2d_commands:
             self._set_simple_script_body_html(simple2d.to_canvas2d_json())

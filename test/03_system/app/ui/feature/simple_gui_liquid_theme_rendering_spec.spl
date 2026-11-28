@@ -1,0 +1,150 @@
+# @cover src/app/ui.browser/backend.spl 80%
+# @cover src/app/ui.render/html_widgets.spl 80%
+# @cover src/app/ui.web/html.spl 80%
+# @cover src/app/ui.web/html_css.spl 80%
+use std.spec.{describe, it, expect, step}
+use common.ui.widget.{UIState, UITree, UIMode, UIEvent}
+use common.ui.builder.{panel, column, row, tabs, text_widget, scroll, text_input, text_field, textarea, with_width, build_tree}
+use common.ui.state.{init_state, update_state}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, web_render_adapter_request, web_render_full_html}
+use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
+use nogc_sync_mut.ui.session.{UISession}
+use app.ui.render.html_widgets.{render_html_widget, render_html_tree}
+use app.ui.web.html.{generate_css, wm_root_data_attrs}
+use app.ui.web.html_css.{generate_css as generate_modular_css}
+use app.ui.browser.backend.{
+    BrowserBackend,
+    browser_theme_composed_css,
+    browser_cpu_raster_css_overrides
+}
+
+fn _render_sdn_doc(sdn_path: text, theme_override: text, w: i32, h: i32) -> (text, text, text):
+    var tree = parse_ui_to_tree(sdn_path).unwrap()
+    if theme_override != "":
+        tree = tree.with_theme(theme_override)
+    var session = UISession.new(tree)
+    session.dispatch(UIEvent.Resize(w, h))
+    val state = session.current_state()
+    val theme = state.tree.theme_name()
+    val body = render_html_tree(state.tree.root_node(), state)
+    val base_css = browser_theme_composed_css(theme)
+    val overrides = browser_cpu_raster_css_overrides(theme)
+    val req = web_render_adapter_request(
+        WEB_RENDER_TARGET_PURE_SIMPLE,
+        "",
+        "",
+        body,
+        base_css + "\n" + overrides,
+        "",
+        w,
+        h
+    ).with_root_attrs(wm_root_data_attrs(theme))
+    (theme, overrides, web_render_full_html(req))
+
+describe "Simple GUI Liquid Theme Rendering System Spec":
+    it "preserves radial and linear ambient aura and specular borders in CPU raster overrides across all four Liquid Glass themes":
+        step("Verify fluid_dark, glass_dark, glass_obsidian_dark, and fluid_light CPU raster CSS overrides")
+        val dark_themes = ["fluid_dark", "glass_dark", "glass_obsidian_dark"]
+        for theme_id in dark_themes:
+            val css = browser_cpu_raster_css_overrides(theme_id)
+            expect(css).to_contain("backdrop-filter: none !important;")
+            expect(css).to_contain("body::before, body::after")
+            expect(css).to_contain("radial-gradient(")
+            expect(css).to_contain("linear-gradient(")
+            expect(css).to_contain("border-top-color: rgba(255,255,255,0.22) !important;")
+
+        val light_css = browser_cpu_raster_css_overrides("fluid_light")
+        expect(light_css).to_contain("backdrop-filter: none !important;")
+        expect(light_css).to_contain("radial-gradient(")
+        expect(light_css).to_contain("linear-gradient(")
+        expect(light_css).to_contain("border-top-color: rgba(255,255,255,0.85) !important;")
+
+    it "emits distinct Liquid Dark and Liquid Light palette variables in both html.spl and html_css.spl":
+        step("Verify fluid_dark and fluid_light CSS tokens are never demoted to Catppuccin dark defaults")
+        val fd_css = generate_css("fluid_dark")
+        val fl_css = generate_css("fluid_light")
+        val fd_mod = generate_modular_css("fluid_dark")
+        val fl_mod = generate_modular_css("fluid_light")
+
+        expect(fd_css).to_contain("--ui-bg: #080d17;")
+        expect(fd_css).to_contain("--ui-accent: #4da3ff;")
+        expect(fl_css).to_contain("--ui-bg: #faf9fe;")
+        expect(fl_css).to_contain("--ui-text: #1a1b1f;")
+        expect(fl_css).to_contain("--ui-accent: #0058bc;")
+        expect(fd_mod).to_contain("#080d17")
+        expect(fl_mod).to_contain("#faf9fe")
+
+    it "emits gap and min-width/min-height zero on vbox and hbox panels and valid HTML widget focus states":
+        step("Verify column, row, panel scaling, tabs, scroll offset, and focused inputs")
+        val vb = column("vb_1", [text_widget("t_1", "A")])
+        val hb = row("hb_1", [text_widget("t_2", "B")])
+        val vb_html = render_html_widget(vb, init_state(build_tree(vb)))
+        val hb_html = render_html_widget(hb, init_state(build_tree(hb)))
+        expect(vb_html).to_contain("gap: 12px; min-width: 0; min-height: 0;")
+        expect(hb_html).to_contain("gap: 12px; min-width: 0; min-height: 0;")
+
+        val narrow = with_width(panel("sidebar", "Sidebar", []), 30)
+        val wide = with_width(panel("wide_panel", "Wide", []), 250)
+        expect(render_html_widget(narrow, init_state(build_tree(narrow)))).to_contain("width: 240px; min-width: 210px; flex: none;")
+        expect(render_html_widget(wide, init_state(build_tree(wide)))).to_contain("width: 250px; flex: none;")
+
+        val inp = text_input("search_input", "Search")
+        val tf = text_field("edit_field", "val", "Placeholder")
+        val ta = textarea("notes_area", "body", "Notes", 3)
+        val form_tree = build_tree(column("form_root", [inp, tf, ta]))
+        val focused_inp = UIState(tree: form_tree, mode: UIMode.Insert, focused_id: "search_input", command_buffer: "")
+        val inp_html = render_html_widget(inp, focused_inp)
+        expect(inp_html).to_contain("data-target-id=\"search_input\"")
+        expect(inp_html).to_contain("data-focused=\"true\"")
+        expect(inp_html).to_contain("border: 2px solid #38bdf8; outline: none;")
+        expect(render_html_widget(tf, focused_inp).contains("data-focused=\"true\"")).to_equal(false)
+
+        val t = tabs("nav_tabs", ["Overview", "Details"])
+        var tab_state = init_state(build_tree(t))
+        tab_state = update_state(tab_state, UIEvent.Action(name: "tab_nav_tabs_1"))
+        expect(render_html_widget(tab_state.tree.root_node(), tab_state)).to_contain("id=\"ui_action_tab_nav_tabs_1\"")
+
+        val sc = scroll("scroll_area", 100, [text_widget("line_0", "Row 0")])
+        sc.set_prop("scroll_offset", "36")
+        expect(render_html_widget(sc, init_state(build_tree(sc)))).to_contain("margin-top: -36px;")
+
+    it "builds themed HTML documents with Liquid Glass styling for real .ui.sdn example apps":
+        step("Render Kitchen Sink (fluid_dark), Button/Checkbox/Dropdown (fluid_light & glass_dark), Scroll/Textarea (glass_dark), and SimpleOS Web WM (glass_obsidian_dark)")
+        val (t1, o1, h1) = _render_sdn_doc("examples/06_io/ui/demo_kitchen_sink.ui.sdn", "fluid_dark", 960, 640)
+        expect(t1).to_equal("fluid_dark")
+        expect(o1).to_contain("radial-gradient(")
+        expect(h1).to_contain("data-wm-theme=\"fluid_dark\"")
+        expect(h1).to_contain("Kitchen Sink Demo")
+
+        val (t2, o2, h2) = _render_sdn_doc("examples/06_io/ui/demo_button_checkbox_dropdown.ui.sdn", "fluid_light", 640, 420)
+        expect(t2).to_equal("fluid_light")
+        expect(o2).to_contain("rgba(255,255,255,0.85)")
+        expect(h2).to_contain("data-wm-theme=\"fluid_light\"")
+        expect(h2).to_contain("Accept Terms")
+
+        val (t3, o3, h3) = _render_sdn_doc("examples/06_io/ui/demo_button_checkbox_dropdown.ui.sdn", "", 640, 420)
+        expect(t3).to_equal("glass_dark")
+        expect(o3).to_contain("rgba(255,255,255,0.22)")
+        expect(h3).to_contain("data-wm-theme=\"glass_dark\"")
+
+        val (t4, _, h4) = _render_sdn_doc("examples/06_io/ui/demo_scroll_textarea.ui.sdn", "", 640, 420)
+        expect(t4).to_equal("glass_dark")
+        expect(h4).to_contain("widget-scroll")
+        expect(h4).to_contain("widget-textarea")
+
+        val (t5, o5, h5) = _render_sdn_doc("examples/06_io/ui/simpleos_web_wm.ui.sdn", "glass_obsidian_dark", 640, 420)
+        expect(t5).to_equal("glass_obsidian_dark")
+        expect(o5).to_contain("radial-gradient(")
+        expect(h5).to_contain("SimpleOS hosted desktop shell")
+
+    it "rasterizes SimpleOS Web WM via Pure-Simple BrowserBackend in cpu_simd mode with full viewport pixel buffer":
+        step("Execute BrowserBackend.render_frame on simpleos_web_wm.ui.sdn (640x420, glass_obsidian_dark)")
+        var tree = parse_ui_to_tree("examples/06_io/ui/simpleos_web_wm.ui.sdn").unwrap()
+        tree = tree.with_theme("glass_obsidian_dark")
+        var session = UISession.new(tree)
+        session.dispatch(UIEvent.Resize(640, 420))
+        val backend = BrowserBackend.create(640, 420, "cpu_simd", "pure_simple").unwrap()
+        backend.render_frame(session.current_state().tree, session.current_state())
+        expect(backend.last_artifact_pixels).to_equal(268800)
+        expect(backend.content_height).to_be_greater_than(0)
+        expect(backend.last_artifact_html).to_contain("border-top-color: rgba(255,255,255,0.22) !important;")

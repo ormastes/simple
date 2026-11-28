@@ -181,3 +181,29 @@ an uncontended build window — neither available on this Windows worktree.
 The prior classification stands: capacity-gated re-verification of an
 already-landed fix, NOT hardware-gated. Status remains OPEN only for the
 missing 8K timing/parity receipt.
+
+## 2026-11-28 — no longer reproduces on linux-aarch64 (lavapipe + NVIDIA GB10)
+
+The reproducer itself had rotted: `bench_vulkan_8k_retained_damage.spl` called
+`present_damage_plan(DamageFramePlan)` and read `damage_readback_*` counters,
+none of which exist in `backend_vulkan.spl` on release/1.0.0 or origin/main, so
+strict JIT refused it at HIR lowering. The bench now uses the production
+`stage_present_damage(rects)` + `present()` route, accumulates the per-frame
+`present_readback_bytes` / `frame_full_fallback` receipts, keeps the direct
+external `host_buf[i]` reads that used to crash, and cross-checks them against
+`sample_host_mirror`. Seed `cargo-target-wm-unitalias-1126` (sha256
+352b80a734463098, vulkan feature), `SIMPLE_JIT_STRICT=1`, 7680x4320, 10/200:
+
+| ICD | status | p50 ns | p95 ns | bytes | parity | max RSS KiB |
+|---|---|---|---|---|---|---|
+| lavapipe | pass | 288148 | 696986 | 3276800 | true | 1205296 |
+| NVIDIA GB10 | pass | 148306 | 251220 | 3276800 | true | 1125568 |
+
+Fixing changes: `4051bc8c494` and `fda534d0dd4`. The missing presenter API is
+tracked separately as
+`vulkan_damage_plan_present_api_absent_orphaned_specs_2026-11-28`. The bench's
+`rss_kb()` prints 0 under strict JIT (tracked as
+`bench_vulkan_8k_rss_kb_reports_zero_strict_jit_2026-11-28`); use
+`/usr/bin/time -v` for RSS. Each run logs one `hybrid-interp-splice` demotion
+for `rt_bytes_alloc,spl_str_ptr`. The seed carries two unlanded unit-alias
+commits (`71eb0bdd009`, `d25b5aad4a5`) unrelated to this path.

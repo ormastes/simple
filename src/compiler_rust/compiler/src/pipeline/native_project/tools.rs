@@ -948,6 +948,146 @@ pub(crate) fn build_core_c_runtime_supplement_library(build_dir: &Path) -> Optio
     build_c_runtime_library(build_dir, false, true, false, &super::piped_observer::PipedObserverSelection::CoreC)
 }
 
+/// Project the dynamic-runtime lane's core-C supplement against the shared
+/// runtime that owns the link.
+///
+/// The raw supplement archive defines ~2.5k runtime globals, most of which the
+/// shared runtime also exports: pulling it whole after `-l<runtime>` installs
+/// C copies that override the Rust-side bindings process-wide (measured seam:
+/// doc/08_tracking/bug/dynamic_runtime_lane_dual_rt_definitions_2026-09-06.md).
+/// This is the `build_stage4_rust_runtime_projection_archive` discipline in
+/// the opposite direction: retain STRONG only the single-defined archive
+/// globals the shared runtime does NOT own (the C-only gap the supplement
+/// exists for), and declare every runtime-ABI symbol the shared runtime owns
+/// allowed-external, so closure passengers are WEAKENED to owner-overridable
+/// fallbacks instead of riding along as strong duplicates. The projector's own
+/// oracles reject any strong owner-provided symbol and any root that does not
+/// have exactly one archive definition, so the single-owner contract is
+/// enforced mechanically rather than by link precedence.
+pub(crate) fn project_dynamic_runtime_core_c_supplement(
+    supplement_archive: &Path,
+    shared_runtime_owned: &HashSet<String>,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    let (core_defined, _) = archive_global_symbols(supplement_archive).map_err(|err| {
+        format!(
+            "dynamic-runtime supplement: cannot read defined symbols of {}: {err}",
+            supplement_archive.display()
+        )
+    })?;
+    if core_defined.is_empty() {
+        return Err(format!(
+            "dynamic-runtime supplement {} defines no symbols -- refusing to link with an unknown supplement authority",
+            supplement_archive.display()
+        ));
+    }
+    let requested = dynamic_runtime_supplement_gap_symbols(&core_defined, shared_runtime_owned);
+    if requested.is_empty() {
+        return Err(
+            "dynamic-runtime lane: the shared runtime owns every supplement symbol, so the C-only gap the supplement exists to close is empty -- refusing to link on a stale runtime authority"
+                .to_string(),
+        );
+    }
+    let allowed_external: Vec<String> = shared_runtime_owned
+        .iter()
+        .map(|name| canonical_archive_symbol(name).to_string())
+        .filter(|name| name.starts_with("rt_") || name.starts_with("spl_"))
+        .collect();
+    project_stage4_archive_closure(
+        &[supplement_archive],
+        &requested,
+        &allowed_external,
+        temp_dir,
+        "dynamic_runtime_core_c",
+    )
+}
+
+/// Archive globals with exactly one defining member that the shared runtime
+/// does not own at all: the C-only gap the supplement must still supply.
+///
+/// Single-member only, because `project_stage4_archive_closure` rejects any
+/// root with != 1 archive definitions. No prefix filter: any global the
+/// supplement uniquely defines and the shared runtime lacks stays available,
+/// matching the lazy extraction semantics of the raw archive this projection
+/// replaces. `shared_runtime_owned` is the shared runtime's dynamic EXPORT
+/// surface (`read_shared_runtime_export_set`, already Mach-O-underscore-
+/// canonical); the supplement side is canonicalized here from raw `nm` names.
+fn dynamic_runtime_supplement_gap_symbols(
+    core_defined: &BTreeMap<String, usize>,
+    shared_runtime_owned: &HashSet<String>,
+) -> Vec<String> {
+    let owned: HashSet<&str> = shared_runtime_owned.iter().map(String::as_str).collect();
+    let mut requested: Vec<String> = core_defined
+        .iter()
+        .filter(|(_, count)| **count == 1)
+        .map(|(raw, _)| canonical_archive_symbol(raw))
+        .filter(|name| !owned.contains(name))
+        .map(str::to_string)
+        .collect();
+    requested.sort();
+    requested
+}
+
+#[cfg(test)]
+mod dynamic_runtime_supplement_tests {
+    use super::dynamic_runtime_supplement_gap_symbols;
+    use std::collections::{BTreeMap, HashSet};
+
+    // nm-raw names: Mach-O prefixes every C symbol with `_`.
+    fn raw(name: &str) -> String {
+        if cfg!(target_os = "macos") {
+            format!("_{name}")
+        } else {
+            name.to_string()
+        }
+    }
+
+    fn defined(names: &[(&str, usize)]) -> BTreeMap<String, usize> {
+        names.iter().map(|(name, count)| (raw(name), *count)).collect()
+    }
+
+    fn owned(names: &[&str]) -> HashSet<String> {
+        // read_shared_runtime_export_set output is already Mach-O-canonical.
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn gap_keeps_only_single_defined_symbols_the_runtime_lacks() {
+        let core = defined(&[
+            ("rt_alloc", 1),
+            ("rt_array_push", 1),
+            ("spl_driver_create_iocp", 1),
+            ("__simple_pow", 1),
+            ("rt_multi_defined", 2),
+        ]);
+        let runtime = owned(&["rt_array_push", "rust_eh_personality"]);
+        assert_eq!(
+            dynamic_runtime_supplement_gap_symbols(&core, &runtime),
+            ["__simple_pow", "rt_alloc", "spl_driver_create_iocp"]
+        );
+    }
+
+    #[test]
+    fn prefix_free_gap_globals_stay_available() {
+        // Retention roots such as prof_sample_force_link carry no rt_/spl_
+        // prefix; excluding them would regress the closure the raw archive
+        // serves today, so the gap set is prefix-blind.
+        let core = defined(&[("prof_sample_force_link", 1), ("rt_terminal_is_tty", 1)]);
+        let runtime = owned(&["rt_terminal_is_tty"]);
+        assert_eq!(
+            dynamic_runtime_supplement_gap_symbols(&core, &runtime),
+            ["prof_sample_force_link"]
+        );
+    }
+
+    #[test]
+    fn fully_owned_supplement_yields_empty_gap() {
+        let core = defined(&[("rt_array_push", 1), ("rt_string_concat", 1)]);
+        let runtime = owned(&["rt_array_push", "rt_string_concat"]);
+        assert!(dynamic_runtime_supplement_gap_symbols(&core, &runtime).is_empty());
+    }
+}
+
 pub(crate) fn build_stage4_compiler_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
     // The compiler backfill owns the real Cranelift hooks. Keep ordinary
     // bootstrap's named-trap stubs out of this archive to prevent overlap.

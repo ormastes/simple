@@ -1,0 +1,166 @@
+# Regression spec for browser perf, UI symbol fallback anti-tofu, and fast PNG encode.
+# @tag: unit, browser_engine, css, font, png
+
+use std.spec.{describe, context, it, expect}
+use std.common.image.png_encode.{encode_argb_to_png, encode_argb_to_png_rgb}
+use std.common.image.png_decode.{decode_png_to_argb}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    extract_css_vw, filter_rules_for_dom, compute_styles,
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_last_layout_hit_snapshot_reset,
+    simple_web_last_layout_hit_snapshot,
+    simple_web_last_layout_hit_boxes,
+    simple_web_last_layout_doc_bottom
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_css_rules.{
+    simple_web_layout_css_extract_cache_reset,
+    simple_web_layout_css_extract_cache_hits,
+    simple_web_layout_css_extract_cache_misses
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    parse_html, build_child_index
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_gradients_text.{
+    ClipRect, ttf_measure_text_px_milli, ttf_paint_text_aa_clip_range_adv
+}
+
+fn _count_changed_pixels(fb: [u32], bg: u32, w: i32, x0: i32, y0: i32, x1: i32, y1: i32) -> i32:
+    var count = 0
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            if fb[y * w + x] != bg:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+describe "Browser perf, Unicode UI symbol fallback, and fast PNG encode":
+
+    context "Single-pass PNG encoding":
+
+        it "round-trips RGB and RGBA buffers across multi-block thresholds":
+            var px: [u32] = []
+            var i = 0
+            while i < 16:
+                val a = ((i * 15) + 15) as u32
+                val r = ((i * 17) & 255) as u32
+                val g = ((255 - i * 13) & 255) as u32
+                val b = ((i * 31) & 255) as u32
+                px.push((a << 24) | (r << 16) | (g << 8) | b)
+                i = i + 1
+            val rgb_png = encode_argb_to_png_rgb(px, 4, 4)
+            expect(rgb_png[0]).to_equal(137u8)
+            expect(rgb_png[1]).to_equal(80u8)
+            expect(rgb_png[25]).to_equal(2u8)
+            match decode_png_to_argb(rgb_png):
+                Ok(dec_rgb):
+                    expect(dec_rgb.width).to_equal(4)
+                    expect(dec_rgb.height).to_equal(4)
+                    expect(dec_rgb.pixels[0] & 0x00FFFFFFu32).to_equal(px[0] & 0x00FFFFFFu32)
+                    expect(dec_rgb.pixels[15] & 0x00FFFFFFu32).to_equal(px[15] & 0x00FFFFFFu32)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+            val rgba_png = encode_argb_to_png(px, 4, 4)
+            expect(rgba_png[25]).to_equal(6u8)
+            match decode_png_to_argb(rgba_png):
+                Ok(dec_rgba):
+                    expect(dec_rgba.pixels[5]).to_equal(px[5])
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "handles zero dimensions and >65535 byte stored DEFLATE block boundaries":
+            val empty_png = encode_argb_to_png_rgb([], 0, 0)
+            expect(empty_png.len()).to_equal(68)
+            val w = 220
+            val h = 110
+            var multi: [u32] = [0xFF224466u32; w * h]
+            multi[0] = 0xFFAA1122u32
+            multi[w * h - 1] = 0xFF33DD44u32
+            val multi_png = encode_argb_to_png_rgb(multi, w, h)
+            match decode_png_to_argb(multi_png):
+                Ok(decoded):
+                    expect(decoded.width).to_equal(w)
+                    expect(decoded.height).to_equal(h)
+                    expect(decoded.pixels[0]).to_equal(0xFFAA1122u32)
+                    expect(decoded.pixels[w * h - 1]).to_equal(0xFF33DD44u32)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+    context "CSS extract cache and DOM-guided dead-rule pruning":
+
+        it "hits CSS parse cache when DOM text changes while <style> stays unchanged":
+            simple_web_layout_css_extract_cache_reset()
+            val css = "<style>:root {{ --accent: #2563eb; }} .card {{ color: var(--accent); }} .unused-ios {{ width: 99px; }} .unused-wm > .child {{ height: 55px; }}</style>"
+            val h1 = "<html><head>{css}</head><body><div id=\"main\" class=\"card\">A</div></body></html>"
+            val h2 = "<html><head>{css}</head><body><div id=\"main\" class=\"card\">B</div><span>C</span></body></html>"
+            val r1 = extract_css_vw(h1, 960, false)
+            expect(simple_web_layout_css_extract_cache_misses()).to_equal(1)
+            val r2 = extract_css_vw(h2, 960, false)
+            expect(simple_web_layout_css_extract_cache_hits()).to_equal(1)
+            expect(r1.group_parts.len()).to_equal(r2.group_parts.len())
+
+        it "prunes dead selectors while preserving exact computed styles":
+            val css = """
+                * {{ box-sizing: border-box; }}
+                :root {{ --fg: #112233; }}
+                .card {{ color: var(--fg); width: 120px; }}
+                .missing-ios-pill {{ color: #ff0000; width: 400px; }}
+                #missing-id > .card {{ width: 500px; }}
+                div.card:not(.nonexistent-state) {{ height: 48px; }}
+            """
+            val html = "<html><head><style>{css}</style></head><body><div id=\"card1\" class=\"card\">Hi</div></body></html>"
+            val nodes = parse_html(html)
+            val rules = extract_css_vw(html, 800, false)
+            val filtered = filter_rules_for_dom(rules, nodes)
+            expect(filtered.group_parts.len() < rules.group_parts.len()).to_equal(true)
+            val ci = build_child_index(nodes)
+            val full_styles = compute_styles(nodes, rules, ci, false, true, 800, 600)
+            val pruned_styles = compute_styles(nodes, filtered, ci, false, true, 800, 600)
+            var idx = -1
+            var i = 0
+            while i < nodes.len():
+                if nodes[i].id_attr == "card1":
+                    idx = i
+                i = i + 1
+            expect(idx >= 0).to_equal(true)
+            expect(pruned_styles[idx].width_px).to_equal(full_styles[idx].width_px)
+            expect(pruned_styles[idx].height_px).to_equal(full_styles[idx].height_px)
+            expect(pruned_styles[idx].fg).to_equal(full_styles[idx].fg)
+
+    context "Single-pass layout hit-box snapshot":
+
+        it "records hit boxes and document bottom from pure_simple layout":
+            simple_web_last_layout_hit_snapshot_reset()
+            val html = "<html><body><div id=\"hdr\" style=\"width:200px;height:40px;\">Top</div><div id=\"cta\" style=\"width:140px;height:36px;\">Go</div></body></html>"
+            val res = simple_web_layout_render_html_draw_ir_result(html, 640, 480)
+            expect(res.render_degraded).to_equal(false)
+            val snap = simple_web_last_layout_hit_snapshot()
+            expect(snap.valid).to_equal(true)
+            expect(snap.width).to_equal(640)
+            expect(snap.height).to_equal(480)
+            expect(simple_web_last_layout_doc_bottom() >= 76).to_equal(true)
+            val boxes = simple_web_last_layout_hit_boxes()
+            expect(boxes.len() >= 2).to_equal(true)
+
+    context "Unicode UI symbol fallback measurement and rasterization":
+
+        it "measures proportional width and paints crisp non-tofu pixels for UI icons":
+            val bg = 0xFFFFFFFFu32
+            val w = 160
+            val h = 40
+            val icons = "\u25BC\u25B6\u2713\u2715\u2022"
+            val w_px = ttf_measure_text_px_milli(icons, 0, icons.byte_len(), 16, 16000, "", "sans-serif", false, false)
+            expect(w_px).to_equal(60)
+            var fb: [u32] = [bg; w * h]
+            val clip = ClipRect(x0: 8, y0: 4, x1: 90, y1: 36)
+            fb = ttf_paint_text_aa_clip_range_adv(
+                fb, w, h, 10, 26, icons, 0, icons.byte_len(),
+                0x80112233u32, 16, "", "sans-serif", false, false,
+                clip, [], 16000
+            )
+            expect(_count_changed_pixels(fb, bg, w, 10, 8, 80, 32) > 40).to_equal(true)
+            expect(_count_changed_pixels(fb, bg, w, 0, 0, 8, h)).to_equal(0)
+            expect(_count_changed_pixels(fb, bg, w, 90, 0, w, h)).to_equal(0)

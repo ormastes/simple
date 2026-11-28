@@ -1,0 +1,109 @@
+# @tag: unit, text, sfnt, gray, perf
+# @cover src/lib/common/encoding/sfnt_glyf.spl 2%
+#
+# Bounded regression for
+# web_4x_gray_glyph_aaa_first_phase_walk_interpreter_cost_2026-11-28.
+#
+# The first quarter phase of a gray glyph fills through the Skia AAA walker
+# port (`_lcd_aaa_mask`). On the interpreter lane its cost is statement
+# count: the walk steps every active edge of every quarter-height strip
+# (~22 statements per step), and every trapezoid row composites through the
+# accumulate plane and `_aaa_flush`. The fix is a statement diet, keeping
+# masks byte-identical (`sfnt_gray_aaa_replay_spec` is the oracle):
+#   - the edge sort buckets by top pixel row (stable counting sort over the
+#     path bounds) instead of a plain insertion sort that is quadratic
+#     whenever a contour's edge tops run against the sort key (crafted or
+#     CJK-scale outlines);
+#   - the walk reuses loads per edge step, computes the neighbour-run
+#     blitter test once per span instead of twice, and inlines the
+#     per-strip cross/link helpers (a call costs several statements here);
+#   - the record counter stays in a local and is stored once per walk;
+#   - `_aaa_flush` and `_aaa_alpha_above/below` drop redundant per-pixel
+#     arithmetic.
+#
+# Anchor 1 exercises the synthetic descending zigzag (the old edge sort's
+# worst case) for byte-determinism through the bucketed sort and records
+# the n -> 2n cost as scaling evidence.
+#
+# Anchor 2 bounds the record's real scenario - cold first-phase raster of
+# distinct 64 px gray glyphs (record + fill, no memo hits) - catching any
+# reintroduction of per-pixel interpreted loops. Wall bounds on the
+# interpreter lane are host-sensitive, so this bound is generous and only
+# guards multi-x regressions; the byte-identity oracle above is the tight
+# guard for the output.
+
+use std.spec.*
+use std.gc_async_mut.io.time_ops.{time_now_micros}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYF_MOVE,
+    SFNT_GLYF_LINE, SfntGlyfCommand, sfnt_gray_glyph_outline, sfnt_gray_outline_raster,
+    _lcd_aaa_mask}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val FONT_PATH: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+
+# Narrow descending zigzag: one 1 px edge per row between x 1 and 2, tops
+# strictly descending along the path (the old insertion sort's worst case),
+# closed by one long edge. The interior is hairline, so walk and fill stay
+# linear and small: the edge count shows up almost entirely in the sort.
+fn narrow_saw(n: i64) -> [SfntGlyfCommand]:
+    var cmds: [SfntGlyfCommand] = []
+    cmds.push(SfntGlyfCommand(verb: SFNT_GLYF_MOVE, x1: 0.0, y1: 0.0, x2: 0.0, y2: 0.0))
+    cmds.push(SfntGlyfCommand(verb: SFNT_GLYF_LINE, x1: 1.0, y1: -1.0, x2: 0.0, y2: 0.0))
+    var k: i64 = 2
+    while k <= n:
+        val x = if k % 2 == 0: 2.0 else: 1.0
+        cmds.push(SfntGlyfCommand(verb: SFNT_GLYF_LINE, x1: x, y1: 0.0 - k as f64,
+            x2: 0.0, y2: 0.0))
+        k = k + 1
+    cmds
+
+fn masks_equal(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len(): return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]: return false
+        i = i + 1
+    true
+
+describe "Gray AAA first-phase interpreter cost":
+    it "keeps the descending-top contour deterministic through the bucketed sort":
+        val m1 = _lcd_aaa_mask(narrow_saw(1000), 1.0, 0.0, 0, 0.0, 3, 1002, 1, [])
+        val m2 = _lcd_aaa_mask(narrow_saw(1000), 1.0, 0.0, 0, 0.0, 3, 1002, 1, [])
+        expect(masks_equal(m1, m2)).to_equal(true)
+        expect(m1.len() > m1[7]).to_equal(true)
+        # Scaling evidence (printed, not bounded: the interpreter lane's
+        # wall time is host-sensitive; a quadratic edge sort shows up as
+        # T(2n) approaching 4x T(n), the bucketed sort as ~2x).
+        var t0 = time_now_micros()
+        val m3 = _lcd_aaa_mask(narrow_saw(2000), 1.0, 0.0, 0, 0.0, 3, 2002, 1, [])
+        val t2n = time_now_micros() - t0
+        expect(m3.len() > m3[7]).to_equal(true)
+        print("SFNT_GRAY_AAA_NARROW_SAW rendered_us_2000={t2n}")
+
+    it "bounds cold first-phase raster of 64 px gray glyphs":
+        val blob = file_read_bytes(FONT_PATH)
+        expect(blob.len() > 1000).to_equal(true)
+        val glyphs = "aeogxOsmAW@&8%"
+        # Two cold rounds at distinct sizes (every draw is a memo miss);
+        # the min of the rounds is the load-robust sample.
+        var best: i64 = 9223372036854775807
+        var size: i64 = 64
+        while size <= 72:
+            var total: i64 = 0
+            var i: i64 = 0
+            while i < glyphs.len():
+                val cp = glyphs.char_code_at(i)
+                match sfnt_gray_glyph_outline(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, cp,
+                        size, size * 1000):
+                    Some(o):
+                        var w0 = time_now_micros()
+                        match sfnt_gray_outline_raster(o, 0):
+                            Some(g): expect(g.slg_gray.len() > 0).to_equal(true)
+                            None: expect(true).to_equal(false)
+                        total = total + (time_now_micros() - w0)
+                    None: expect(true).to_equal(false)
+                i = i + 1
+            if total < best: best = total
+            size = size + 8
+        expect(best).to_be_less_than(9000001)
+        print("SFNT_GRAY_AAA_COLD_FIRST_16GLYPHS_64PX min_us={best}")

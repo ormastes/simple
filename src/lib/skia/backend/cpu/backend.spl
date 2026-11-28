@@ -7,13 +7,21 @@ use std.skia.entity.image.{SkImage, SkImageInfo, sk_image_info_n32_premul}
 use std.skia.entity.geometry.{SkIRect, SkRect, SkPoint, sk_rrect_make}
 use std.skia.entity.matrix.{Matrix3x3}
 use std.skia.capability.{SkCapability, sk_capability_cpu}
-use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind}
+use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind, sk_unpack_matrix_from_path}
 use std.skia.entity.paint.{SkPaint}
 use std.skia.entity.enums.{SkPaintStyle, SkBlendMode, SkPathDirection}
 use std.skia.entity.color.{SkColor4f, sk_color_alpha, sk_color_red, sk_color_green, sk_color_blue}
 use std.skia.entity.path.{sk_path_new, sk_path_mapped}
 use std.skia.entity.textblob.{SkTextBlob, sk_unpack_text_blob_from_image, sk_text_blob_run_text}
 use std.skia.feature.text.{skia_default_vector_font_path, skia_load_cached_font_bytes, skia_sfnt_rasterize_run_with_origin_argb, skia_sfnt_blend_run_argb, skia_blend_transformed_argb_onto}
+use std.skia.feature.blend.porter_duff.{
+    blend_clear, blend_src, blend_dst,
+    blend_src_over, blend_dst_over,
+    blend_src_in, blend_dst_in,
+    blend_src_out, blend_dst_out,
+    blend_src_atop, blend_dst_atop,
+    blend_xor, blend_plus, blend_modulate
+}
 use std.skia.backend.cpu.raster_prims.{Bitmap, fill_rect, fill_rrect, fill_path_aa, stroke_path}
 use std.skia.backend.cpu.shaders.{sample_image_bilinear, apply_blend}
 use std.viz.feature.damage.{intersect_rect}
@@ -124,11 +132,11 @@ class CanvasState:
     alpha: f64
     clip: SkRect
     transform: Matrix3x3
-    # SaveLayer blend mode. ponytail: applied per child draw, not at Restore, so
-    # overlapping children in one layer also blend with each other; only
-    # identity-transform DrawRect honours it (RRect/Path/transformed rects stay
-    # SrcOver). Upgrade: offscreen layer bitmap composited at Restore.
-    mode: SkBlendMode
+    target: Bitmap
+    is_layer: bool
+    layer_alpha: f64
+    layer_mode: SkBlendMode
+    layer_clip: SkRect
 
 fn _clone_state(src: CanvasState) -> CanvasState:
     CanvasState(
@@ -140,24 +148,158 @@ fn _clone_state(src: CanvasState) -> CanvasState:
             bottom: src.clip.bottom
         ),
         transform: src.transform,
-        mode: src.mode
+        target: src.target,
+        is_layer: false,
+        layer_alpha: 1.0,
+        layer_mode: SkBlendMode.SrcOver,
+        layer_clip: src.layer_clip
     )
 
-# Non-SrcOver rect fill: each pixel whose centre is inside `r` becomes
-# compose(src, dst, mode). ponytail: no edge AA and identity transform only;
-# extend to coverage-weighted compose when a scene needs AA'd blend edges.
+fn _clamp_f64_unit(v: f64) -> f64:
+    if v < 0.0: 0.0 elif v > 1.0: 1.0 else: v
+
+fn _read_premul_pixel(bitmap: Bitmap, x: i64, y: i64) -> SkColor4f:
+    val idx = (y * bitmap.width + x) * 4
+    SkColor4f(
+        r: (bitmap.pixels[idx] as f64) / 255.0,
+        g: (bitmap.pixels[idx + 1] as f64) / 255.0,
+        b: (bitmap.pixels[idx + 2] as f64) / 255.0,
+        a: (bitmap.pixels[idx + 3] as f64) / 255.0
+    )
+
+fn _unpremul_color(c: SkColor4f) -> SkColor4f:
+    if c.a <= 0.0:
+        return SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
+    SkColor4f(
+        r: _clamp_f64_unit(c.r / c.a),
+        g: _clamp_f64_unit(c.g / c.a),
+        b: _clamp_f64_unit(c.b / c.a),
+        a: _clamp_f64_unit(c.a)
+    )
+
+fn _compose_onto_premul(src_straight: SkColor4f, dst_premul: SkColor4f, mode: SkBlendMode) -> SkColor4f:
+    """Composite straight-alpha `src_straight` onto premultiplied `dst_premul`, returning premultiplied RGBA."""
+    val src_pm = SkColor4f(
+        r: src_straight.r * src_straight.a,
+        g: src_straight.g * src_straight.a,
+        b: src_straight.b * src_straight.a,
+        a: src_straight.a
+    )
+    match mode:
+        SkBlendMode.Clear:      blend_clear(src_pm, dst_premul)
+        SkBlendMode.Src:        blend_src(src_pm, dst_premul)
+        SkBlendMode.Dst:        blend_dst(src_pm, dst_premul)
+        SkBlendMode.SrcOver:    blend_src_over(src_straight, dst_premul)
+        SkBlendMode.DstOver:    blend_dst_over(src_pm, dst_premul)
+        SkBlendMode.SrcIn:      blend_src_in(src_pm, dst_premul)
+        SkBlendMode.DstIn:      blend_dst_in(src_straight, dst_premul)
+        SkBlendMode.SrcOut:     blend_src_out(src_pm, dst_premul)
+        SkBlendMode.DstOut:     blend_dst_out(src_straight, dst_premul)
+        SkBlendMode.SrcATop:    blend_src_atop(src_pm, dst_premul)
+        SkBlendMode.DstATop:    blend_dst_atop(src_pm, dst_premul)
+        SkBlendMode.Xor:        blend_xor(src_pm, dst_premul)
+        SkBlendMode.Plus:       blend_plus(src_pm, dst_premul)
+        SkBlendMode.Modulate:   blend_modulate(src_pm, dst_premul)
+        _:
+            val dst_straight = _unpremul_color(dst_premul)
+            apply_blend(src_straight, dst_straight, mode)
+
+fn _blend_bitmap_pixel_mode(bitmap: Bitmap, x: i64, y: i64, src_straight: SkColor4f, mode: SkBlendMode, cov: f64):
+    """Blend straight-alpha `src_straight` onto premultiplied `bitmap` at `(x, y)` with coverage `cov`."""
+    if cov <= 0.0:
+        return
+    if x < 0 or x >= bitmap.width or y < 0 or y >= bitmap.height:
+        return
+    if mode == SkBlendMode.SrcOver:
+        bitmap.blend_pixel(x, y, src_straight, cov)
+        return
+    val dst_pm = _read_premul_pixel(bitmap, x, y)
+    val composed = _compose_onto_premul(src_straight, dst_pm, mode)
+    if cov >= 1.0:
+        bitmap.set_pixel(x, y, composed)
+    else:
+        val ic = 1.0 - cov
+        val out = SkColor4f(
+            r: dst_pm.r * ic + composed.r * cov,
+            g: dst_pm.g * ic + composed.g * cov,
+            b: dst_pm.b * ic + composed.b * cov,
+            a: dst_pm.a * ic + composed.a * cov
+        )
+        bitmap.set_pixel(x, y, out)
+
 fn _fill_rect_mode(bitmap: Bitmap, r: SkRect, color: SkColor4f, mode: SkBlendMode):
-    var y = _ceil_i64(r.top - 0.5)
-    while y.to_f64() + 0.5 < r.bottom:
-        var x = _ceil_i64(r.left - 0.5)
-        while x.to_f64() + 0.5 < r.right:
-            if x >= 0 and x < bitmap.width and y >= 0 and y < bitmap.height:
-                val idx = (y * bitmap.width + x) * 4
-                val dst = SkColor4f(r: (bitmap.pixels[idx] as f64) / 255.0, g: (bitmap.pixels[idx + 1] as f64) / 255.0,
-                    b: (bitmap.pixels[idx + 2] as f64) / 255.0, a: (bitmap.pixels[idx + 3] as f64) / 255.0)
-                bitmap.set_pixel(x, y, apply_blend(color, dst, mode))
-            x = x + 1
-        y = y + 1
+    """Analytic edge-AA rect fill supporting arbitrary SkBlendMode."""
+    if r.left >= r.right or r.top >= r.bottom:
+        return
+    var x0 = _floor_i64(r.left)
+    var y0 = _floor_i64(r.top)
+    var x1 = _ceil_i64(r.right)
+    var y1 = _ceil_i64(r.bottom)
+    if x0 < 0: x0 = 0
+    if y0 < 0: y0 = 0
+    if x1 > bitmap.width: x1 = bitmap.width
+    if y1 > bitmap.height: y1 = bitmap.height
+    var py = y0
+    while py < y1:
+        val pyf = py.to_f64()
+        val cy_lo = _max_f64(pyf, r.top)
+        val cy_hi = _min_f64(pyf + 1.0, r.bottom)
+        val cov_y = _max_f64(cy_hi - cy_lo, 0.0)
+        if cov_y > 0.0:
+            var px = x0
+            while px < x1:
+                val pxf = px.to_f64()
+                val cx_lo = _max_f64(pxf, r.left)
+                val cx_hi = _min_f64(pxf + 1.0, r.right)
+                val cov_x = _max_f64(cx_hi - cx_lo, 0.0)
+                val cov = _min_f64(cov_x * cov_y, 1.0)
+                if cov > 0.0:
+                    _blend_bitmap_pixel_mode(bitmap, px, py, color, mode, cov)
+                px = px + 1
+        py = py + 1
+
+fn _composite_coverage_mask(bitmap: Bitmap, mask: Bitmap, bx0: i64, by0: i64, color: SkColor4f, mode: SkBlendMode):
+    """Composite a rendered opaque-white coverage mask onto `bitmap` with `color` and `mode`."""
+    var ly: i64 = 0
+    while ly < mask.height:
+        val row_off = ly * mask.width
+        var lx: i64 = 0
+        while lx < mask.width:
+            val a = mask.pixels[(row_off + lx) * 4 + 3] as i64
+            if a > 0:
+                val cov = (a as f64) / 255.0
+                _blend_bitmap_pixel_mode(bitmap, bx0 + lx, by0 + ly, color, mode, cov)
+            lx = lx + 1
+        ly = ly + 1
+
+fn _composite_layer_onto_parent(parent: Bitmap, layer: Bitmap, layer_clip: SkRect, layer_alpha: f64, mode: SkBlendMode):
+    """Composite an isolated premultiplied `SaveLayer` bitmap onto `parent` once at `Restore`."""
+    if layer_alpha <= 0.0:
+        return
+    var x0 = _floor_i64(layer_clip.left)
+    var y0 = _floor_i64(layer_clip.top)
+    var x1 = _ceil_i64(layer_clip.right)
+    var y1 = _ceil_i64(layer_clip.bottom)
+    if x0 < 0: x0 = 0
+    if y0 < 0: y0 = 0
+    if x1 > parent.width: x1 = parent.width
+    if y1 > parent.height: y1 = parent.height
+    var py = y0
+    while py < y1:
+        var px = x0
+        while px < x1:
+            val layer_pm = _read_premul_pixel(layer, px, py)
+            if layer_pm.a > 0.0:
+                val eff_a = _clamp_f64_unit(layer_pm.a * layer_alpha)
+                val src_straight = SkColor4f(
+                    r: _clamp_f64_unit(layer_pm.r / layer_pm.a),
+                    g: _clamp_f64_unit(layer_pm.g / layer_pm.a),
+                    b: _clamp_f64_unit(layer_pm.b / layer_pm.a),
+                    a: eff_a
+                )
+                _blend_bitmap_pixel_mode(parent, px, py, src_straight, mode, 1.0)
+            px = px + 1
+        py = py + 1
 
 fn _rect_is_empty(r: SkRect) -> bool:
     (r.right <= r.left) or (r.bottom <= r.top)
@@ -188,7 +330,16 @@ impl CpuBackend:
             bottom: safe_h.to_f64()
         )
         var state_stack: [CanvasState] = [
-            CanvasState(alpha: 1.0, clip: root_clip, transform: Matrix3x3.identity(), mode: SkBlendMode.SrcOver)
+            CanvasState(
+                alpha: 1.0,
+                clip: root_clip,
+                transform: Matrix3x3.identity(),
+                target: bitmap,
+                is_layer: false,
+                layer_alpha: 1.0,
+                layer_mode: SkBlendMode.SrcOver,
+                layer_clip: root_clip
+            )
         ]
         var stack_depth = 1
 
@@ -221,19 +372,35 @@ impl CpuBackend:
                         )
                     else:
                         intersect_rect(top.clip, _transformed_rect_bounds(op.rect, top.transform))
+                    val layer_bm = Bitmap.zeros(safe_w, safe_h)
                     val new_state = CanvasState(
-                        alpha: top.alpha * layer_color.a,
+                        alpha: 1.0,
                         clip: layer_clip,
                         transform: top.transform,
-                        mode: op.paint.blend_mode
+                        target: layer_bm,
+                        is_layer: true,
+                        layer_alpha: top.alpha * layer_color.a,
+                        layer_mode: op.paint.blend_mode,
+                        layer_clip: layer_clip
                     )
                     state_stack.push(new_state)
                     stack_depth = stack_depth + 1
                 else:
                     if op.kind == SkPictureOpKind.Restore:
                         if stack_depth > 1:
+                            val popped = match state_stack.at(stack_depth - 1):
+                                Some(value):
+                                    value
+                                None:
+                                    state_stack[0]
                             state_stack.pop()
                             stack_depth = stack_depth - 1
+                            if popped.is_layer:
+                                val parent = state_stack[stack_depth - 1].target
+                                _composite_layer_onto_parent(
+                                    parent, popped.target, popped.layer_clip,
+                                    popped.layer_alpha, popped.layer_mode
+                                )
                         else:
                             pass_do_nothing
                     else:
@@ -250,7 +417,11 @@ impl CpuBackend:
                                 alpha: cur.alpha,
                                 clip: new_clip,
                                 transform: cur.transform,
-                                mode: cur.mode
+                                target: cur.target,
+                                is_layer: cur.is_layer,
+                                layer_alpha: cur.layer_alpha,
+                                layer_mode: cur.layer_mode,
+                                layer_clip: cur.layer_clip
                             )
                             state_stack[stack_depth - 1] = replaced
                         else:
@@ -261,27 +432,35 @@ impl CpuBackend:
                                     None:
                                         i = i + 1
                                         continue
-                                # rect slots: left=tx, top=ty, right=sx, bottom=sy;
-                                # rx carries rotation degrees; ry < 0 encodes mirrored orientation (det < 0).
-                                val tx = op.rect.left
-                                val ty = op.rect.top
-                                val sx = op.rect.right
-                                val sy_raw = op.rect.bottom
-                                val sy = if op.ry < 0.0: -sy_raw else: sy_raw
-                                val new_xform = if (sx == 0.0) or (sy == 0.0):
-                                    Matrix3x3.identity()
-                                else:
-                                    val t_mat = Matrix3x3.translate(tx, ty)
-                                    val tr_mat = if op.rx != 0.0:
-                                        t_mat.mul(Matrix3x3.rotate_degrees(op.rx))
-                                    else:
-                                        t_mat
-                                    tr_mat.mul(Matrix3x3.scale(sx, sy))
+                                # Prefer lossless 6-entry affine encoding from op.path when present;
+                                # fall back to the legacy (rect, rx, ry) encoding for hand-built ops.
+                                val new_xform = match sk_unpack_matrix_from_path(op.path):
+                                    Some(full_mat):
+                                        full_mat
+                                    None:
+                                        val tx = op.rect.left
+                                        val ty = op.rect.top
+                                        val sx = op.rect.right
+                                        val sy_raw = op.rect.bottom
+                                        val sy = if op.ry < 0.0: -sy_raw else: sy_raw
+                                        if (sx == 0.0) or (sy == 0.0):
+                                            Matrix3x3.identity()
+                                        else:
+                                            val t_mat = Matrix3x3.translate(tx, ty)
+                                            val tr_mat = if op.rx != 0.0:
+                                                t_mat.mul(Matrix3x3.rotate_degrees(op.rx))
+                                            else:
+                                                t_mat
+                                            tr_mat.mul(Matrix3x3.scale(sx, sy))
                                 val replaced = CanvasState(
                                     alpha: cur.alpha,
                                     clip: cur.clip,
                                     transform: new_xform,
-                                    mode: cur.mode
+                                    target: cur.target,
+                                    is_layer: cur.is_layer,
+                                    layer_alpha: cur.layer_alpha,
+                                    layer_mode: cur.layer_mode,
+                                    layer_clip: cur.layer_clip
                                 )
                                 state_stack[stack_depth - 1] = replaced
                             else:
@@ -291,6 +470,7 @@ impl CpuBackend:
                                         value
                                     None:
                                         state_stack[0]
+                                val target_bm = cur.target
 
                                 if op.kind == SkPictureOpKind.DrawRect:
                                     val stroke_w = _effective_stroke_width(op.paint.stroke_width)
@@ -304,22 +484,21 @@ impl CpuBackend:
                                         pass_do_nothing
                                     else:
                                         val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                        val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                        val mode = if op.paint.blend_mode != SkBlendMode.SrcOver: op.paint.blend_mode else: cur.mode
+                                        val mode = op.paint.blend_mode
                                         if op.paint.style == SkPaintStyle.Stroke:
                                             val raw_rect = sk_path_new().add_rect(op.rect, SkPathDirection.Cw)
                                             val draw_rect_path = if cur.transform.is_identity():
                                                 raw_rect
                                             else:
                                                 sk_path_mapped(raw_rect, cur.transform)
-                                            stroke_path(bitmap, draw_rect_path, color, stroke_w)
-                                        elif mode != SkBlendMode.SrcOver and cur.transform.is_identity():
-                                            _fill_rect_mode(bitmap, visible, color, mode)
-                                        else:
-                                            if cur.transform.is_identity():
-                                                fill_rect(bitmap, visible, color)
+                                            _stroke_path_mode(target_bm, draw_rect_path, cur.clip, color, stroke_w, mode)
+                                        elif cur.transform.is_identity():
+                                            if mode == SkBlendMode.SrcOver:
+                                                fill_rect(target_bm, visible, color)
                                             else:
-                                                _fill_transformed_rect(bitmap, op.rect, cur.transform, cur.clip, color)
+                                                _fill_rect_mode(target_bm, visible, color, mode)
+                                        else:
+                                            _fill_transformed_rect(target_bm, op.rect, cur.transform, cur.clip, color, mode)
                                 else:
                                     if op.kind == SkPictureOpKind.DrawRRect:
                                         val stroke_w = _effective_stroke_width(op.paint.stroke_width)
@@ -333,11 +512,12 @@ impl CpuBackend:
                                             pass_do_nothing
                                         else:
                                             val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                            if op.paint.style == SkPaintStyle.Fill and cur.transform.is_identity():
+                                            val mode = op.paint.blend_mode
+                                            if op.paint.style == SkPaintStyle.Fill and cur.transform.is_identity() and mode == SkBlendMode.SrcOver:
                                                 if op.rx <= 0.0 and op.ry <= 0.0:
-                                                    fill_rect(bitmap, visible, color)
+                                                    fill_rect(target_bm, visible, color)
                                                 else:
-                                                    fill_rrect(bitmap, op.rect, op.rx, op.ry, color)
+                                                    fill_rrect(target_bm, op.rect, op.rx, op.ry, color)
                                             else:
                                                 val raw_rrect = sk_path_new().add_rrect(
                                                     sk_rrect_make(op.rect, op.rx, op.ry),
@@ -348,9 +528,9 @@ impl CpuBackend:
                                                 else:
                                                     sk_path_mapped(raw_rrect, cur.transform)
                                                 if op.paint.style == SkPaintStyle.Stroke:
-                                                    stroke_path(bitmap, rrect_path, color, stroke_w)
+                                                    _stroke_path_mode(target_bm, rrect_path, cur.clip, color, stroke_w, mode)
                                                 else:
-                                                    fill_path_aa(bitmap, rrect_path, color)
+                                                    _fill_path_mode(target_bm, rrect_path, cur.clip, color, mode)
                                     else:
                                         if op.kind == SkPictureOpKind.DrawOval:
                                             val stroke_w = _effective_stroke_width(op.paint.stroke_width)
@@ -364,27 +544,29 @@ impl CpuBackend:
                                                 pass_do_nothing
                                             else:
                                                 val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                                val mode = op.paint.blend_mode
                                                 val raw_oval = sk_path_new().add_oval(op.rect, SkPathDirection.Cw)
                                                 val oval_path = if cur.transform.is_identity():
                                                     raw_oval
                                                 else:
                                                     sk_path_mapped(raw_oval, cur.transform)
                                                 if op.paint.style == SkPaintStyle.Stroke:
-                                                    stroke_path(bitmap, oval_path, color, stroke_w)
+                                                    _stroke_path_mode(target_bm, oval_path, cur.clip, color, stroke_w, mode)
                                                 else:
-                                                    fill_path_aa(bitmap, oval_path, color)
+                                                    _fill_path_mode(target_bm, oval_path, cur.clip, color, mode)
                                         else:
                                             if op.kind == SkPictureOpKind.DrawPath:
                                                 if val p = op.path:
                                                     val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                                    val mode = op.paint.blend_mode
                                                     val draw_path = if cur.transform.is_identity():
                                                         p
                                                     else:
                                                         sk_path_mapped(p, cur.transform)
                                                     if op.paint.style == SkPaintStyle.Fill:
-                                                        fill_path_aa(bitmap, draw_path, color)
+                                                        _fill_path_mode(target_bm, draw_path, cur.clip, color, mode)
                                                     else:
-                                                        stroke_path(bitmap, draw_path, color, _effective_stroke_width(op.paint.stroke_width))
+                                                        _stroke_path_mode(target_bm, draw_path, cur.clip, color, _effective_stroke_width(op.paint.stroke_width), mode)
                                             else:
                                                 if op.kind == SkPictureOpKind.DrawImage:
                                                     if val img = op.image:
@@ -395,21 +577,20 @@ impl CpuBackend:
                                                             while py < img_h:
                                                                 var px = 0 as i64
                                                                 while px < img_w:
-                                                                    val u = px.to_f64()
-                                                                    val v = py.to_f64()
-                                                                    val sampled = sample_image_bilinear(img, u, v)
                                                                     val dst_x = (op.x.to_i64()) + px
                                                                     val dst_y = (op.y.to_i64()) + py
-                                                                    val blended = apply_blend(sampled, SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0), op.paint.blend_mode)
-                                                                    bitmap.blend_pixel(dst_x, dst_y, blended, cur.alpha)
+                                                                    if (dst_x as f64 + 0.5 >= cur.clip.left and dst_x as f64 + 0.5 < cur.clip.right and
+                                                                        dst_y as f64 + 0.5 >= cur.clip.top and dst_y as f64 + 0.5 < cur.clip.bottom):
+                                                                        val u = px.to_f64()
+                                                                        val v = py.to_f64()
+                                                                        val sampled = sample_image_bilinear(img, u, v)
+                                                                        val src_c = _scale_alpha(sampled, cur.alpha)
+                                                                        _blend_bitmap_pixel_mode(target_bm, dst_x, dst_y, src_c, op.paint.blend_mode, 1.0)
                                                                     px = px + 1
                                                                 py = py + 1
                                                         else:
-                                                            # Skia semantics: drawImage(x, y) places the image
-                                                            # corner at (x, y) in LOCAL space, so the local
-                                                            # offset composes under the current transform.
                                                             val img_xform = cur.transform.mul(Matrix3x3.translate(op.x, op.y))
-                                                            _draw_image_transformed(bitmap, img, img_xform, cur.clip, op.paint.blend_mode, cur.alpha)
+                                                            _draw_image_transformed(target_bm, img, img_xform, cur.clip, op.paint.blend_mode, cur.alpha)
                                                 else:
                                                     if op.kind == SkPictureOpKind.DrawPaint:
                                                         val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
@@ -422,16 +603,19 @@ impl CpuBackend:
                                                         if _rect_is_empty(fill_target):
                                                             pass_do_nothing
                                                         else:
-                                                            fill_rect(bitmap, fill_target, color)
+                                                            if op.paint.blend_mode == SkBlendMode.SrcOver:
+                                                                fill_rect(target_bm, fill_target, color)
+                                                            else:
+                                                                _fill_rect_mode(target_bm, fill_target, color, op.paint.blend_mode)
                                                     else:
                                                         if (op.kind == SkPictureOpKind.DrawTextBlob) or (op.kind == SkPictureOpKind.DrawText):
                                                             val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                                            _draw_text_op(bitmap, op, cur, color)
+                                                            _draw_text_op(target_bm, op, cur, color)
                                                         else:
                                                             # DrawPoints: nothing to rasterize here
                                                             pass_do_nothing
             i = i + 1
-        bitmap
+        state_stack[0].target
 
 # ============================================================================
 # Transformed-draw helpers — device-space rasterization for non-identity
@@ -481,7 +665,51 @@ fn _edge_x_at_y(a: SkPoint, b: SkPoint, yc: f64) -> Option[f64]:
     val t = (yc - a.y) / (b.y - a.y)
     Some(a.x + t * (b.x - a.x))
 
-fn _fill_transformed_rect(bitmap: Bitmap, rect: SkRect, xform: Matrix3x3, clip: SkRect, color: SkColor4f):
+fn _fill_path_mode(bitmap: Bitmap, path: SkPath, clip: SkRect, color: SkColor4f, mode: SkBlendMode):
+    """Fill a device-space path respecting `clip` and `SkBlendMode`."""
+    if mode == SkBlendMode.SrcOver and clip.left <= 0.0 and clip.top <= 0.0 and clip.right >= bitmap.width.to_f64() and clip.bottom >= bitmap.height.to_f64():
+        fill_path_aa(bitmap, path, color)
+        return
+    var bx0 = _floor_i64(clip.left)
+    var by0 = _floor_i64(clip.top)
+    var bx1 = _ceil_i64(clip.right)
+    var by1 = _ceil_i64(clip.bottom)
+    if bx0 < 0: bx0 = 0
+    if by0 < 0: by0 = 0
+    if bx1 > bitmap.width: bx1 = bitmap.width
+    if by1 > bitmap.height: by1 = bitmap.height
+    val bw = bx1 - bx0
+    val bh = by1 - by0
+    if bw <= 0 or bh <= 0:
+        return
+    val mask = Bitmap.zeros(bw, bh)
+    val shifted = if bx0 == 0 and by0 == 0: path else: sk_path_mapped(path, Matrix3x3.translate(-(bx0 as f64), -(by0 as f64)))
+    fill_path_aa(mask, shifted, SkColor4f(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+    _composite_coverage_mask(bitmap, mask, bx0, by0, color, mode)
+
+fn _stroke_path_mode(bitmap: Bitmap, path: SkPath, clip: SkRect, color: SkColor4f, width: f64, mode: SkBlendMode):
+    """Stroke a device-space path respecting `clip` and `SkBlendMode`."""
+    if mode == SkBlendMode.SrcOver and clip.left <= 0.0 and clip.top <= 0.0 and clip.right >= bitmap.width.to_f64() and clip.bottom >= bitmap.height.to_f64():
+        stroke_path(bitmap, path, color, width)
+        return
+    var bx0 = _floor_i64(clip.left)
+    var by0 = _floor_i64(clip.top)
+    var bx1 = _ceil_i64(clip.right)
+    var by1 = _ceil_i64(clip.bottom)
+    if bx0 < 0: bx0 = 0
+    if by0 < 0: by0 = 0
+    if bx1 > bitmap.width: bx1 = bitmap.width
+    if by1 > bitmap.height: by1 = bitmap.height
+    val bw = bx1 - bx0
+    val bh = by1 - by0
+    if bw <= 0 or bh <= 0:
+        return
+    val mask = Bitmap.zeros(bw, bh)
+    val shifted = if bx0 == 0 and by0 == 0: path else: sk_path_mapped(path, Matrix3x3.translate(-(bx0 as f64), -(by0 as f64)))
+    stroke_path(mask, shifted, SkColor4f(r: 1.0, g: 1.0, b: 1.0, a: 1.0), width)
+    _composite_coverage_mask(bitmap, mask, bx0, by0, color, mode)
+
+fn _fill_transformed_rect(bitmap: Bitmap, rect: SkRect, xform: Matrix3x3, clip: SkRect, color: SkColor4f, mode: SkBlendMode):
     """Scanline fill of an affine-transformed rectangle (a parallelogram).
 
     Analytic x-coverage per scanline (center y), clipped to the device-space
@@ -537,7 +765,7 @@ fn _fill_transformed_rect(bitmap: Bitmap, rect: SkRect, xform: Matrix3x3, clip: 
                     if px >= 0 and px < bitmap.width:
                         val cov = _min_f64(px.to_f64() + 1.0, x_hi) - _max_f64(px.to_f64(), x_lo)
                         if cov > 0.0:
-                            bitmap.blend_pixel(px, py, color, cov)
+                            _blend_bitmap_pixel_mode(bitmap, px, py, color, mode, cov)
                     px = px + 1
             py = py + 1
 
@@ -574,12 +802,12 @@ fn _draw_image_transformed(bitmap: Bitmap, img: SkImage, xform: Matrix3x3, clip:
                     val src = inv.map_point(px.to_f64() + 0.5, py.to_f64() + 0.5)
                     if src.x >= 0.0 and src.x < img_w.to_f64() and src.y >= 0.0 and src.y < img_h.to_f64():
                         val sampled = sample_image_bilinear(img, src.x, src.y)
-                        val blended = apply_blend(sampled, SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0), blend_mode)
-                        bitmap.blend_pixel(px, py, blended, alpha)
+                        val src_c = _scale_alpha(sampled, alpha)
+                        _blend_bitmap_pixel_mode(bitmap, px, py, src_c, blend_mode, 1.0)
                     px = px + 1
                 py = py + 1
 
-fn _blend_cov_buffer(bitmap: Bitmap, cov_buf: [u32], bx0: i64, by0: i64, bw: i64, bh: i64, color: SkColor4f):
+fn _blend_cov_buffer(bitmap: Bitmap, cov_buf: [u32], bx0: i64, by0: i64, bw: i64, bh: i64, color: SkColor4f, mode: SkBlendMode):
     var ly: i64 = 0
     while ly < bh:
         val row_off = ly * bw
@@ -589,7 +817,7 @@ fn _blend_cov_buffer(bitmap: Bitmap, cov_buf: [u32], bx0: i64, by0: i64, bw: i64
             val a = (px >> 24) & 0xFFu32
             if a > 0u32:
                 val cov = (a as f64) / 255.0
-                bitmap.blend_pixel(bx0 + lx, by0 + ly, color, cov)
+                _blend_bitmap_pixel_mode(bitmap, bx0 + lx, by0 + ly, color, mode, cov)
             lx = lx + 1
         ly = ly + 1
 
@@ -668,5 +896,5 @@ fn _draw_text_op(bitmap: Bitmap, op: SkPictureOp, cur: CanvasState, color: SkCol
                             src_buf, local_ox as f64, local_oy as f64,
                             shifted_xform, box_clip
                         )
-                    _blend_cov_buffer(bitmap, cov_buf, bx0, by0, bw, bh, color)
+                    _blend_cov_buffer(bitmap, cov_buf, bx0, by0, bw, bh, color, op.paint.blend_mode)
         ri = ri + 1

@@ -1,0 +1,64 @@
+"""
+# Simple LSP MCP Graceful Shutdown & Exit Lifecycle Regression Spec
+
+Prevention coverage for `lsp_mcp_server_process_leak_2026-07-05`:
+verifies that `simple_lsp_mcp` handles JSON-RPC `shutdown` requests and `exit`
+notifications cleanly so clients never leave orphaned server processes waiting
+on open stdio handles.
+"""
+# @req REQ-SSPEC-APP
+use std.spec.{describe, it, expect, step}
+use app.simple_lsp_mcp.main.{
+    lsp_handle_message,
+    lsp_reset_lifecycle_state,
+    lsp_shutdown_requested,
+    lsp_exit_requested,
+    lsp_exit_code
+}
+
+fn _rpc(fields: text) -> text:
+    "{{" + "\"jsonrpc\":\"2.0\"," + fields + "}}"
+
+describe "Simple LSP MCP shutdown and exit lifecycle":
+    it "acknowledges shutdown with null result and rejects subsequent requests":
+        step("Send shutdown request and verify clean acknowledgement and post-shutdown refusal")
+        lsp_reset_lifecycle_state()
+        expect(lsp_shutdown_requested()).to_equal(false)
+        expect(lsp_exit_requested()).to_equal(false)
+        val shutdown_reply = lsp_handle_message(_rpc("\"id\":1,\"method\":\"shutdown\""))
+        expect(shutdown_reply).to_contain("\"id\":1")
+        expect(shutdown_reply).to_contain("\"result\":null")
+        expect(lsp_shutdown_requested()).to_equal(true)
+        expect(lsp_exit_requested()).to_equal(false)
+        val after_shutdown = lsp_handle_message(_rpc("\"id\":2,\"method\":\"ping\""))
+        expect(after_shutdown).to_contain("\"id\":2")
+        expect(after_shutdown).to_contain("\"code\":-32600")
+        expect(after_shutdown).to_contain("Server is shutting down")
+        lsp_reset_lifecycle_state()
+
+    it "signals loop exit with code 0 on exit notification after shutdown":
+        step("Send shutdown followed by exit notification and verify exit flag and code 0")
+        lsp_reset_lifecycle_state()
+        val _ = lsp_handle_message(_rpc("\"id\":10,\"method\":\"shutdown\""))
+        val exit_reply = lsp_handle_message(_rpc("\"method\":\"exit\""))
+        expect(exit_reply).to_equal("")
+        expect(lsp_exit_requested()).to_equal(true)
+        expect(lsp_exit_code()).to_equal(0)
+        lsp_reset_lifecycle_state()
+
+    it "signals loop exit with code 1 on abrupt exit notification without shutdown":
+        step("Send exit notification without prior shutdown and verify exit code 1")
+        lsp_reset_lifecycle_state()
+        val exit_reply = lsp_handle_message(_rpc("\"method\":\"exit\""))
+        expect(exit_reply).to_equal("")
+        expect(lsp_shutdown_requested()).to_equal(false)
+        expect(lsp_exit_requested()).to_equal(true)
+        expect(lsp_exit_code()).to_equal(1)
+        lsp_reset_lifecycle_state()
+
+    it "keeps exit code 0 on clean EOF without exit notification":
+        step("Verify default lifecycle state reports exit code 0 on clean EOF")
+        lsp_reset_lifecycle_state()
+        expect(lsp_shutdown_requested()).to_equal(false)
+        expect(lsp_exit_requested()).to_equal(false)
+        expect(lsp_exit_code()).to_equal(0)

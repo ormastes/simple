@@ -1,0 +1,206 @@
+"""
+Return-type interface (RTI) v1 trait-row publication, DynTrait receiver
+resolution, body-free declaration prescan, and MIR Result/Optional enum match
+owner fallback.
+Design: doc/05_design/compiler/types/return_type_interface_design.md.
+"""
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+# @cover src/compiler/50.mir/_MirLowering/declaration_return_types_v1.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirTrait}
+use compiler.hir.return_type_interface_v1.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.hir_declaration_types_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.declaration_return_types_v1.*
+
+fn trait_spec_hir(source: text, path: text) -> HirModule:
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(ast)
+
+fn trait_spec_row(rows: [ReturnTypeRow], display: text) -> ReturnTypeRow?:
+    for row in rows:
+        if row.decl.display == display:
+            return Some(row)
+    nil
+
+fn trait_spec_callable(function: HirFunction) -> MirHirFunctionDeclarationV1:
+    var params: [MirHirParamDeclarationV1] = []
+    for raw in function.params:
+        val param: HirParam = raw
+        params.push(MirHirParamDeclarationV1(symbol: param.symbol, name: param.name,
+            type_: param.type_, has_default: param.has_default, default_artifact: nil,
+            span: param.span, is_mutable: param.is_mutable))
+    MirHirFunctionDeclarationV1(symbol: function.symbol, name: function.name,
+        type_params: function.type_params, params: params, return_type: function.return_type,
+        effects: function.effects, visibility: function.visibility, is_async: function.is_async,
+        is_static: function.is_static, is_public: function.is_public, is_method: function.is_method,
+        is_mutable: function.is_mutable, is_const: function.is_const, is_extern: function.is_extern,
+        func_attr: function.func_attr, has_export_attr: function.has_export_attr,
+        export_attr: function.export_attr, is_generic_template: function.is_generic_template,
+        span: function.span)
+
+fn trait_spec_function_named(module: HirModule, name: text) -> HirFunction:
+    var found = module.functions.values()[0]
+    for f in module.functions.values():
+        if f.name == name:
+            found = f
+    found
+
+fn trait_spec_match_subject(f: HirFunction) -> HirExpr:
+    var found = f.body.value
+    for st in f.body.stmts:
+        match st.kind:
+            case HirStmtKind.Expr(e):
+                match e.kind:
+                    case HirExprKind.MatchCase(scrutinee, _): found = scrutinee
+                    case _: ()
+            case _: ()
+    match f.body.value.kind:
+        case HirExprKind.MatchCase(scrutinee, _): found = scrutinee
+        case _: ()
+    found
+
+describe "trait method RTI rows and DynTrait match lowering":
+    it "publishes trait required and default method RTI rows with owner type params":
+        val src = "trait Fetcher<T>:\n" +
+            "    fn fetch(key: text) -> Result<T, text>\n" +
+            "    fn peek(key: text) -> T?:\n" +
+            "        None\n"
+        val hir = trait_spec_hir(src, "src/rti_trait/provider.spl")
+        val rows = rti_rows_from_hir_v1(hir).unwrap().rows
+        val fetch_row = trait_spec_row(rows, "trait:Fetcher::fetch")
+        val peek_row = trait_spec_row(rows, "trait:Fetcher::peek")
+        expect(fetch_row.is_some()).to_equal(true)
+        expect(peek_row.is_some()).to_equal(true)
+        val table = ReturnTypeInterfaceTable.new()
+        if val fr = fetch_row:
+            expect(fr.owner_type_param_count).to_equal(1)
+            expect(rti_term_canonical_text(table.instantiate(fr, [RtType.Builtin("i64")]).unwrap())).to_equal("result(b:i64,b:text)")
+        if val pr = peek_row:
+            expect(pr.owner_type_param_count).to_equal(1)
+            expect(rti_term_canonical_text(table.instantiate(pr, [RtType.Builtin("bool")]).unwrap())).to_equal("opt(b:bool)")
+
+    it "resolves DynTrait receiver method calls without E-RTI-001":
+        val src = "trait Reader:\n" +
+            "    fn read_num() -> Result<i64, text>\n" +
+            "    fn maybe_id() -> text?:\n" +
+            "        None\n" +
+            "fn use_reader(r: Reader) -> i64:\n" +
+            "    match r.read_num():\n" +
+            "        case Ok(n): n\n" +
+            "        case Err(_): -1\n"
+        val hir = trait_spec_hir(src, "src/rti_trait/dyn_consumer.spl")
+        expect(hir.functions.keys().len() > 0).to_equal(true)
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(hir).unwrap()
+        val subj = trait_spec_match_subject(trait_spec_function_named(hir, "use_reader"))
+        val resolved = table.callee_return(subj, hir.symbols, nil).unwrap()
+        val concrete = table.require_concrete(table.resolve(resolved).unwrap()).unwrap()
+        expect(rti_term_canonical_text(concrete)).to_equal("result(b:i64,b:text)")
+
+    it "registers trait methods and defaults in prescan_declaration_return_types_v1":
+        val prov_src = "trait Worker:\n" +
+            "    fn run_job() -> Result<i64, text>\n" +
+            "    fn fallback() -> text?:\n" +
+            "        None\n"
+        val cons_src = "fn probe() -> i64:\n    0\n"
+        val prov = trait_spec_hir(prov_src, "src/rti_trait_decl/provider.spl")
+        val cons = trait_spec_hir(cons_src, "src/rti_trait_decl/consumer.spl")
+        var traits: [MirHirTraitDeclarationV1] = []
+        for tr_val in prov.traits.values():
+            val tr: HirTrait = tr_val
+            var methods: [MirHirFunctionDeclarationV1] = []
+            for m in tr.methods:
+                methods.push(trait_spec_callable(m))
+            var defaults: [MirHirFunctionDeclarationV1] = []
+            for dm in tr.defaults:
+                defaults.push(trait_spec_callable(dm))
+            traits.push(MirHirTraitDeclarationV1(
+                symbol: tr.symbol, name: tr.name, type_params: tr.type_params,
+                methods: methods, defaults: defaults, supertraits: tr.supertraits,
+                where_clause: tr.where_clause, assoc_types: tr.assoc_types,
+                visibility: tr.visibility, is_public: tr.is_public,
+                is_generic_template: tr.is_generic_template, span: tr.span))
+        val decl = MirHirModuleDeclarationsV1(
+            name: prov.name, path: prov.path,
+            final_repository_authority: "", final_archive_key: "", final_body_digest: "",
+            symbols: prov.symbols, functions: [], structs: [], classes: [], enums: [],
+            bitfields: [], traits: traits, impls: [], globals: [],
+            needs_initialization: false, declaration_digest: "", stage: "rti-trait-spec")
+        var lowering = MirLowering.new(cons.symbols)
+        lowering.prescan_declaration_return_types_v1(decl)
+        expect(lowering.errors.len()).to_equal(0)
+        val owner_ref = rti_type_ref("rti_trait_decl.provider", "trait", "Worker")
+        val run_key = CalleeKey(module_id: "rti_trait_decl.provider", owner: Some(owner_ref), name: "run_job", is_static: false)
+        val fb_key = CalleeKey(module_id: "rti_trait_decl.provider", owner: Some(owner_ref), name: "fallback", is_static: false)
+        expect(lowering.rti.rows_by_key.has(rti_key_text(run_key))).to_equal(true)
+        expect(lowering.rti.rows_by_key.has(rti_key_text(fb_key))).to_equal(true)
+
+    it "lowers Result and Optional matches on trait calls without MIR lowering errors":
+        val prov_name = "rti_trait_mir.provider"
+        val cons_name = "rti_trait_mir.consumer"
+        val prov_src = "pub trait Service:\n" +
+            "    fn call_res() -> Result<i64, text>\n" +
+            "    fn call_opt() -> i64?:\n" +
+            "        None\n"
+        val cons_src = "use rti_trait_mir.provider.{{Service}}\n" +
+            "fn handle_res(s: Service) -> i64:\n" +
+            "    match s.call_res():\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(_): -1\n" +
+            "fn handle_opt(s: Service) -> i64:\n" +
+            "    match s.call_opt():\n" +
+            "        case Some(v): v\n" +
+            "        case None: 0\n"
+        var modules: Dict<text, ParserModule> = {}
+        modules[prov_name] = parse_full_frontend(prov_src, "src/rti_trait_mir/provider.spl", prov_name, Logger(level: 0))
+        modules[cons_name] = parse_full_frontend(cons_src, "src/rti_trait_mir/consumer.spl", cons_name, Logger(level: 0))
+        val sources = [
+            SourceFile(path: "src/rti_trait_mir/provider.spl", content: prov_src, module_name: prov_name),
+            SourceFile(path: "src/rti_trait_mir/consumer.spl", content: cons_src, module_name: cons_name)
+        ]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        var p_low = hirlowering_for_module(prov_name, surfaces)
+        val prov_hir = p_low.lower_module(modules[prov_name])
+        var c_low = hirlowering_for_module(cons_name, surfaces)
+        val cons_hir = c_low.lower_module(modules[cons_name])
+        var hirs: Dict<text, HirModule> = {}
+        hirs[prov_name] = prov_hir
+        hirs[cons_name] = cons_hir
+        var lowering = MirLowering.new(cons_hir.symbols)
+        for name in [prov_name, cons_name]:
+            lowering.prescan_module_struct_names(hirs, name)
+            lowering.prescan_module_functions_v1(hirs, name, name, hirs[name].symbols)
+        val _mir = lowering.lower_module(cons_hir, [prov_hir, cons_hir])
+        expect(lowering.errors.len()).to_equal(0)
+        val res_t = lowering.enum_match_expr_type(trait_spec_match_subject(trait_spec_function_named(cons_hir, "handle_res")))
+        val opt_t = lowering.enum_match_expr_type(trait_spec_match_subject(trait_spec_function_named(cons_hir, "handle_opt")))
+        expect(res_t.is_some()).to_equal(true)
+        expect(opt_t.is_some()).to_equal(true)
+        if val rt = res_t:
+            var is_res = false
+            match rt.kind:
+                case HirTypeKind.Result(_, _): is_res = true
+                case _: ()
+            expect(is_res).to_equal(true)
+        if val ot = opt_t:
+            var is_opt = false
+            match ot.kind:
+                case HirTypeKind.Optional(_): is_opt = true
+                case _: ()
+            expect(is_opt).to_equal(true)

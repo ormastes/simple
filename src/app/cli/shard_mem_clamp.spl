@@ -757,15 +757,21 @@ pub fn shard_pool_wave0_admitted_count_v1(window_size: i64, pending_count: i64,
 # 2026-10-27 phase 3 (stage2 e4746b05): 21 per-file workers peaked at 72.2 GB
 # (~3.4 GB mean, >= 5.6 GB max) while admission priced them at 2.5 GB, and the
 # declared 90 GB tree budget exceeded the 64 GB cap. The coordinator's peak is
-# never a worker estimate. Precedence: a deliberate override, else
-# max(default SHARD_*_WORKER_KB_V1, max recorded worker peak): measurement can
+# never a worker estimate. Precedence: an explicit override is honored as-is
+# when no worker peak is recorded; once a worker peak IS recorded, keep its 25%
+# margin with the override as a floor (matching
+# shard_commit_unmeasured_estimate_kib_v1) so an override does not hide a
+# higher recorded peak at start-time worker logging. Without an override:
+# max(default SHARD_*_WORKER_KB_V1, max recorded worker peak) — measurement can
 # only raise the estimate, never lower it (a light-lane record must not
 # loosen the next heavy run).
 pub fn shard_worker_estimate_kib_v1(default_kb: i64, worker_peaks_kib: [i64], override_kb: i64 = 0) -> i64:
-    if override_kb > 0: return override_kb
     var best: i64 = 0
     for p in worker_peaks_kib:
         if p > best: best = p
+    if override_kb > 0:
+        if best <= 0: return override_kb
+        return shard_commit_estimate_kib_v1(override_kb, shard_measured_estimate_kib_v1(best))
     if best > default_kb: best else: default_kb
 
 # Built-in default of the free RAM/commit floor (24 GiB); the live value is

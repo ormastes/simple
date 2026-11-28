@@ -1,0 +1,95 @@
+"""
+## Purpose and audience
+Purpose: verifies REQ-WEB-005 & REQ-WEB-007 interactive `simple browser` window
+event routing without launching an OS GUI window:
+- Click hit-testing against `<a href>` and `<button>` elements + relative URL resolution
+- Wheel scroll clamping within `[0, max_scroll_y]` and scrolled pixel output
+- Keyboard navigation (Back, Forward, Reload, Scroll, Escape/Close)
+- Architectural boundary: `src/app/browser/gui_window.spl` stays free of renderer/engine imports
+Audience: maintainers of `app.browser` and the web engine.
+"""
+
+"""
+Traceability: REQ-WEB-005, REQ-WEB-007 - interactive pointer, wheel, and keyboard routing in `simple browser`.
+"""
+# @tag: system, app, browser, interactive
+use std.spec.*
+use std.io_runtime.{file_read}
+use common.ui.key_code.{
+    CANON_ESCAPE, CANON_R, CANON_LEFT, CANON_RIGHT, CANON_DOWN, CANON_UP,
+    CANON_HOME, CANON_END
+}
+use app.browser.window_state.{
+    browser_window_state_new, browser_window_state_clamp_scroll,
+    browser_window_state_set_scroll, browser_window_state_navigate,
+    browser_window_state_back, browser_window_state_forward,
+    browser_resolve_relative_url, browser_hit_test_link_or_button,
+    browser_apply_click_result, browser_apply_hover_result,
+    browser_apply_key_event
+}
+use app.browser.render_lane.{browser_render_html_frame_via_at_scroll}
+
+val TEST_PAGE: text = "<!doctype html><html><body style=\"margin:0\"><a id=\"lnk\" href=\"sub/next.html\" style=\"display:block;width:120px;height:30px;background:#112233;color:#fff\">Go</a><button id=\"act\" style=\"display:block;width:100px;height:30px\">Run</button><div style=\"height:400px;background:#eee\">Tall</div></body></html>"
+
+describe "REQ-WEB-005 interactive browser window event routing":
+    it "AC-1: clicking <a href> resolves URL, updates history, and resets scroll":
+        var state = browser_window_state_new("https://example.test/dir/start.html", 300, 200)
+        state = browser_window_state_set_scroll(state, 50, 230)
+        val out = browser_apply_click_result(state, TEST_PAGE, 20, 15)
+        expect(out.1).to_equal(true)
+        expect(out.0.url).to_equal("https://example.test/dir/sub/next.html")
+        expect(out.0.scroll_y).to_equal(0)
+        expect(out.0.history.len()).to_equal(2)
+        expect(out.0.history_idx).to_equal(1)
+
+    it "AC-2: clicking <button> dispatches button target without navigating and hover records target":
+        val state = browser_window_state_new("simple://home", 300, 200)
+        val hovered = browser_apply_hover_result(state, TEST_PAGE, 20, 45)
+        expect(hovered.hovered_target).to_contain("path:")
+        val out = browser_apply_click_result(state, TEST_PAGE, 20, 45)
+        expect(out.1).to_equal(false)
+        expect(out.0.url).to_equal("simple://home")
+        expect(out.0.status_message).to_equal("button:Run")
+
+    it "AC-3: wheel scroll clamps within [0, max_scroll_y] and scrolled frame differs from top":
+        val hit = browser_hit_test_link_or_button(TEST_PAGE, 300, 200, 0, 10, 10)
+        expect(hit.max_scroll_y).to_be_greater_than(200)
+        var state = browser_window_state_new("simple://home", 300, 200)
+        state = browser_window_state_set_scroll(state, 0, hit.max_scroll_y)
+        state = browser_window_state_clamp_scroll(state, -50)
+        expect(state.scroll_y).to_equal(0)
+        state = browser_window_state_clamp_scroll(state, 1000)
+        expect(state.scroll_y).to_equal(hit.max_scroll_y)
+        val top_frame = browser_render_html_frame_via_at_scroll("live", TEST_PAGE, 300, 200, 0)
+        val bot_frame = browser_render_html_frame_via_at_scroll("live", TEST_PAGE, 300, 200, 100)
+        expect(top_frame.pixels.len()).to_equal(60000)
+        expect(bot_frame.pixels.len()).to_equal(60000)
+        # Top frame has dark #112233 anchor at (10, 10); scrolled frame at y=100 reveals #eeeeee body
+        expect(top_frame.pixels[10 * 300 + 10]).to_equal(0xFF112233u32)
+        expect(bot_frame.pixels[10 * 300 + 10]).to_equal(0xFFEEEEEEu32)
+
+    it "AC-4: keyboard navigation handles Back/Forward/Reload/Scroll/Escape cleanly":
+        var state = browser_window_state_new("https://example.test/a", 300, 200)
+        state = browser_window_state_navigate(state, "https://example.test/b")
+        state = browser_window_state_set_scroll(state, 20, 200)
+        val eff_down = browser_apply_key_event(state, CANON_DOWN)
+        expect(eff_down.should_render).to_equal(true)
+        expect(eff_down.state.scroll_y).to_equal(80)
+        val eff_back = browser_apply_key_event(eff_down.state, CANON_LEFT)
+        expect(eff_back.should_render).to_equal(true)
+        expect(eff_back.state.url).to_equal("https://example.test/a")
+        expect(eff_back.state.scroll_y).to_equal(0)
+        val eff_fwd = browser_apply_key_event(eff_back.state, CANON_RIGHT)
+        expect(eff_fwd.should_render).to_equal(true)
+        expect(eff_fwd.state.url).to_equal("https://example.test/b")
+        val eff_reload = browser_apply_key_event(eff_fwd.state, CANON_R)
+        expect(eff_reload.should_reload).to_equal(true)
+        val eff_close = browser_apply_key_event(eff_fwd.state, CANON_ESCAPE)
+        expect(eff_close.should_close).to_equal(true)
+
+    it "AC-5: gui_window.spl preserves JIT boundary with zero browser_engine or render_adapter imports":
+        val src = file_read("src/app/browser/gui_window.spl")
+        expect(src).to_contain("BrowserWindowAction")
+        expect(src.contains("browser_engine")).to_equal(false)
+        expect(src.contains("render_adapter")).to_equal(false)
+        expect(src.contains("render_lane")).to_equal(false)

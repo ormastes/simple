@@ -1,0 +1,76 @@
+# macOS SFNT / TrueType Collection (`.ttc#<idx>`) line metric regression spec.
+#
+# Pins:
+# - `#<idx>` TTC spec path stripping and face index parsing (`font_face_spec_path` /
+#   `font_face_spec_index`) and face repacking via `sfnt_face_blob`.
+# - `browser_host_has_measured_face_set()` includes macOS hosts while keeping
+#   `browser_host_has_measured_linux_face_set()` Linux-only.
+# - Blink/CoreText +15% ascent rule for macOS Helvetica / Times / Courier when
+#   `lineGap == 0`: Helvetica.ttc#0 yields `[1884, 471, 0, 2048]` -> 10px: 11px
+#   (ascent=9, descent=2), 12px: 14px (ascent=11, descent=3), 20px: 23px
+#   (ascent=18, descent=5); Times.ttc#0 yields `[1843, 512, 0, 2048]` -> 10px: 12px.
+use std.spec
+use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.common.encoding.sfnt.{font_face_spec_path, font_face_spec_index, sfnt_face_blob}
+use std.common.encoding.sfnt_kern.{sfnt_blob_line_metric_units}
+use std.nogc_sync_mut.text_layout.font_provider.{
+    browser_host_has_measured_linux_face_set,
+    browser_host_has_measured_face_set
+}
+use std.nogc_sync_mut.text_layout.font_renderer.{
+    browser_normal_line_height_px,
+    browser_face_ascent_descent_px,
+    browser_face_line_units,
+    font_renderer_registered_selected_bytes_only
+}
+
+describe "macOS SFNT TTC line metrics":
+    it "parses #<idx> TTC spec paths and preserves plain paths":
+        expect(font_face_spec_path("/System/Library/Fonts/Helvetica.ttc#0")).to_equal("/System/Library/Fonts/Helvetica.ttc")
+        expect(font_face_spec_index("/System/Library/Fonts/Helvetica.ttc#0")).to_equal(0)
+        expect(font_face_spec_path("/System/Library/Fonts/Helvetica.ttc#1")).to_equal("/System/Library/Fonts/Helvetica.ttc")
+        expect(font_face_spec_index("/System/Library/Fonts/Helvetica.ttc#1")).to_equal(1)
+        expect(font_face_spec_path("/System/Library/Fonts/Helvetica.ttc")).to_equal("/System/Library/Fonts/Helvetica.ttc")
+        expect(font_face_spec_index("/System/Library/Fonts/Helvetica.ttc")).to_equal(0)
+        expect(font_face_spec_path("/tmp/font#name.ttf")).to_equal("/tmp/font#name.ttf")
+        expect(font_face_spec_index("/tmp/font#name.ttf")).to_equal(0)
+
+    it "enables measured face metrics on macOS without flipping Linux Chrome-159 flag":
+        val linux_host = browser_host_has_measured_linux_face_set()
+        val measured = browser_host_has_measured_face_set()
+        if file_exists("/System/Library/Fonts/Helvetica.ttc"):
+            expect(linux_host).to_equal(false)
+            expect(measured).to_equal(true)
+        elif linux_host:
+            expect(measured).to_equal(true)
+
+    it "extracts Helvetica.ttc faces and computes +15% ascent line metrics on macOS":
+        if file_exists("/System/Library/Fonts/Helvetica.ttc") and not browser_host_has_measured_linux_face_set():
+            val units_reg = browser_face_line_units("Helvetica", false, false)
+            expect(units_reg).to_equal([1884, 471, 0, 2048])
+            val units_bold = browser_face_line_units("Helvetica", true, false)
+            expect(units_bold).to_equal([1884, 471, 0, 2048])
+
+            expect(browser_normal_line_height_px("Helvetica", false, false, 10)).to_equal(11)
+            expect(browser_face_ascent_descent_px("Helvetica", false, false, 10)).to_equal([9, 2])
+
+            expect(browser_normal_line_height_px("Helvetica", false, false, 12)).to_equal(14)
+            expect(browser_face_ascent_descent_px("Helvetica", false, false, 12)).to_equal([11, 3])
+
+            expect(browser_normal_line_height_px("Helvetica", false, false, 20)).to_equal(23)
+            expect(browser_face_ascent_descent_px("Helvetica", false, false, 20)).to_equal([18, 5])
+
+            expect(browser_normal_line_height_px("sans-serif", false, false, 12)).to_equal(14)
+            expect(browser_face_ascent_descent_px("sans-serif", false, false, 12)).to_equal([11, 3])
+
+    it "applies +15% rule to Times.ttc when present and keeps Menlo.ttc unadjusted":
+        if file_exists("/System/Library/Fonts/Times.ttc") and not browser_host_has_measured_linux_face_set():
+            val times_family = "__simple_font_face__|/System/Library/Fonts/Times.ttc#0|Times"
+            expect(browser_face_line_units(times_family, false, false)).to_equal([1843, 512, 0, 2048])
+            expect(browser_normal_line_height_px(times_family, false, false, 10)).to_equal(12)
+            expect(browser_face_ascent_descent_px(times_family, false, false, 10)).to_equal([9, 3])
+        if file_exists("/System/Library/Fonts/Menlo.ttc") and not browser_host_has_measured_linux_face_set():
+            expect(browser_face_line_units("monospace", false, false)).to_equal([1901, 483, 0, 2048])
+
+    it "exposes registered-selected-bytes predicate publicly":
+        expect(font_renderer_registered_selected_bytes_only()).to_equal(false)

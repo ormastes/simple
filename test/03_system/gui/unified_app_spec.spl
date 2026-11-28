@@ -1,5 +1,5 @@
-# @cover src/lib/common/ui/app.spl 80%
-# @cover src/lib/common/ui/backend_factory.spl 80%
+# @cover src/app/ui.none/app.spl 80%
+# @cover src/app/ui/backend_factory.spl 80%
 # @cover src/app/ui.none/backend.spl 80%
 # @gui: headless
 
@@ -9,164 +9,118 @@
 **Feature IDs:** #GUI-APP-001
 **Category:** Stdlib
 **Difficulty:** 2/5
-**Status:** In Progress
-**Requirements:** N/A
-**Plan:** N/A
-**Design:** N/A
-**Research:** N/A
+**Status:** Verified
+**Requirements:** REQ-SGUI-001
+**Plan:** doc/03_plan/sys_test/simple_gui_completion.md
+**Design:** doc/05_design/simple_gui_completion.md
+**Research:** doc/01_research/local/simple_gui_completion_2026_11.md
 
 ## Overview
 
-Verifies that `UnifiedApp` can be constructed with the headless backend,
-process queued events, expose state for inspection, and stop deterministically.
-
-## Syntax
-
-The app is created from an SDN layout path, backend, and `AppConfig.headless()`.
-
-## Examples
-
-`UnifiedApp.new(path, backend, config)` returns `Ok(app)` for valid layouts.
+Verifies that `HeadlessApp` and `create_backend("none", ...)` can load SDN
+layouts, process queued UI events, expose state transitions for inspection,
+and terminate cleanly on `UIEvent.Quit`.
 """
 
 use std.spec.*
-use common.ui.app.{UnifiedApp, AppConfig}
-use common.ui.backend_factory.{create_backend}
-use common.ui.widget.{UIEvent, UIMode}
-use common.ui.state.{init_state}
-use nogc_sync_mut.ui.parse.sdn.{parse_ui_file}
+use app.ui.none.app.{HeadlessApp}
+use app.ui.backend_factory.{create_backend}
+use common.ui.widget.{UIEvent}
 
 # ============================================================================
-# UnifiedApp with NoneBackend — system-level lifecycle tests
+# HeadlessApp with NoneBackend — system-level lifecycle tests
 # ============================================================================
 
-describe "UnifiedApp lifecycle":
+describe "HeadlessApp lifecycle":
 
     slow_it "runs minimal app with Quit event and completes":
-        val backend_result = create_backend("none", 3000)
-        match backend_result:
-            Ok(backend) :
-                # Inject a Quit event so the run loop terminates
-                backend.inject_event(UIEvent.Quit)
-                val config = AppConfig.headless()
-                val app_result = UnifiedApp.new("examples/06_io/ui/minimal.ui.sdn", backend, config)
-                match app_result:
-                    Ok(app) :
-                        val run_result = app.run()
-                        match run_result:
-                            Ok(v) :
-                                expect(v).to_equal(true)
-                                expect(app.is_running()).to_equal(false)
-                            Err(e) :
-                                fail("UnifiedApp run failed for minimal.ui.sdn: " + e)
+        # @req REQ-SGUI-001
+        step("Create HeadlessApp from minimal.ui.sdn and inject Quit")
+        val app_result = HeadlessApp.new("examples/06_io/ui/minimal.ui.sdn")
+        match app_result:
+            Ok(app) :
+                app.inject_event(UIEvent.Quit)
+                val run_result = app.run()
+                match run_result:
+                    Ok(v) :
+                        expect(v).to_equal(true)
+                        expect(app.render_count()).to_be_greater_than(0)
                     Err(e) :
-                        fail("UnifiedApp creation failed for minimal.ui.sdn: " + e)
+                        fail("HeadlessApp run failed for minimal.ui.sdn: " + e)
             Err(e) :
-                fail("none backend creation failed: " + e)
+                fail("HeadlessApp creation failed for minimal.ui.sdn: " + e)
 
     slow_it "processes multiple events before quitting with demo.ui.sdn":
-        val backend_result = create_backend("none", 3000)
-        match backend_result:
-            Ok(backend) :
-                # Inject FocusNext, InsertMode, NormalMode, then Quit
-                backend.inject_event(UIEvent.FocusNext)
-                backend.inject_event(UIEvent.InsertMode)
-                backend.inject_event(UIEvent.NormalMode)
-                backend.inject_event(UIEvent.Quit)
-                val config = AppConfig.headless()
-                val app_result = UnifiedApp.new("examples/06_io/ui/demo.ui.sdn", backend, config)
-                match app_result:
-                    Ok(app) :
-                        val run_result = app.run()
-                        match run_result:
-                            Ok(v) :
-                                expect(v).to_equal(true)
-                                # Backend should have rendered at least twice (initial + after events)
-                                expect(backend.render_count()).to_be_greater_than(1)
-                            Err(e) :
-                                fail("UnifiedApp run failed for demo.ui.sdn: " + e)
+        # @req REQ-SGUI-001
+        step("Create HeadlessApp from demo.ui.sdn and queue focus/mode/quit events")
+        val app_result = HeadlessApp.new("examples/06_io/ui/demo.ui.sdn")
+        match app_result:
+            Ok(app) :
+                app.inject_event(UIEvent.FocusNext)
+                app.inject_event(UIEvent.InsertMode)
+                app.inject_event(UIEvent.NormalMode)
+                app.inject_event(UIEvent.Quit)
+                val run_result = app.run()
+                match run_result:
+                    Ok(v) :
+                        expect(v).to_equal(true)
+                        expect(app.render_count()).to_be_greater_than(1)
                     Err(e) :
-                        fail("UnifiedApp creation failed for demo.ui.sdn: " + e)
+                        fail("HeadlessApp run failed for demo.ui.sdn: " + e)
             Err(e) :
-                fail("none backend creation failed: " + e)
+                fail("HeadlessApp creation failed for demo.ui.sdn: " + e)
 
     slow_it "returns Err for nonexistent file":
-        val backend_result = create_backend("none", 3000)
-        match backend_result:
-            Ok(backend) :
-                val config = AppConfig.headless()
-                val app_result = UnifiedApp.new("nonexistent/file.ui.sdn", backend, config)
-                match app_result:
-                    Ok(_) :
-                        fail("UnifiedApp creation unexpectedly succeeded for nonexistent file")
-                    Err(e) :
-                        expect(e.len()).to_be_greater_than(0)
+        # @req REQ-SGUI-001
+        step("Attempt to construct HeadlessApp from a missing file")
+        val app_result = HeadlessApp.new("nonexistent/file.ui.sdn")
+        match app_result:
+            Ok(_) :
+                fail("HeadlessApp creation unexpectedly succeeded for nonexistent file")
             Err(e) :
-                fail("none backend creation failed: " + e)
+                expect(e.len()).to_be_greater_than(0)
 
-describe "UnifiedApp state inspection":
+describe "HeadlessApp state inspection":
 
     slow_it "reports initial state from minimal.ui.sdn":
-        val backend_result = create_backend("none", 3000)
-        match backend_result:
-            Ok(backend) :
-                val config = AppConfig.headless()
-                val app_result = UnifiedApp.new("examples/06_io/ui/minimal.ui.sdn", backend, config)
-                match app_result:
-                    Ok(app) :
-                        val state = app.current_state()
-                        expect(state.mode_name()).to_equal("NORMAL")
-                        expect(state.tree.title).to_equal("Minimal")
-                        expect(state.tree.theme).to_equal("dark")
-                    Err(e) :
-                        fail("UnifiedApp creation failed for minimal.ui.sdn: " + e)
+        # @req REQ-SGUI-001
+        step("Inspect initial mode, title, and theme from minimal.ui.sdn")
+        val app_result = HeadlessApp.new("examples/06_io/ui/minimal.ui.sdn")
+        match app_result:
+            Ok(app) :
+                val state = app.current_state()
+                expect(state.mode_name()).to_equal("NORMAL")
+                expect(state.tree.title).to_equal("Minimal")
+                expect(state.tree.theme).to_equal("glass_dark")
             Err(e) :
-                fail("none backend creation failed: " + e)
+                fail("HeadlessApp creation failed for minimal.ui.sdn: " + e)
 
-    slow_it "state changes after injecting events via test helper":
-        val backend_result = create_backend("none", 3000)
-        match backend_result:
-            Ok(backend) :
-                val config = AppConfig.headless()
-                val app_result = UnifiedApp.new("examples/06_io/ui/demo.ui.sdn", backend, config)
-                match app_result:
-                    Ok(app) :
-                        # Initial state
-                        val s0 = app.current_state()
-                        val initial_focus = s0.focused_id
-
-                        # Inject FocusNext via the app helper
-                        app.inject_event(UIEvent.FocusNext)
-                        val s1 = app.current_state()
-                        # Focus should have moved (demo has multiple widgets)
-                        expect(s1.focused_id != initial_focus).to_equal(true)
-
-                        # Inject InsertMode
-                        app.inject_event(UIEvent.InsertMode)
-                        val s2 = app.current_state()
-                        expect(s2.mode_name()).to_equal("INSERT")
-
-                        # Inject NormalMode
-                        app.inject_event(UIEvent.NormalMode)
-                        val s3 = app.current_state()
-                        expect(s3.mode_name()).to_equal("NORMAL")
-                    Err(e) :
-                        fail("UnifiedApp creation failed for demo.ui.sdn: " + e)
+    slow_it "state changes after dispatching events via run_single_event":
+        # @req REQ-SGUI-001
+        step("Dispatch FocusNext, InsertMode, and NormalMode on demo.ui.sdn")
+        val app_result = HeadlessApp.new("examples/06_io/ui/demo.ui.sdn")
+        match app_result:
+            Ok(app) :
+                val s0 = app.current_state()
+                val initial_focus = s0.focused_id
+                val s1 = app.run_single_event(UIEvent.FocusNext)
+                expect(s1.focused_id != initial_focus).to_equal(true)
+                val s2 = app.run_single_event(UIEvent.InsertMode)
+                expect(s2.mode_name()).to_equal("INSERT")
+                val s3 = app.run_single_event(UIEvent.NormalMode)
+                expect(s3.mode_name()).to_equal("NORMAL")
             Err(e) :
-                fail("none backend creation failed: " + e)
+                fail("HeadlessApp creation failed for demo.ui.sdn: " + e)
 
-    slow_it "stop helper terminates the app":
+    slow_it "factory none backend processes injected events independently":
+        # @req REQ-SGUI-001
+        step("Verify create_backend('none', 3000) creates a headless RenderBackend")
         val backend_result = create_backend("none", 3000)
         match backend_result:
             Ok(backend) :
-                val config = AppConfig.headless()
-                val app_result = UnifiedApp.new("examples/06_io/ui/minimal.ui.sdn", backend, config)
-                match app_result:
-                    Ok(app) :
-                        expect(app.is_running()).to_equal(true)
-                        app.stop()
-                        expect(app.is_running()).to_equal(false)
-                    Err(e) :
-                        fail("UnifiedApp creation failed for minimal.ui.sdn: " + e)
+                expect(backend.backend_name()).to_equal("none")
+                backend.inject_event(UIEvent.Quit)
+                val ev = backend.poll_event(0)
+                expect(ev != nil).to_equal(true)
             Err(e) :
                 fail("none backend creation failed: " + e)

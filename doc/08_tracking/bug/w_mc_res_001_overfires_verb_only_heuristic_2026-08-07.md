@@ -247,3 +247,9 @@ Verified that both halves of the prior triage are already addressed on
    failures** (including all 9 examples under `verb-only over-fire (bug
    w_mc_res_001_overfires_verb_only_heuristic_2026-08-07)` and profile-default
    checks). Status: `ALREADY-FIXED-VERIFIED`.
+
+## Visibility & Optional Return-Type Fix (2026-11-28, Lane C)
+
+- **Visibility regression fixed:** `test/01_unit/compiler/lint/unwrapped_foreign_resource_spec.spl` was failing 23/31 under strict module visibility because `acquire_verbs()` in `src/compiler/35.semantics/resource_families.spl` was private (`fn acquire_verbs`). Marked `acquire_verbs`, `release_verbs`, `retain_verbs`, and `validity_verbs` `pub fn` and re-exported them from `src/compiler/35.semantics/__init__.spl`, plus re-exported `unwrapped_foreign_resource` from `src/compiler/35.semantics/lint/__init__.spl`.
+- **Optional primitive return-type over-fire fixed:** Added `_ufr_unwrap_return_type()` in `src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl` so optional primitive returns (`text?`, `bool?`, `i64?`, `Option<text>`) and trailing `# comments` no longer falsely classify as named handle types, while optional handle types (`WidgetHandle?`) and known-family handles (`rt_file_open -> i64?`) remain flagged.
+- **Verification:** `test/01_unit/compiler/lint/unwrapped_foreign_resource_spec.spl` 31/31 PASS; `test/01_unit/compiler/lint/unwrapped_foreign_resource_prevention_spec.spl` 3/3 PASS. Status: `FIXED`.

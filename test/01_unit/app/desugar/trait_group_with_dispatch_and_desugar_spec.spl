@@ -1,0 +1,81 @@
+"""
+# Trait-Group `with` Native Dispatch & Public Desugar Regression Spec
+
+Covers `trait_group_with_sugar_unwired_and_from_aot_if_val_2026-08-09`:
+1. Native `trait G with A, B:` parses and dispatches member trait methods.
+2. `pub trait G with A, B:` desugars to `pub struct G:` and generates AOT-safe
+   `match`-based `G__from(src)` through `app.desugar.mod.desugar_source`.
+3. Static call rewriting lowers `G.from(src)` to `G__from(src)` end-to-end.
+"""
+# @req REQ-APP-DESUGAR-001
+use std.spec.{describe, it, expect, step}
+use app.desugar.mod.{desugar_source}
+use app.desugar.trait_scanner.{parse_trait_header, parse_trait_group_members}
+
+trait GroupMemberA:
+    fn a_val() -> i64
+
+trait GroupMemberB:
+    fn b_val() -> i64
+
+trait CombinedAB with GroupMemberA, GroupMemberB:
+    pass_dn
+
+class DualTarget:
+    base: i64
+
+impl GroupMemberA for DualTarget:
+    fn a_val() -> i64:
+        self.base + 1
+
+impl GroupMemberB for DualTarget:
+    fn b_val() -> i64:
+        self.base + 2
+
+impl CombinedAB for DualTarget:
+    pass_dn
+
+fn sum_combined(target: CombinedAB) -> i64:
+    target.a_val() + target.b_val()
+
+fn _pub_group_fixture() -> text:
+    var src = "pub trait CapRead:\n"
+    src = src + "    fn read_byte() -> i64\n\n"
+    src = src + "pub trait CapWrite:\n"
+    src = src + "    me write_byte(b: i64) -> bool\n\n"
+    src = src + "pub trait DeviceCore:\n"
+    src = src + "    fn reader() -> Option<CapRead>\n"
+    src = src + "    fn writer() -> Option<CapWrite>\n"
+    src = src + "    fn rw() -> Option<CapReadWrite>\n\n"
+    src = src + "pub trait CapReadWrite with CapRead, CapWrite:\n"
+    src = src + "    pass_dn\n\n"
+    src = src + "fn acquire(core: DeviceCore) -> Option<CapReadWrite>:\n"
+    src = src + "    CapReadWrite.from(core)\n"
+    src
+
+describe "trait-group with sugar native dispatch and desugar pipeline":
+    it "dispatches member methods natively through a trait group":
+        step("Construct DualTarget and dispatch both member methods via CombinedAB")
+        val target = DualTarget(base: 10)
+        expect(sum_combined(target)).to_equal(23)
+
+    it "parses pub trait group headers and members":
+        step("Verify pub trait header and member extraction")
+        val header = "pub trait CapReadWrite with CapRead, CapWrite:"
+        expect(parse_trait_header(header)).to_equal("CapReadWrite")
+        val members = parse_trait_group_members(header)
+        expect(members.len()).to_equal(2)
+        expect(members[0]).to_equal("CapRead")
+        expect(members[1]).to_equal("CapWrite")
+
+    it "lowers pub trait group and rewrites G.from(core) through desugar_source without if val":
+        step("Run full desugar_source pipeline on pub trait group fixture")
+        val out = desugar_source(_pub_group_fixture())
+        expect(out).to_contain("pub struct CapReadWrite:")
+        expect(out).to_contain("read_byte_fn: fn() -> i64")
+        expect(out).to_contain("write_byte_fn: fn(i64) -> bool")
+        expect(out).to_contain("fn CapReadWrite__from(src: DeviceCore) -> Option<CapReadWrite>:")
+        expect(out).to_contain("match __o0:")
+        expect(out).to_contain("match __o1:")
+        expect(out).to_contain("CapReadWrite__from(core)")
+        expect(out.contains("if val")).to_equal(false)

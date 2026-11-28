@@ -141,3 +141,53 @@ replaced atomically on each event; it is appended like the chunk store.
   reading. Unverified suspects: the server itself stalling on page-in with 2.2 GB
   swapped and the host's swap full; `systemd-run --user --scope` blocking
   before the child starts.
+
+## Request-scope & retained-state fix (2026-11-28)
+Implemented per-request transient scope cleanup around the MCP serve loop after
+auditing cross-request globals and lazy caches, plus deduplicated ANSI stripping:
+
+1. **Transient request-scope boundary in `src/app/mcp/main.spl` (`SIMPLE_MCP_REQUEST_SCOPE`):**
+   - Extracted `_mcp_serve_one_iteration(request_scope_enabled: bool)` and
+     `_mcp_end_request_scope(...)`, enabled by default and opt-out via
+     `SIMPLE_MCP_REQUEST_SCOPE=0`.
+   - Wraps each request read + dispatch cycle in `transient_scope_begin()`,
+     pauses with `transient_scope_pause()` on exit paths, selectively promotes
+     cross-request state only when mutated during that iteration, and closes
+     with `transient_scope_end()`.
+   - Keeps `src/app/mcp/main.spl` free of indented `use` or heavy tool imports
+     (matching startup closure isolation constraints).
+
+2. **Audited cross-request state promotion (`src/lib/nogc_sync_mut/sffi/transient.spl`, `main_lazy_dispatch.spl`, tool/session state modules):**
+   - Exported `transient_scope_pause` and `transient_promote` from `transient.spl`.
+   - Added `mcp_static_tools_promote_caches()` (`src/app/mcp/main_static_tools.spl`)
+     to promote `_MCP_TOOL_TABLE_CACHE`, `_MCP_FULL_JSON_CACHE`, and
+     `_MCP_LAST_READ_PATH` + `_MCP_HINT_SLOTS` on `simple_read` / `simple_edit` / `simple_multi_edit`.
+   - Added `mcp_ctx_promote_caches()` (`src/app/mcp/main_lazy_ctx_tools.spl`),
+     `mcp_session_state_promote()` (`src/app/mcp/main_session_state.spl`),
+     `dap_sessions_promote()` (`src/app/mcp/dap_bridge.spl`),
+     `lsp_mcp_view_promote()` (`src/app/simple_lsp_mcp/visibility_state.spl`),
+     and `dialog_snapshots_promote()` (`src/app/mcp/main_lazy_dialog_tools.spl`),
+     wired through `mcp_lazy_promote_static_caches()` and
+     `mcp_lazy_promote_tool_state(tool_name)` in `src/app/mcp/main_lazy_dispatch.spl`
+     so persistent caches/sessions survive `transient_scope_end()`.
+   - Also promotes `_MCP_TRANSPORT_MODE` on `initialize` and `MCP_LOG_LEVEL` on
+     `logging/setLevel`.
+
+3. **ANSI helper deduplication (`src/app/mcp/main_lazy_diag_tools.spl`):**
+   - Removed the duplicate per-character `pub fn strip_ansi` implementation and
+     imported/re-exported `strip_ansi` from `.main_lazy_json`.
+
+### Verification (2026-11-28)
+- Added `test/01_unit/app/mcp/mcp_request_scope_spec.spl`.
+- Full `simple test` execution on the Nov 16 Rust seed binary is blocked by
+  pre-existing `src/lib/common/types.spl:23:19: Unexpected token: expected As, found Newline`.
+- Self-contained seed execution (JIT and `SIMPLE_EXECUTION_MODE=interpret`)
+  verified `rt_transient_array_scope_begin`, `rt_transient_array_scope_pause`,
+  and `rt_transient_array_scope_end` all return `true`.
+- Isolated seed syntax probe passed with zero parse errors across all modified
+  MCP modules, `transient.spl`, and `mcp_request_scope_spec.spl`.
+- Static source contract checks confirmed zero indented `use ` in `src/app/mcp/main.spl`,
+  zero duplicate `pub fn strip_ansi(` in `main_lazy_diag_tools.spl`, and zero
+  relative function-local `use .` imports in `main_lazy_dispatch.spl`.
+- Item 5 (multi-turn RSS measurement on a freshly built pure-Simple binary) remains
+  pending a release build deploy.

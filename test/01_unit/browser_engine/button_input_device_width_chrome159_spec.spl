@@ -1,0 +1,204 @@
+"""
+## Purpose and audience
+Purpose: pin, against Chrome 159, where auto-width `<button>` and `<input
+type=submit|button|reset>` boxes put their border columns and label ink at
+device scale 1 and 4: a huge-font button (the FORM_CONTROL_MEASURE_MAX_PX
+fallback), an input button followed by a box, inline / wrapped / reversed /
+centred button rows, and text after a chain of buttons.
+Audience: maintainers of the web layout engine.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--window-size=400,300` (600,300 for the button chain),
+`--force-device-scale-factor=1` and `=4`). Every page uses
+`body{margin:0;background:#fff;font:16px/1.5 sans-serif}` and
+`button,input{padding:8px;border:1px solid #94a3b8;color:#172033;background:#fff;margin:0}`.
+`getBoundingClientRect` (CSS px):
+- `font-size:200px` `Go` button: width 276.7969 at k = 1 AND k = 4 (label
+  266.7969, 1067.19 device px). Before the fix k = 4 was 4 x 277 (the 400 px
+  oversample rounded the run to 267).
+- `<input type=submit value="Forms & Media">` 108.3594 (k = 1) / 108.3828
+  (k = 4); the `<button>` after it starts there, label at 117.3594 / 117.3828.
+  `<input type=button value="CSS Layout">` 89.125 / 89.1484.
+- wrapped row (200 px, `flex-wrap:wrap`): Overview 73.5469, Forms 55.7656 ->
+  right edge 129.3125; line 2 CSS Paint 79.5, HTML 54.2969 -> 133.7969.
+- centred row (390 px): TabA from 103.9063 (k = 1) / 103.9023 (k = 4).
+- chain Go HTML `CSS Paint` `Exercise controls` `Forms & Media` then
+  ` <output>`: output at 401.875 (k = 1) / 401.9219 (k = 4).
+
+Measured in the screenshot, on both sides the same way, per band of CSS rows
+(device rows = k x CSS rows): `borders` lists where a run of pixels of exactly
+the border colour starts on the band's border row (below the labels); `ink`
+lists, for each gap between successive border starts (and after the last),
+the first..last column holding a pixel darker than 160 in every channel.
+
+| page / row | k | Chrome |
+|------------|---|--------|
+| huge 236   | 1 | borders 0 276 |
+| huge 236   | 4 | borders 0 1103 (was 1104) |
+| input 26   | 1 | borders 0 107 216, button label ink from 119 (was 118) |
+| input 66   | 1 | reset label ink from 100 (was 99) |
+| input 26   | 4 | borders 0 430 863 (was 864) |
+| wrap 26/60 | 1 | borders 0 73 128 / 0 79 133 (was 129 / 134) |
+
+Not asserted: the huge button's label ink (Chrome 60..1053 at k = 4, 15..262
+at k = 1). Simple paints that glyph run capped near 512 device px
+(21..649 at k = 4) and paints nothing for an 800 px run at k = 1: a glyph
+raster cap, filed as web_render_glyph_run_over_512_device_px_not_painted_2026-11-28.
+The centred row's k = 1 ink is not asserted either (`CSS Paint` last ink
+column 275 vs Chrome 276, a sub-px label pen; the borders are asserted).
+"""
+
+"""
+Traceability: REQ-WEB-003 - button/input device shaping and label pens match Chrome 159 at k = 1 and 4.
+"""
+# @tag: unit, browser_engine, layout, flex, form_control, device_scale, chrome159
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val BI_BORDER: u32 = 0x94a3b8u32
+val BI_P1: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 sans-serif}}button,input{{padding:8px;border:1px solid #94a3b8;color:#172033;background:#fff;margin:0}}</style></head><body><button id=\"h\" style=\"font-size:200px;padding:4px\">Go</button></body></html>"
+val BI_P3: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 sans-serif}}button,input{{padding:8px;border:1px solid #94a3b8;color:#172033;background:#fff;margin:0}} div{{height:40px}}</style></head><body><div><button id=\"i1\">Go</button><button id=\"i2\">HTML</button><button id=\"i3\">CSS Layout</button></div><div style=\"display:flex;flex-wrap:wrap;width:390px\"><button id=\"w1\">Overview</button><button id=\"w2\">Forms</button><button id=\"w3\">CSS Paint</button></div><div style=\"display:flex;flex-direction:row-reverse;width:390px\"><button id=\"r1\">Alpha</button><button id=\"r2\">Beta</button><button id=\"r3\">CSS Layout</button></div><div style=\"display:flex;justify-content:center;width:390px\"><button id=\"c1\">TabA</button><button id=\"c2\">HTML</button><button id=\"c3\">CSS Paint</button></div></body></html>"
+val BI_P4: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 sans-serif}}button,input{{padding:8px;border:1px solid #94a3b8;color:#172033;background:#fff;margin:0}} div{{height:40px}}</style></head><body><div><input id=\"s\" type=\"submit\" value=\"Forms &amp; Media\"><button id=\"b\">Forms &amp; Media</button></div><div><input id=\"t\" type=\"button\" value=\"CSS Layout\"><input id=\"u\" type=\"reset\" value=\"Evidence\"><button id=\"v\">x</button></div></body></html>"
+val BI_P5: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 sans-serif}}button,input{{padding:8px;border:1px solid #94a3b8;color:#172033;background:#fff;margin:0}} div{{height:40px}}</style></head><body><div><button id=\"b1\">Exercise controls</button> <output id=\"o1\">Not exercised</output></div><div><button id=\"b2\">HTML</button> <span id=\"o2\">after text</span></div><div><button id=\"b3\">CSS Paint</button><span id=\"o3\">glued</span></div></body></html>"
+val BI_P6: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 sans-serif}}button,input,.d{{padding:8px;border:1px solid #94a3b8;color:#172033;background:#fff;margin:0}}.d{{font-size:13.3333px;line-height:normal}}</style></head><body><div style=\"display:flex;flex-wrap:wrap;width:200px\"><button id=\"w1\">Overview</button><button id=\"w2\">Forms</button><button id=\"w3\">CSS Paint</button><button id=\"w4\">HTML</button></div></body></html>"
+val BI_P7: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 sans-serif}}button,input,.d{{padding:8px;border:1px solid #94a3b8;color:#172033;background:#fff;margin:0}}.d{{font-size:13.3333px;line-height:normal}}</style></head><body><div><button id=\"a1\">Go</button><button id=\"a2\">HTML</button><button id=\"a3\">CSS Paint</button><button id=\"a4\">Exercise controls</button><button id=\"a5\">Forms &amp; Media</button> <output id=\"o\">Not exercised</output></div></body></html>"
+
+fn bi_dark(p: u32) -> bool:
+    ((p >> 16) & 255u32) < 160u32 and ((p >> 8) & 255u32) < 160u32 and (p & 255u32) < 160u32
+
+fn bi_borders(px: [u32], dw: i32, y: i32) -> [i32]:
+    var out: [i32] = []
+    var prev = false
+    var x = 0
+    while x < dw:
+        val b = (px[y * dw + x] & 0xffffffu32) == BI_BORDER
+        if b and not prev:
+            out.push(x)
+        prev = b
+        x = x + 1
+    out
+
+fn bi_ink(px: [u32], dw: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> text:
+    var first = -1
+    var last = -1
+    var x = x0
+    while x < x1:
+        var y = y0
+        while y < y1:
+            if bi_dark(px[y * dw + x]):
+                if first < 0:
+                    first = x
+                last = x
+                break
+            y = y + 1
+        x = x + 1
+    "{first}..{last}"
+
+fn bi_border_text(px: [u32], dw: i32, k: i32, by: i32) -> text:
+    var s = "borders"
+    for b in bi_borders(px, dw, by * k):
+        s = s + " {b}"
+    s
+
+# `borders <starts> | ink <first..last per gap>` on one band (CSS rows).
+fn bi_band(px: [u32], dw: i32, k: i32, by: i32, y0: i32, y1: i32) -> text:
+    var s = bi_border_text(px, dw, k, by) + " | ink"
+    var prev = 0
+    for b in bi_borders(px, dw, by * k):
+        s = s + " " + bi_ink(px, dw, prev, b, y0 * k, y1 * k)
+        prev = b + k
+    s + " " + bi_ink(px, dw, prev, dw, y0 * k, y1 * k)
+
+fn bi_render(html: text, w: i32, h: i32, k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, w, h, k, "cpu_simd")
+
+fn bi_check(what: text, got: text, want: text) -> i32:
+    if got == want:
+        return 0
+    print "{what}: {got}"
+    print "{what}: Chrome {want}"
+    1
+
+describe "auto-width button and input-button boxes (Chrome 159)":
+    it "AC-1: a 200 px button label keeps its exact width at device scale 1 and 4 (FORM_CONTROL_MEASURE_MAX_PX fallback)":
+        var bad = 0
+        val p1 = bi_render(BI_P1, 400, 245, 1)
+        bad = bad + bi_check("k=1 huge", bi_border_text(p1, 400, 1, 236), "borders 0 276")
+        val p4 = bi_render(BI_P1, 400, 245, 4)
+        bad = bad + bi_check("k=4 huge", bi_border_text(p4, 1600, 4, 236), "borders 0 1103")
+        expect(bad).to_equal(0)
+
+    it "AC-2: what follows an input button starts at the input's LayoutUnit width at device scale 1 and 4":
+        var bad = 0
+        val p1 = bi_render(BI_P4, 400, 80, 1)
+        bad = bad + bi_check("k=1 input row 1", bi_band(p1, 400, 1, 26, 4, 26), "borders 0 107 216 | ink -1..-1 10..98 119..206 -1..-1")
+        bad = bad + bi_check("k=1 input row 2", bi_band(p1, 400, 1, 66, 44, 66), "borders 0 88 161 186 | ink -1..-1 10..79 100..151 172..176 -1..-1")
+        val p4 = bi_render(BI_P4, 400, 80, 4)
+        bad = bad + bi_check("k=4 input row 1", bi_band(p4, 1600, 4, 26, 4, 26), "borders 0 430 863 | ink -1..-1 40..396 474..830 -1..-1")
+        bad = bad + bi_check("k=4 input row 2", bi_band(p4, 1600, 4, 66, 44, 66), "borders 0 353 644 743 | ink -1..-1 39..319 397..609 685..709 -1..-1")
+        expect(bad).to_equal(0)
+
+    it "AC-3: inline, wrapped, reversed and centred button rows keep Chrome's edges and label ink at device scale 1 and 4":
+        var bad = 0
+        val r1 = bi_render(BI_P3, 400, 165, 1)
+        bad = bad + bi_check("k=1 inline", bi_band(r1, 400, 1, 26, 4, 26), "borders 0 35 89 178 | ink -1..-1 10..25 46..79 100..169 -1..-1")
+        bad = bad + bi_check("k=1 wrap-capable row", bi_band(r1, 400, 1, 66, 44, 66), "borders 0 73 128 208 | ink -1..-1 10..63 84..119 139..198 -1..-1")
+        bad = bad + bi_check("k=1 row-reverse", bi_band(r1, 400, 1, 106, 84, 106), "borders 203 291 337 389 | ink -1..-1 213..282 303..327 347..379 -1..-1")
+        bad = bad + bi_check("k=1 centred", bi_border_text(r1, 400, 1, 146), "borders 104 151 206 285")
+        val r4 = bi_render(BI_P3, 400, 165, 4)
+        bad = bad + bi_check("k=4 inline", bi_band(r4, 1600, 4, 26, 4, 26), "borders 0 139 356 713 | ink -1..-1 39..104 184..322 399..679 -1..-1")
+        bad = bad + bi_check("k=4 wrap-capable row", bi_band(r4, 1600, 4, 66, 44, 66), "borders 0 290 513 831 | ink -1..-1 39..257 335..478 556..798 -1..-1")
+        bad = bad + bi_check("k=4 row-reverse", bi_band(r4, 1600, 4, 106, 84, 106), "borders 813 1166 1348 1556 | ink -1..-1 852..1132 1210..1315 1388..1523 -1..-1")
+        bad = bad + bi_check("k=4 centred", bi_band(r4, 1600, 4, 146, 124, 146), "borders 416 605 822 1140 | ink -1..-1 453..572 650..788 865..1107 -1..-1")
+        val w1 = bi_render(BI_P6, 400, 70, 1)
+        bad = bad + bi_check("k=1 wrapped line 1", bi_band(w1, 400, 1, 26, 4, 26), "borders 0 73 128 | ink -1..-1 10..63 84..119 -1..-1")
+        bad = bad + bi_check("k=1 wrapped line 2", bi_band(w1, 400, 1, 60, 37, 59), "borders 0 79 133 | ink -1..-1 10..69 90..123 -1..-1")
+        val w4 = bi_render(BI_P6, 400, 70, 4)
+        bad = bad + bi_check("k=4 wrapped line 1", bi_band(w4, 1600, 4, 26, 4, 26), "borders 0 290 513 | ink -1..-1 39..257 335..478 -1..-1")
+        bad = bad + bi_check("k=4 wrapped line 2", bi_band(w4, 1600, 4, 60, 37, 59), "borders 0 314 531 | ink -1..-1 39..281 358..496 -1..-1")
+        expect(bad).to_equal(0)
+
+    it "AC-4: text after a button, or after a chain of buttons, keeps Chrome's columns at device scale 1 and 4":
+        var bad = 0
+        val f1 = bi_render(BI_P5, 400, 120, 1)
+        bad = bad + bi_check("k=1 output", bi_band(f1, 400, 1, 26, 4, 26), "borders 0 118 | ink -1..-1 10..109 125..219")
+        bad = bad + bi_check("k=1 span", bi_band(f1, 400, 1, 66, 44, 66), "borders 0 53 | ink -1..-1 10..43 60..120")
+        bad = bad + bi_check("k=1 glued", bi_band(f1, 400, 1, 106, 84, 106), "borders 0 79 | ink -1..-1 10..69 80..116")
+        val f4 = bi_render(BI_P5, 400, 120, 4)
+        bad = bad + bi_check("k=4 output", bi_band(f4, 1600, 4, 26, 4, 26), "borders 0 474 | ink -1..-1 40..439 501..882")
+        bad = bad + bi_check("k=4 span", bi_band(f4, 1600, 4, 66, 44, 66), "borders 0 213 | ink -1..-1 40..178 238..483")
+        bad = bad + bi_check("k=4 glued", bi_band(f4, 1600, 4, 106, 84, 106), "borders 0 314 | ink -1..-1 39..281 321..470")
+        val c1 = bi_render(BI_P7, 600, 40, 1)
+        bad = bad + bi_check("k=1 chain", bi_band(c1, 600, 1, 26, 4, 26), "borders 0 35 89 169 288 396 | ink -1..-1 10..25 46..79 100..159 180..278 299..387 403..497")
+        val c4 = bi_render(BI_P7, 600, 40, 4)
+        bad = bad + bi_check("k=4 chain", bi_band(c4, 2400, 4, 26, 4, 26), "borders 0 139 356 674 1152 1586 | ink -1..-1 39..104 184..322 399..641 719..1117 1197..1553 1613..1994")
+        expect(bad).to_equal(0)
+
+# Columns where a dark run (green < 128) starts on device row y, from x0.
+fn bi_edges(px: [u32], dw: i32, x0: i32, y: i32) -> text:
+    var s = "row {y}:"
+    var prev = false
+    var x = x0
+    while x < dw:
+        val d = ((px[y * dw + x] >> 8) & 255u32) < 128u32
+        if d and not prev:
+            s = s + " {x}"
+        prev = d
+        x = x + 1
+    s
+
+describe "text after an auto-width button at device scale 4 (Chrome 159)":
+    it "AC-5: starts at the button's device-shaped LayoutUnit width, so its glyph edges land on Chrome's columns":
+        # `<button>Exercise controls</button> <output>Not exercised</output>`:
+        # the button is 119.5078 px at k = 4 (label shaped at 53.33 px), not
+        # the k = 1 119.4844. Dark-run starts of the output, device x >= 495.
+        # Before the fix (base 2bc96bcf7de) all 30 text rows y 50..79 differed
+        # (y53 578 for 579, y57 582 / 807 / 820, y60 582 / 639 / 819, y64
+        # 582 / 740); after it 26 of 30 match (y66 y67 y72 y74 still differ).
+        var bad = 0
+        val f4 = bi_render(BI_P5, 400, 120, 4)
+        bad = bad + bi_check("k=4 follower", bi_edges(f4, 1600, 495, 53), "row 53: 501 510 531 549 579 620 652 671 688 721 728 745 774 789 823 858 877")
+        bad = bad + bi_check("k=4 follower", bi_edges(f4, 1600, 495, 57), "row 57: 501 513 531 546 567 583 618 638 655 668 685 706 721 742 761 774 787 808 821 841 856 875")
+        bad = bad + bi_check("k=4 follower", bi_edges(f4, 1600, 495, 60), "row 60: 501 515 531 545 568 583 617 640 657 666 684 707 721 741 774 787 820 842 855 877")
+        bad = bad + bi_check("k=4 follower", bi_edges(f4, 1600, 495, 64), "row 64: 501 517 531 545 569 583 616 660 684 721 741 774 789 819 854 877")
+        expect(bad).to_equal(0)

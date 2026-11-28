@@ -1732,6 +1732,68 @@ pub(crate) fn apply_dict_mutation_in_place(
     Ok(())
 }
 
+/// Read-only dict methods over already-evaluated arguments, for a chained
+/// receiver (`f().unwrap().contains_key(k)`) dispatched through
+/// `call_method_on_value_with_args`. Same semantics as the matching arms of
+/// [`handle_dict_methods`], including the private-fn gate on a module
+/// namespace's `get`/`get_or`. `None` = not a read method served here.
+/// Bug: seed_nested_call_dict_methods_missing_2026-11-28.
+pub(crate) fn dict_read_method_on_values(
+    map: &crate::value::DictMap,
+    method: &str,
+    args: &[Value],
+) -> Result<Option<Value>, CompileError> {
+    let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Nil);
+    let gate_private_fn = |key: &str| -> Result<(), CompileError> {
+        if let Some(Value::Function { def, .. }) = map.get(key) {
+            if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                && def.name == key
+                && crate::interpreter::is_module_namespace_dict(map)
+            {
+                crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+            }
+        }
+        Ok(())
+    };
+    let result = match method {
+        "len" | "length" => Value::Int(map.len() as i64),
+        "is_empty" => Value::Bool(map.is_empty()),
+        "has" | "contains_key" | "contains" => Value::Bool(map.contains_key(&arg(0).to_key_string())),
+        "get" | "get_or" => {
+            let key_val = arg(0);
+            let key = key_val.to_key_string();
+            gate_private_fn(&key)?;
+            let default = if method == "get_or" { arg(1) } else { Value::Nil };
+            map.get(&key)
+                .cloned()
+                .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
+                .unwrap_or(default)
+        }
+        "keys" => {
+            note_keys_materialization();
+            Value::array(
+                crate::value::dict_entries_ordered(map)
+                    .into_iter()
+                    .map(|(k, v)| Value::dict_entry_key_for_iteration(v, k))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        "values" => {
+            // Hands a module namespace's values out: same gate as the direct form.
+            crate::interpreter::interpreter_call::gate_module_namespace_handout(map)?;
+            note_keys_materialization();
+            Value::array(
+                crate::value::dict_entries_ordered(map)
+                    .into_iter()
+                    .map(|(_, v)| Value::dict_entry_value_for_iteration(v))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
+}
+
 /// Handle Dict methods
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_dict_methods(

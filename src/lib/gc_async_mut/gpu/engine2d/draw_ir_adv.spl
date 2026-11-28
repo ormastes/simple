@@ -4114,6 +4114,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     var offscreen = eng
     var offscreen_created = false
     var offscreen_pooled = false
+    var offscreen_vulkan_pooled = false
     if eng.backend_name() != "vulkan" and eng.backend_name() != "metal" and depth == 0:
         # Software/baremetal offscreen: borrow the shared single-slot pool at
         # the (non-reentrant) top level so a fresh ~8 MB surface is not charged
@@ -4130,6 +4131,17 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 offscreen = created
                 offscreen_created = true
                 offscreen_pooled = true
+    elif eng.backend_name() == "vulkan" and depth == 0:
+        val created = eng.acquire_shared_vulkan_offscreen_pooled(
+            embedding.width, embedding.height)
+        match created:
+            Err(reason):
+                return _engine2d_draw_ir_render_outcome(
+                    eng, 0, commands.len().to_i32(), reason, 0)
+            Ok(target):
+                offscreen = target
+                offscreen_created = true
+                offscreen_vulkan_pooled = true
     else:
         val created = eng.draw_ir_create_offscreen_engine(
             embedding.width, embedding.height)
@@ -4164,9 +4176,14 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             batch.backend_target == "metal", draw_ir_no_rect(),
             css_background_pixel_work_budget)
     offscreen = inner.engine
-    val device_restored = css_group and eng.draw_ir_composite_device_css_group(
-        offscreen, embedding.x, embedding.y, embedding.width, embedding.height,
-        embedding.opacity_milli)
+    val device_restored = if css_group:
+        eng.draw_ir_composite_device_css_group(
+            offscreen, embedding.x, embedding.y, embedding.width, embedding.height,
+            embedding.opacity_milli)
+    else:
+        eng.draw_ir_composite_device_milli(
+            offscreen, embedding.x, embedding.y, embedding.width, embedding.height,
+            embedding.opacity_milli)
     val child = if device_restored: engine2d_readback([], "device_restored") else: offscreen.read_pixels_with_source()
     val composited = if device_restored:
         true
@@ -4185,7 +4202,9 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         )
     # A pooled offscreen is retained for the next same-size batch (and future
     # frames); shutting it down would free its buffer and defeat the reuse.
-    if not offscreen_pooled:
+    if offscreen_vulkan_pooled:
+        eng.release_shared_vulkan_offscreen_pooled(offscreen)
+    elif not offscreen_pooled:
         offscreen.shutdown()
     if not composited:
         return _engine2d_draw_ir_render_outcome(
@@ -4989,6 +5008,14 @@ fn _engine2d_draw_ir_invalid_prepared_damage_plan(
         composition: composition, damage_rects: damage_rects, entries: [],
         commands_considered: 0, commands_culled_by_damage: 0)
 
+fn _engine2d_draw_ir_retained_embedding_safe(batch: DrawIrBatch) -> bool:
+    val embedding = batch.embedding
+    (embedding.width > 0 and embedding.height > 0 and
+        embedding.opacity_milli > 0 and embedding.opacity_milli <= 1000 and
+        (embedding.opacity_milli == 1000 or
+         (embedding.surface_id != "" and not css_opacity_group_surface(embedding.surface_id))) and
+        not _engine2d_draw_ir_batch_samples_parent(batch))
+
 fn engine2d_draw_ir_prepare_damage_plan(
     composition: DrawIrComposition, damage_rects: [i64],
     width: i32, height: i32, content_identity: text
@@ -5011,9 +5038,7 @@ fn engine2d_draw_ir_prepare_damage_plan(
     var spatial_indexes: [Engine2dDrawIrSpatialIndex] = []
     for batch in composition.batches:
         val embedding = batch.embedding
-        if (embedding.width <= 0 or embedding.height <= 0 or
-            embedding.opacity_milli != 1000 or
-            _engine2d_draw_ir_batch_samples_parent(batch)):
+        if not _engine2d_draw_ir_retained_embedding_safe(batch):
             return _engine2d_draw_ir_invalid_prepared_damage_plan(
                 composition, damage_rects, width, height, content_identity,
                 "retained-composition-unsafe-embedding")
@@ -5220,6 +5245,22 @@ fn _engine2d_draw_ir_render_prepared_damage_plan_with_images(
         prepared.composition, images, prepared.width, prepared.height)
     if preflight_reason != "":
         return engine2d_draw_ir_retained_rejected(engine, preflight_reason)
+    var has_layered = false
+    for batch in prepared.composition.batches:
+        if not _engine2d_draw_ir_retained_embedding_safe(batch):
+            return engine2d_draw_ir_retained_rejected(
+                engine, "retained-composition-unsafe-embedding")
+        if batch.embedding.opacity_milli < 1000:
+            if not _engine2d_draw_ir_retained_layer_batch(batch, engine):
+                return engine2d_draw_ir_retained_rejected(
+                    engine, "retained-composition-unsafe-embedding")
+            has_layered = true
+        elif _engine2d_draw_ir_retained_layer_batch(batch, engine):
+            has_layered = true
+    if has_layered:
+        return _engine2d_draw_ir_render_composition_damaged_with_images(
+            engine, prepared.composition, images, prepared.damage_rects,
+            readback_frame, defer_cpu_present)
     if (engine.backend_name() == "vulkan" and
         not engine.stage_present_damage(prepared.damage_rects)):
         return engine2d_draw_ir_retained_rejected(
@@ -5295,7 +5336,7 @@ fn _engine2d_draw_ir_uses_embedded_surface(batch: DrawIrBatch, eng: Engine2D, de
         embedding.width == eng.width() and embedding.height == eng.height() and
         embedding.opacity_milli >= 1000 and not css_group)
     val needs_real_offscreen = (embedding.opacity_milli < 1000 or
-        backend == "vulkan" or backend == "metal" or css_group)
+        backend == "metal" or css_group)
     val baremetal_direct = backend == "baremetal" and embedding.opacity_milli >= 1000
     (embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and
         embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and
@@ -5340,10 +5381,9 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
     # Vulkan damage plan after rejected composition preflight" spec example).
     for batch in composition.batches:
         val embedding = batch.embedding
-        if (embedding.width <= 0 or embedding.height <= 0 or
-            not (embedding.opacity_milli == 1000 or
-                 _engine2d_draw_ir_retained_layer_batch(batch, engine)) or
-            _engine2d_draw_ir_batch_samples_parent(batch)):
+        if (not _engine2d_draw_ir_retained_embedding_safe(batch) or
+            (embedding.opacity_milli < 1000 and
+             not _engine2d_draw_ir_retained_layer_batch(batch, engine))):
             return Engine2dDrawIrTileOutcome(
                 engine: engine, tiles_total: 0, tiles_rendered: 0,
                 tiles_skipped: 0, ops_rendered: 0,
@@ -5407,8 +5447,11 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
                     plan, index, draw_ir_rect_bounds(ux0 - embedding.x,
                         uy0 - embedding.y, ux1 - ux0, uy1 - uy0))
                 val pooled = eng.backend_name() != "vulkan"
+                val vulkan_pooled = eng.backend_name() == "vulkan"
                 val acquired = if pooled:
                     _engine2d_embed_offscreen_acquire(eng, embedding.width, embedding.height)
+                elif vulkan_pooled:
+                    eng.acquire_shared_vulkan_offscreen_pooled(embedding.width, embedding.height)
                 else:
                     eng.draw_ir_create_offscreen_engine(embedding.width, embedding.height)
                 match acquired:
@@ -5432,16 +5475,30 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
                             inner.unsupported_kinds != "none"):
                             if unsupported != "": unsupported = unsupported + ","
                             unsupported = unsupported + inner.unsupported_kinds
-                        val child = layer.read_pixels_with_source()
+                        var child_loaded = false
+                        var child = engine2d_readback([], "not_requested")
                         for clip in clips:
                             eng.set_clip(clip.x, clip.y, clip.width, clip.height)
-                            if not eng.draw_ir_composite_readback(
-                                embedding.x, embedding.y, embedding.width,
-                                embedding.height, child, embedding.opacity_milli):
-                                if unsupported != "": unsupported = unsupported + ","
-                                unsupported = unsupported + "embedded-device-composite-not-proven"
+                            val device_ok = if vulkan_pooled:
+                                eng.draw_ir_composite_device_milli(
+                                    layer, embedding.x, embedding.y,
+                                    embedding.width, embedding.height,
+                                    embedding.opacity_milli)
+                            else:
+                                false
+                            if not device_ok:
+                                if not child_loaded:
+                                    child = layer.read_pixels_with_source()
+                                    child_loaded = true
+                                if not eng.draw_ir_composite_readback(
+                                    embedding.x, embedding.y, embedding.width,
+                                    embedding.height, child, embedding.opacity_milli):
+                                    if unsupported != "": unsupported = unsupported + ","
+                                    unsupported = unsupported + "embedded-device-composite-not-proven"
                             eng.clear_clip()
-                        if not pooled:
+                        if vulkan_pooled:
+                            eng.release_shared_vulkan_offscreen_pooled(layer)
+                        elif not pooled:
                             layer.shutdown()
             else:
                 for clip in clips:
@@ -5636,9 +5693,9 @@ fn engine2d_draw_ir_render_composition_damaged(
             readback: engine2d_readback([], "preflight_rejected"))
     val batch = composition.batches[0]
     val embedding = batch.embedding
-    if (embedding.width <= 0 or embedding.height <= 0 or
-        embedding.opacity_milli != 1000 or
-        _engine2d_draw_ir_batch_samples_parent(batch)):
+    if (not _engine2d_draw_ir_retained_embedding_safe(batch) or
+        (embedding.opacity_milli < 1000 and
+         not _engine2d_draw_ir_retained_layer_batch(batch, engine))):
         return Engine2dDrawIrTileOutcome(
             engine: engine, tiles_total: 0, tiles_rendered: 0,
             tiles_skipped: 0, ops_rendered: 0,
@@ -5646,7 +5703,8 @@ fn engine2d_draw_ir_render_composition_damaged(
             unsupported_kinds: "retained-composition-unsafe-embedding",
             readback: engine2d_readback([], "preflight_rejected"))
     var images: [Engine2dResolvedDrawIrImage] = []
-    if (embedding.x != 0 or embedding.y != 0 or
+    if (embedding.opacity_milli < 1000 or
+        embedding.x != 0 or embedding.y != 0 or
         embedding.width != engine.width() or
         embedding.height != engine.height()):
         # An offset/cropped opaque root batch is a legitimate retained update:

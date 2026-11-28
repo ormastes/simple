@@ -1,0 +1,92 @@
+"""
+## Purpose and audience
+Purpose: Reproduce and verify detection of enums declared in multiple terminal modules with divergent variant orders (W-DUP-ENUM-001).
+Audience: Compiler engineers guarding against silent global enum discriminant mismatches.
+Bug: doc/08_tracking/bug/duplicate_backend_types_terminal_declarations.md
+"""
+# @cover src/compiler/35.semantics/lint/duplicate_enum_variants.spl
+# @req REQ-COMPFIX-7
+
+use std.spec.{describe, it, expect, step}
+use compiler.semantics.lint.duplicate_enum_variants.{
+    extract_enum_declarations,
+    enum_variant_order_divergences,
+    check_duplicate_enum_variants
+}
+
+describe "W-DUP-ENUM-001: duplicate terminal enum variant order detector":
+    it "detects the BackendKind sabotage case where Byl moves from index 6 to index 0":
+        step("Check two terminal modules declaring BackendKind with divergent variant order")
+        val mod_b = "pub enum BackendKind:\n    Cranelift\n    Llvm\n    LlvmLib\n    Wasm\n    Native\n    C\n    Byl\n    Interpreter\n"
+        val mod_c = "pub enum BackendKind:\n    Byl\n    Cranelift\n    Llvm\n    LlvmLib\n    Wasm\n    Native\n    C\n    Interpreter\n"
+        val findings = check_duplicate_enum_variants([
+            ("src/compiler/70.backend/backend/backend_types.spl", mod_b),
+            ("src/compiler/10.frontend/core/backend_types.spl", mod_c)
+        ])
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("W-DUP-ENUM-001")
+        expect(findings[0].enum_name).to_equal("BackendKind")
+        expect(findings[0].first_path).to_equal("src/compiler/70.backend/backend/backend_types.spl")
+        expect(findings[0].second_path).to_equal("src/compiler/10.frontend/core/backend_types.spl")
+        expect(findings[0].message).to_contain("Byl (6 vs 0)")
+
+    it "detects a swapped two-variant enum across two modules":
+        step("Check two modules declaring Severity in reversed order")
+        val a = "enum Severity:\n    Error\n    Warning\n"
+        val b = "enum Severity:\n    Warning\n    Error\n"
+        val findings = check_duplicate_enum_variants([
+            ("src/compiler/00.common/error.spl", a),
+            ("src/compiler/00.common/diagnostics/severity.spl", b)
+        ])
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].divergent_variants.len()).to_equal(2)
+
+    it "stays silent when duplicate declarations have identical variant order":
+        step("Verify identical variant order produces zero divergent-order findings")
+        val src = "enum CompiledSymbolKind:\n    Function\n    Data\n    Const\n"
+        val findings = check_duplicate_enum_variants([
+            ("src/a.spl", src),
+            ("src/b.spl", src)
+        ])
+        expect(findings.len()).to_equal(0)
+
+    it "stays silent when a second module only re-exports the terminal enum":
+        step("Verify export use re-export is not treated as a second terminal declaration")
+        val terminal = "pub enum BackendKind:\n    Cranelift\n    Llvm\n    Byl\n"
+        val reexport = "use compiler.backend.backend.backend_types.{{BackendKind}}\nexport use compiler.backend.backend.backend_types.*\n"
+        val findings = check_duplicate_enum_variants([
+            ("src/compiler/70.backend/backend/backend_types.spl", terminal),
+            ("src/compiler/70.backend/backend_types.spl", reexport)
+        ])
+        expect(findings.len()).to_equal(0)
+
+    it "stays silent when same-named enums share fewer than two variants":
+        step("Verify unrelated same-named enums with disjoint variants do not over-fire")
+        val a = "enum Mode:\n    Read\n    Write\n"
+        val b = "enum Mode:\n    Fast\n    Slow\n"
+        val findings = check_duplicate_enum_variants([
+            ("src/a.spl", a),
+            ("src/b.spl", b)
+        ])
+        expect(findings.len()).to_equal(0)
+
+    it "parses payload variants, explicit discriminants, and skips embedded methods":
+        step("Extract variants from enum with tuple/struct payloads, discriminants, and methods")
+        val src = "pub enum TokenKind:\n    Ident(name: text)\n    IntLit(value: i64) = 1\n    Eof\n\n    fn is_eof() -> bool:\n        false\n"
+        val decls = extract_enum_declarations(src, "src/token.spl")
+        expect(decls.len()).to_equal(1)
+        expect(decls[0].name).to_equal("TokenKind")
+        expect(decls[0].variants.len()).to_equal(3)
+        expect(decls[0].variants[0]).to_equal("Ident")
+        expect(decls[0].variants[1]).to_equal("IntLit")
+        expect(decls[0].variants[2]).to_equal("Eof")
+
+    it "skips vendored third-party paths":
+        step("Verify vendor directories are excluded from duplicate enum checks")
+        val a = "enum VendorEnum:\n    Alpha\n    Beta\n"
+        val b = "enum VendorEnum:\n    Beta\n    Alpha\n"
+        val findings = check_duplicate_enum_variants([
+            ("src/a.spl", a),
+            ("src/runtime/vendor/pkg/b.spl", b)
+        ])
+        expect(findings.len()).to_equal(0)

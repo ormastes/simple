@@ -1138,3 +1138,60 @@ fn flattened_extern_return_type_follows_calling_module_declaration() {
     assert_eq!(local_ty("text_reader", "s"), TypeId::STRING);
     assert_eq!(local_ty("word_reader", "w"), TypeId::I64);
 }
+
+/// Bug `seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28`
+/// (script lane): the flattened unit holds one free `fn byte_len(data: [u8])`.
+/// A module that neither defines nor imports it calls `x.byte_len()` on an
+/// untyped `x`; the receiver must lower as a text so the call is the builtin,
+/// not a bare name codegen binds to that function. Inside the defining module
+/// the function is in scope and the receiver stays erased.
+#[test]
+fn flattened_out_of_scope_free_byte_len_leaves_text_builtin_on_untyped_receiver() {
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+    let tag_items = |source: &str, owner: &str| -> Vec<Node> {
+        let parsed = Parser::new(source).parse().expect("parse");
+        parsed
+            .items
+            .into_iter()
+            .map(|mut item| {
+                if let Node::Function(f) = &mut item {
+                    crate::interpreter::tag_function_module_owner(f, owner);
+                }
+                item
+            })
+            .collect()
+    };
+
+    let mut entry = Parser::new("fn main() -> i64:\n    0\n").parse().expect("parse entry");
+    entry.items.extend(tag_items(
+        "fn byte_len(data: [u8]) -> i64:\n    99\n\nfn own_len(x) -> i64:\n    x.byte_len()\n",
+        "bytes_mod.spl",
+    ));
+    entry.items.extend(tag_items(
+        "fn untyped_len(x) -> i64:\n    x.byte_len()\n\nfn untyped_count(x) -> i64:\n    x.char_count()\n",
+        "other_mod.spl",
+    ));
+
+    // Untyped parameters need the lenient mode the script lane lowers with.
+    let mut lowerer = Lowerer::new();
+    lowerer.set_lenient_types(true);
+    let hir = lowerer.lower_module(&entry).expect("flattened unit lowers");
+    let body = |func: &str| {
+        let f = hir.functions.iter().find(|f| f.name == func).unwrap();
+        format!("{:?}", f.body)
+    };
+    let text_receiver = format!("ty: {:?} }}, method: \"byte_len\"", TypeId::STRING);
+    let untyped = body("untyped_len");
+    assert!(untyped.contains(&text_receiver), "out-of-scope free fn: receiver must be text, got {untyped}");
+    let own = body("own_len");
+    assert!(own.contains("method: \"byte_len\""), "own_len must still call byte_len, got {own}");
+    assert!(!own.contains(&text_receiver), "in-scope free fn: receiver must stay erased, got {own}");
+    // No free `char_count` exists in the unit, so nothing can capture it and
+    // the receiver is left as written.
+    let count = body("untyped_count");
+    assert!(
+        !count.contains(&format!("ty: {:?} }}, method: \"char_count\"", TypeId::STRING)),
+        "no candidate to guard against, got {count}"
+    );
+}

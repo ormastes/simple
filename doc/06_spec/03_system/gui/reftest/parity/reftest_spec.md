@@ -323,15 +323,15 @@ expect(r.bottom).to_equal(400.0)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/reftest/parity/reftest_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-11-28 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
 Tests covering:
-- Drawing parity reftest suite
-- 10 scenes produce distinct signatures
-- compare_pictures stub
+- Drawing parity reftest suite (`11/11` scenes active: `path_winding`, `path_evenodd`, `dashed_strokes`, `gradient_linear`, `text_arabic`, `porter_duff`, `mix_blend_mode`, `backdrop_filter`, `scroll_damage`, `transform_tree`, `opacity_layer`)
+- All 11 scenes produce distinct deterministic signatures
+- `compare_pictures` self-equality and winding vs even-odd delta
 - Scene cull rects match Chromium spec
 
 ## Scenario Summary

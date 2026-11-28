@@ -1,0 +1,91 @@
+"""
+## Purpose and audience
+Purpose: Prevent per-unit double-probing of clang/llc and cross-tool diagnostic clobbering in LLVM object tool resolution.
+Audience: Compiler backend engineers maintaining LLVM tool discovery and caching.
+Bug: doc/08_tracking/bug/native_build_llc_probe_per_unit_transient_not_found_2026-11-16.md
+"""
+# @cover src/compiler/70.backend/backend/llvm_backend_tools.spl
+# @cover src/compiler/95.interp/interpreter/llvm/tools.spl
+# @req REQ-LLVM-TOOL-PROBE-CACHE
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.backend.llvm_backend_tools.{
+    llvm_llc_not_found_message_v1,
+    llvm_combine_tool_probe_diagnostics_v1
+}
+use compiler.interp.interpreter.llvm.tools.{
+    ToolProbeOutcome,
+    llc_probe_candidates,
+    clang_probe_candidates,
+    reset_find_tool_cache,
+    find_tool_cache_record,
+    last_tool_probe_diagnostic,
+    tool_probe_diagnostic_for_candidates,
+    find_tool_cache_lock_is_free
+}
+
+describe "LLVM object tool resolution cache and per-tool diagnostics":
+    it "exposes canonical llc and clang candidate lists":
+        step("Check llc and clang candidate priority lists")
+        val llc_cands = llc_probe_candidates()
+        val clang_cands = clang_probe_candidates()
+        expect(llc_cands.len()).to_be_greater_than(0)
+        expect(clang_cands.len()).to_be_greater_than(0)
+        expect(llc_cands[llc_cands.len() - 1]).to_equal("llc")
+        expect(clang_cands[clang_cands.len() - 1]).to_equal("clang")
+
+    it "keeps per-tool cached diagnostics isolated when another tool updates last_tool_probe_diagnostic":
+        step("Record an llc transient failure followed by a clang absent failure")
+        reset_find_tool_cache()
+        val llc_cands = llc_probe_candidates()
+        val clang_cands = clang_probe_candidates()
+        val llc_key = llc_cands.join(",")
+        val clang_key = clang_cands.join(",")
+
+        val _llc = find_tool_cache_record(llc_key, ToolProbeOutcome(
+            found_path: "",
+            failed_candidates: ["C:/llvm/bin/llc.exe"],
+            had_existing_candidate: true
+        ))
+        val _clang = find_tool_cache_record(clang_key, ToolProbeOutcome(
+            found_path: "",
+            failed_candidates: [],
+            had_existing_candidate: false
+        ))
+
+        val llc_diag = tool_probe_diagnostic_for_candidates(llc_cands)
+        val clang_diag = tool_probe_diagnostic_for_candidates(clang_cands)
+        expect(llc_diag).to_contain("C:/llvm/bin/llc.exe")
+        expect(llc_diag).to_contain("transient")
+        expect(clang_diag).to_contain("missing")
+        expect(last_tool_probe_diagnostic()).to_contain("missing")
+
+        val combined = llvm_combine_tool_probe_diagnostics_v1(llc_diag, clang_diag)
+        val formatted = llvm_llc_not_found_message_v1("llc not found", combined)
+        expect(formatted).to_contain("C:/llvm/bin/llc.exe")
+        expect(formatted).to_contain("missing")
+        expect(find_tool_cache_lock_is_free()).to_equal(true)
+        reset_find_tool_cache()
+
+    it "combines identical or empty per-tool diagnostics without duplication":
+        step("Verify diagnostic combiner edge cases")
+        expect(llvm_combine_tool_probe_diagnostics_v1("", "")).to_equal("")
+        expect(llvm_combine_tool_probe_diagnostics_v1("llc failed", "")).to_equal("llc failed")
+        expect(llvm_combine_tool_probe_diagnostics_v1("", "clang missing")).to_equal("clang missing")
+        expect(llvm_combine_tool_probe_diagnostics_v1("same", "same")).to_equal("same")
+        expect(llvm_combine_tool_probe_diagnostics_v1("llc failed", "clang missing")).to_equal("llc failed; clang missing")
+
+    it "resolves clang once per unit in non-strict mode and does not call find_clang in strict mode":
+        step("Inspect _llvm_resolve_object_tools_v1 in llvm_backend_tools.spl")
+        val src = file_read_text("src/compiler/70.backend/backend/llvm_backend_tools.spl")
+        val fn_start = src.find("fn _llvm_resolve_object_tools_v1()")
+        val fn_end = src.find("pub fn llvm_object_llc_v1()")
+        expect(fn_start).to_be_greater_than(0)
+        expect(fn_end).to_be_greater_than(fn_start)
+        val body = src.substring(fn_start, fn_end)
+        expect(body).to_contain("native_tool_strict_requested_v1()")
+        expect(body).to_contain("tool_probe_diagnostic_for_candidates(llc_probe_candidates())")
+        expect(body).to_contain("llvm_combine_tool_probe_diagnostics_v1(")
+        # Must not call llvm_object_llc_v1() and then find_clang() a second time.
+        expect(body.contains("llvm_object_llc_v1()")).to_equal(false)

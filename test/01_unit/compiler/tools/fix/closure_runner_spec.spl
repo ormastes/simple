@@ -87,6 +87,20 @@ describe "closure rewrite helpers":
         expect(out.contains("val r = sub(side(), 2)")).to_equal(true)
         expect(out.contains("    sub(1, 2)\n")).to_equal(true)
 
+    it "renames a free function called only from nested call arguments":
+        # closure_views_miss_calls_nested_in_call_args_2026_11_07 — the 13-site
+        # class: `side()` nested inside another call's argument expressions must
+        # be collected as a rename target, not skipped.
+        step("rename nested callee")
+        val src = "fn side() -> i64:\n    1\n\nfn f(a: i64, b: i64) -> i64:\n    a\n\nfn g() -> i64:\n    val r = f(side() + 1, 2)\n    f(1, side() * 2)\n"
+        val views = closure_scope_views([source_snapshot("n.spl", src)])
+        val decl = view_named(views, "fn_decl", "side")
+        val out = apply_edits("n.spl", src, [rewrite_ctx("t").rename(decl, "zero")])
+        expect(out.contains("fn zero() -> i64:")).to_equal(true)
+        expect(out.contains("val r = f(zero() + 1, 2)")).to_equal(true)
+        expect(out.contains("f(1, zero() * 2)")).to_equal(true)
+        expect(out.contains("side")).to_equal(false)
+
     it "reorders trivial args in place and hoists side-effecting args into temporaries":
         step("reorder_args")
         val views = closure_scope_views([source_snapshot("c.spl", CALLS)])

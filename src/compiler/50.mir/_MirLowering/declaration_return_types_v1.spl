@@ -2,11 +2,13 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.return_type_interface_v1.{RtiCallableSignatureV1,
-    rti_row_from_signature_v1, rti_method_parts, rti_type_param_names,
+    rti_row_from_signature_v1, rti_row_of_trait_method_v1, rti_key_text,
+    rti_method_parts, rti_type_param_names,
     rti_semantic_callable_return_v1}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1,
-    MirHirFunctionDeclarationV1, MirHirNominalDeclarationV1, MirHirEnumDeclarationV1}
+    MirHirFunctionDeclarationV1, MirHirNominalDeclarationV1, MirHirEnumDeclarationV1,
+    MirHirTraitDeclarationV1}
 
 fn mir_declaration_rti_owner_params_v1(module: MirHirModuleDeclarationsV1,
         function: MirHirFunctionDeclarationV1) -> [text]:
@@ -31,6 +33,7 @@ impl MirLowering:
         # Imported signatures must be available before entry-module lowering.
         # Their raw SymbolIds remain provider-local until RTI binds the stable
         # declaration identities into the actual consumer's symbol table.
+        var seen_keys: Dict<text, bool> = {}
         for raw_function in module.functions:
             val function: MirHirFunctionDeclarationV1 = raw_function
             val semantic_return = rti_semantic_callable_return_v1(module.name, module.symbols,
@@ -44,7 +47,28 @@ impl MirLowering:
                         return_type: function.return_type, is_static: function.is_static)
                     match rti_row_from_signature_v1(module.name, module.symbols, signature):
                         case Ok(row):
+                            seen_keys[rti_key_text(row.key)] = true
                             match self.rti.register_rows([row]):
                                 case Ok(_): ()
                                 case Err(error): self.error_fatal(error.message, None)
                         case Err(error): self.error_fatal(error.message, None)
+        for raw_trait in module.traits:
+            val tr: MirHirTraitDeclarationV1 = raw_trait
+            val t_params = rti_type_param_names(tr.type_params)
+            for group in [tr.methods, tr.defaults]:
+                for raw_m in group:
+                    val m: MirHirFunctionDeclarationV1 = raw_m
+                    val m_ret = rti_semantic_callable_return_v1(module.name, module.symbols,
+                        m.symbol, m.name, m.return_type)
+                    match m_ret.kind:
+                        case HirTypeKind.Infer(_, _): ()
+                        case _:
+                            match rti_row_of_trait_method_v1(module.name, module.symbols, tr.symbol,
+                                    tr.name, t_params, m.symbol, m.name,
+                                    rti_type_param_names(m.type_params), m.return_type, m.is_static):
+                                case Ok(row):
+                                    val kt = rti_key_text(row.key)
+                                    if not seen_keys.has(kt):
+                                        seen_keys[kt] = true
+                                        val _reg = self.rti.register_rows([row])
+                                case Err(_): ()

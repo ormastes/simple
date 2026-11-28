@@ -3,7 +3,7 @@
 # Maps raw system input events (keyboard, mouse, touch) to the
 # platform-independent UIEvent enum used by the UI state machine.
 
-use common.ui.widget.{UIEvent}
+use common.ui.widget.{UIEvent, WidgetNode}
 use common.layout.box_model.{BlockLayoutBox}
 
 # =========================================================================
@@ -65,29 +65,163 @@ fn translate_key_event(key: i32, modifiers: i32) -> UIEvent?:
 
     return nil
 
+fn translate_browser_key_event(keycode: i32, scancode: i32, modifiers: i32, text_input_focused: bool) -> UIEvent?:
+    """Translate raw winit/host keyboard input into a browser UIEvent.
+
+    Handles macOS/winit uppercase keycodes (65..90), DOM punctuation codes
+    (186..222), Backspace/Delete/Enter/Tab/Escape/Space/PageUp/PageDown/Arrows,
+    and suppresses Normal/Command/Insert mode hotkeys while a text field has focus.
+    """
+    val has_shift = (modifiers % 2) == 1
+    val has_ctrl = ((modifiers / 2) % 2) == 1
+
+    # Ctrl+Q / Ctrl+C -> Quit
+    if has_ctrl and (keycode == 113 or keycode == 81 or keycode == 99 or keycode == 67):
+        return UIEvent.Quit
+
+    # Escape (27) or macOS Escape scancode (53 when not Digit5 keycode=53)
+    if keycode == 27 or (keycode != 53 and scancode == 53):
+        return UIEvent.NormalMode
+
+    # Tab (9) or macOS Tab scancode (48 when not Digit0 keycode=48)
+    if keycode == 9 or (keycode != 48 and scancode == 48):
+        if has_shift:
+            return UIEvent.FocusPrev
+        return UIEvent.FocusNext
+
+    # Forward Delete (macOS scancode 117 when not F6 keycode=117)
+    if keycode != 117 and scancode == 117:
+        return UIEvent.KeyPress(key: "delete")
+
+    # Backspace (8, 127, or macOS scancode 51 when not Digit3 keycode=51)
+    if keycode == 8 or keycode == 127 or (keycode != 51 and scancode == 51):
+        return UIEvent.KeyPress(key: "backspace")
+
+    # Enter (13, or macOS Return scancode 36 when not Home keycode=36)
+    if keycode == 13 or (keycode != 36 and scancode == 36):
+        if text_input_focused:
+            return UIEvent.KeyPress(key: "enter")
+        return UIEvent.Action(name: "enter")
+
+    # PageUp / PageDown (33/34, or macOS scancodes 116/121 when not F5/F10)
+    if keycode == 33 or (keycode != 116 and scancode == 116):
+        return UIEvent.KeyPress(key: "page_up")
+    if keycode == 34 or (keycode != 121 and scancode == 121):
+        return UIEvent.KeyPress(key: "page_down")
+
+    # Arrow keys (37..40, or macOS scancodes 123..126 when not F12)
+    if keycode == 37 or (keycode != 123 and scancode == 123):
+        return UIEvent.KeyPress(key: "left")
+    if keycode == 38 or (keycode != 126 and scancode == 126):
+        return UIEvent.KeyPress(key: "up")
+    if keycode == 39 or (keycode != 124 and scancode == 124):
+        return UIEvent.KeyPress(key: "right")
+    if keycode == 40 or (keycode != 125 and scancode == 125):
+        return UIEvent.KeyPress(key: "down")
+
+    # Space (32, or macOS Space scancode 49 when not Digit1 keycode=49)
+    if keycode == 32 or (keycode != 49 and scancode == 49):
+        return UIEvent.KeyPress(key: " ")
+
+    val ch = _browser_printable_char(keycode, has_shift)
+    if ch != "":
+        if not text_input_focused:
+            if ch == ":":
+                return UIEvent.CommandMode
+            if ch == "i":
+                return UIEvent.InsertMode
+        return UIEvent.KeyPress(key: ch)
+
+    return None
+
+fn _browser_printable_char(keycode: i32, has_shift: bool) -> text:
+    if keycode >= 65 and keycode <= 90:
+        if has_shift:
+            return char_from_code(keycode)
+        return char_from_code(keycode + 32)
+    if keycode >= 48 and keycode <= 57 and has_shift:
+        match keycode:
+            48 => return ")"
+            49 => return "!"
+            50 => return "@"
+            51 => return "#"
+            52 => return "$"
+            53 => return "%"
+            54 => return "^"
+            55 => return "&"
+            56 => return "*"
+            57 => return "("
+            _ => pass_dn
+    match keycode:
+        186 => return if has_shift: ":" else: ";"
+        187 => return if has_shift: "+" else: "="
+        188 => return if has_shift: "<" else: ","
+        189 => return if has_shift: "_" else: "-"
+        190 => return if has_shift: ">" else: "."
+        191 => return if has_shift: "?" else: "/"
+        192 => return if has_shift: "~" else: "`"
+        219 => return if has_shift: "{" else: "["
+        220 => return if has_shift: "|" else: "\\"
+        221 => return if has_shift: "}" else: "]"
+        222 => return if has_shift: "\"" else: "'"
+        _ => pass_dn
+    if keycode >= 32 and keycode <= 126:
+        return char_from_code(keycode)
+    ""
+
 # =========================================================================
 # Mouse Event Translation
 # =========================================================================
 
+fn _mouse_button_name(button: i32) -> text:
+    match button:
+        0 => "left"
+        1 => "middle"
+        2 => "right"
+        _ => ""
+
 fn translate_mouse_event(x: i32, y: i32, button: i32, action: text) -> UIEvent?:
     """Translate a raw mouse event into a UIEvent.
 
-    action: "press", "release", "move"
+    action: "press", "release", "move", "down", "up", "wheel", "dragstart", "dragover", "drop"
     button: 0 = left, 1 = middle, 2 = right
     """
     match action:
-        "press" =>
-            if button == 0:
+        "press" | "down" | "dragstart" =>
+            val btn = _mouse_button_name(button)
+            if btn == "left":
                 return UIEvent.TouchPress(x: x, y: y)
+            if btn != "":
+                return UIEvent.MouseEvent(x: x.to_f64(), y: y.to_f64(), button: btn, kind: "down")
             return nil
-        "release" =>
-            if button == 0:
+        "release" | "up" | "drop" =>
+            val btn = _mouse_button_name(button)
+            if btn == "left":
                 return UIEvent.TouchRelease(x: x, y: y)
+            if btn != "":
+                return UIEvent.MouseEvent(x: x.to_f64(), y: y.to_f64(), button: btn, kind: "up")
             return nil
-        "move" =>
+        "move" | "dragover" | "hover" =>
             return UIEvent.TouchMove(x: x, y: y)
+        "wheel" =>
+            return UIEvent.ScrollEvent(x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0)
         _ =>
             return nil
+
+fn translate_wheel_event(x: i32, y: i32, dx: f64, dy: f64) -> UIEvent:
+    """Translate pointer coordinates and wheel deltas into a ScrollEvent."""
+    UIEvent.ScrollEvent(x: x.to_f64(), y: y.to_f64(), dx: dx, dy: dy)
+
+fn has_active_pointer_drag(root: WidgetNode) -> bool:
+    """Return true when a floating window, card, captured widget, or scrollbar drag is active."""
+    if root.get_prop("ui_drag_node_id") != "" or root.get_prop("ui_captured_id") != "":
+        return true
+    for id in root.collect_ids():
+        if id != "":
+            val node = WidgetNode(id: id)
+            if node.kind_name() == "scroll" and node.get_prop("ui_scrollbar_dragging") == "true":
+                return true
+    false
 
 # =========================================================================
 # Hit Testing
@@ -237,3 +371,5 @@ fn char_from_code(code: i32) -> text:
     if code == 126: return "~"
 
     return "?"
+
+export translate_wheel_event, has_active_pointer_drag

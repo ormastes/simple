@@ -2,10 +2,11 @@
 #
 # SkPicture — recorded drawing commands for later playback.
 
-use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.geometry.{SkRect, SkPoint}
 use std.skia.entity.paint.{SkPaint, sk_paint_new}
-use std.skia.entity.path.{SkPath}
+use std.skia.entity.path.{SkPath, SkPathVerb, sk_path_new}
 use std.skia.entity.image.{SkImage}
+use std.skia.entity.matrix.{Matrix3x3}
 
 # ============================================================================
 # SkPictureOp — a recorded drawing operation with optional payload fields
@@ -166,6 +167,27 @@ impl SkPictureRecorder:
     fn is_recording() -> bool:
         self.recording
 
+fn sk_pack_matrix_op_path(m: Matrix3x3) -> SkPath:
+    """Losslessly pack the 6 affine entries of Matrix3x3 into an SkPath carrier."""
+    sk_path_new().move_to(m.m00, m.m01).line_to(m.m02, m.m10).line_to(m.m11, m.m12)
+
+fn sk_unpack_matrix_from_path(path_opt: Option<SkPath>) -> Option<Matrix3x3>:
+    """Unpack a full affine Matrix3x3 encoded by sk_pack_matrix_op_path."""
+    if val Some(p) = path_opt:
+        if p.segments.len() == 3:
+            val s0 = p.segments[0]
+            val s1 = p.segments[1]
+            val s2 = p.segments[2]
+            if (s0.verb == SkPathVerb.Move and s1.verb == SkPathVerb.Line and
+                s2.verb == SkPathVerb.Line and
+                s0.pts.len() >= 1 and s1.pts.len() >= 1 and s2.pts.len() >= 1):
+                return Some(Matrix3x3(
+                    m00: s0.pts[0].x, m01: s0.pts[0].y, m02: s1.pts[0].x,
+                    m10: s1.pts[0].y, m11: s2.pts[0].x, m12: s2.pts[0].y,
+                    m20: 0.0, m21: 0.0, m22: 1.0
+                ))
+    None
+
 export SkPictureOpKind
 export SkPictureOp
 export SkPicture
@@ -175,5 +197,7 @@ export sk_picture_op_draw_rrect
 export sk_picture_op_draw_path
 export sk_picture_op_draw_image
 export sk_picture_op_draw_paint
+export sk_pack_matrix_op_path
+export sk_unpack_matrix_from_path
 export sk_picture_empty
 export sk_picture_recorder_new

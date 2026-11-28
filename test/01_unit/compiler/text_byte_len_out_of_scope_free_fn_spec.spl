@@ -1,0 +1,79 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+"""
+## Purpose and audience
+
+Purpose: pin that a text `.byte_len()` / `.char_count()` is the text builtin
+when the only free function of that name in the program is one the calling
+module neither defines nor imports.
+Audience: compiler engineers maintaining seed method resolution.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/text_byte_len_out_of_scope_free_fn_spec.spl`.
+2. Every scenario must pass; a failure is a regression in method resolution.
+
+## Compatibility and limitations
+
+Runs the fixture program `test/fixtures/seed_byte_len_scope/main.spl` in a
+child process, so it exercises the script lane (one flattened unit). The
+native-build lanes are covered by Rust tests in
+`pipeline/native_project/mangle.rs` and `codegen/instr/closures_structs.rs`.
+Set `SIMPLE_BIN` to target a specific binary; default `bin/simple`.
+"""
+
+"""
+# Text builtins must not bind to an out-of-scope free function
+
+Bug: doc/08_tracking/bug/seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28.md
+
+The fixture's `util/bytes.spl` declares `fn byte_len(data: [u8]) -> i64: 99`
+and `fn char_count(data: [u8]) -> i64: 55`. `app/other.spl` and the entry
+module call `.byte_len()` / `.char_count()` on texts and import neither.
+Before the fix an untyped receiver printed the sentinels 99 and 55.
+
+Fail-closed: every scenario asserts a line the child prints, so a child
+that printed nothing fails.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn fixture_output() -> text:
+    val (stdout, stderr, _code) = process_run(simple_binary(), ["test/fixtures/seed_byte_len_scope/main.spl"])
+    stdout + stderr
+
+describe "text byte_len / char_count ignore an out-of-scope free function":
+
+    it "keeps the builtin for typed text receivers":
+        # @req: REQ-SSPEC-UNIT
+        step("Verify: typed and loop-bound text receivers")
+        val out = fixture_output()
+        expect(out).to_contain("typed=5")
+        expect(out).to_contain("loop=5")
+
+    it "keeps the builtin for an untyped receiver in an imported module":
+        # @req: REQ-SSPEC-UNIT
+        step("Verify: untyped parameter holding a text")
+        # Pre-fix ground truth: untyped=99 and count=55.
+        val out = fixture_output()
+        expect(out).to_contain("untyped=9")
+        expect(out).to_contain("count=3")
+
+    it "keeps the builtin for an untyped receiver in the entry module":
+        # @req: REQ-SSPEC-UNIT
+        step("Verify: the entry module imports another symbol from util.bytes")
+        expect(fixture_output()).to_contain("entry=4")
+
+    it "still calls the free functions where they are in scope":
+        # @req: REQ-SSPEC-UNIT
+        step("Verify: free calls inside util.bytes reach its own functions")
+        expect(fixture_output()).to_contain("free=154")

@@ -867,6 +867,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Error handling
     "rt_function_not_found",
     "rt_method_not_found",
+    "rt_value_not_callable",
     // I/O operations
     "rt_print_str",
     "rt_println_str",

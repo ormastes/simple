@@ -7,9 +7,19 @@ use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
 use app.ui.render.types.{RenderConfig}
 use app.browser.render_adapter.{render_browser, browser_engine_frame_at,
+    browser_engine_frame_at_scroll, browser_page_document_html,
     browser_viewport, browser_dump_png_if_requested}
 use app.browser.gui_window.{browser_window_open, browser_window_drawable,
-    browser_window_present, browser_window_wait}
+    browser_window_present, browser_window_wait_action, BrowserWindowAction}
+use app.browser.window_state.{
+    BrowserWindowState, browser_window_state_new, browser_window_state_clamp_scroll,
+    browser_window_state_resize, browser_window_state_set_scroll,
+    browser_apply_click_result, browser_apply_hover_result, browser_apply_key_event
+}
+use std.common.web.browser_renderer_protocol.{browser_text_input_overlay_empty}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time
+}
 use app.browser.sandbox_status.{browser_sandbox_status, browser_sandbox_status_line}
 use std.common.json.{json_escape_string}
 
@@ -86,28 +96,69 @@ fn main() -> i64:
 
 fn browser_open_window(url: text) -> i64:
     """Open the window, render the page at the window's real drawable size,
-    present it 1:1, and re-render on every settled resize. Rendering stays
-    HERE, not in gui_window.spl — see browser_window_wait's docstring."""
+    present it 1:1, and route resize, click, hover, wheel, and keyboard input.
+    Rendering stays HERE, not in gui_window.spl — see
+    browser_window_wait_action's docstring."""
     val vp = browser_viewport()
     val created = browser_window_open(url, vp.width, vp.height)
     match created:
         case None:
             return 1
         case Some(gui):
-            var size = browser_window_drawable(gui, vp.width, vp.height)
-            while size[0] > 0:
-                val w = size[0]
-                val h = size[1]
-                val frame = browser_engine_frame_at(url, w, h)
-                val why = if frame.reason != "": " ({frame.reason})" else: ""
-                print "browser window: requested {vp.width}x{vp.height}px, drawable {w}x{h}px, backend={frame.backend}{why}"
-                val dump = browser_dump_png_if_requested(frame.pixels, w, h)
-                if dump != "":
-                    print dump
-                if not browser_window_present(gui, w, h, frame.pixels):
-                    gui.close()
-                    return 1
-                size = browser_window_wait(gui, w, h)
+            val init_size = browser_window_drawable(gui, vp.width, vp.height)
+            var state = browser_window_state_new(url, init_size[0], init_size[1])
+            var needs_render = state.width > 0 and state.height > 0
+            var page_html = ""
+            while state.width > 0:
+                if needs_render:
+                    val w = state.width
+                    val h = state.height
+                    page_html = browser_page_document_html(state.url)
+                    val layout_probe = simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+                        page_html, w, h, 0, state.scroll_y, browser_text_input_overlay_empty()
+                    )
+                    state = browser_window_state_set_scroll(
+                        state, layout_probe.resolved_scroll_y, layout_probe.max_scroll_y
+                    )
+                    val frame = browser_engine_frame_at_scroll(state.url, w, h, state.scroll_y)
+                    val why = if frame.reason != "": " ({frame.reason})" else: ""
+                    print "browser window: url={state.url} scroll_y={state.scroll_y}/{state.max_scroll_y} drawable={w}x{h}px backend={frame.backend}{why}"
+                    val dump = browser_dump_png_if_requested(frame.pixels, w, h)
+                    if dump != "":
+                        print dump
+                    if not browser_window_present(gui, w, h, frame.pixels):
+                        gui.close()
+                        return 1
+                    needs_render = false
+                val action = browser_window_wait_action(gui, state.width, state.height)
+                match action:
+                    case BrowserWindowAction.Close:
+                        break
+                    case BrowserWindowAction.Resize(nw, nh):
+                        state = browser_window_state_resize(state, nw, nh)
+                        needs_render = true
+                    case BrowserWindowAction.Click(cx, cy):
+                        val click_out = browser_apply_click_result(state, page_html, cx, cy)
+                        state = click_out.0
+                        if state.status_message != "":
+                            print "browser click: {state.status_message}"
+                        needs_render = click_out.1
+                    case BrowserWindowAction.Move(mx, my):
+                        state = browser_apply_hover_result(state, page_html, mx, my)
+                    case BrowserWindowAction.Wheel(dy):
+                        val prev_scroll = state.scroll_y
+                        state = browser_window_state_clamp_scroll(state, dy)
+                        needs_render = state.scroll_y != prev_scroll
+                    case BrowserWindowAction.Key(keycode, _):
+                        val effect = browser_apply_key_event(state, keycode)
+                        state = effect.state
+                        if effect.should_close:
+                            break
+                        if effect.should_reload:
+                            print "browser reload: {state.url}"
+                        needs_render = effect.should_render
+                    case BrowserWindowAction.None:
+                        ()
             gui.close()
             0
 

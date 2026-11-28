@@ -58,6 +58,8 @@ It has not yet been confirmed through a codegen run.
 ## Verification
 
 - `test/01_unit/compiler/50.mir/if_val_match_diverging_value_type_spec.spl`: `9 examples, 0 failures` (`--mode=interpreter`, 2026-11-27), covering `mir_merge_arm_types`, typed and untyped `if val ... else: match ...` with `return Err` / `return Ok` and `Ok(Some(value))` yielding arms, `break`/`continue` loops, all-diverging `match`, standalone and `if val ... else: match ...` all-diverging guarded catch-all matches, and positive non-diverging control.
+- `test/01_unit/compiler/50.mir/if_val_match_llvm_value_type_spec.spl`: `5 examples, 0 failures` (`--mode=interpreter`, 2026-11-28, Lane A), verifying full `HIR -> MIR -> MirToLlvm` lowering of untyped `_drain_completions` while-loop `if val ... else: match ...` struct shape, `f64` `if val`/`if-elif` chains with returning arms, `then`-returns/`else`-match-yields, and all-diverging `else` match with zero LLVM `codegen_errors` and zero `void` operands.
+- `src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl:293` annotation updated to `ROOT-FIXED+STAGE2-GATED` while retaining the Stage-2-safe slot form until the frozen Phase 2 binary is rebuilt.
 - Native LLVM Phase 2 backend rebuild verification remains pending (`fix-implemented-verification-pending`).
 
 ## Status

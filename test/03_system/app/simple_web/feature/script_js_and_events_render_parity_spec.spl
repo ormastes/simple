@@ -1,0 +1,280 @@
+# @cover src/lib/gc_async_mut/web/browser_session.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/script/simple_script_vm.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_script_renderer.spl 80%
+# Purpose and audience: executable specification evidence for interactive JS, Simple Script, and DOM event parity.
+# @req REQ-WEB-SCRIPT-JS-EVENTS-001
+
+# @tag: rendering, web, script, events, js, simple_script
+# @req REQ-WEB-SCRIPT-JS-EVENTS-001
+# @evidence-display: links
+
+"""# Web Engine: Simple Script, JS Engine, and Interactive DOM Event Parity
+
+Verifies end-to-end interactive DOM scripting and event dispatch in `BrowserSession`
+and `simple_web_script_renderer` across both JavaScript (`<script>`) and Simple Script
+(`<script type="text/simple">`) over six canonical interactive scenarios (`e01`–`e06`):
+
+- `e01`: Initial script boot (`document.createElement`, `appendChild`, `textContent`, `style.*`, `console.log`)
+- `e02`: Click handling (`click`, `classList.add`/`remove`, counter updates, active tab styling)
+- `e03`: Drag & Drop (`dragstart`, `dragover`, `drop`, `dataTransfer.setData`/`getData`) and pointer slider drag (`mousedown`, `mousemove`, `mouseup`)
+- `e04`: Dropdown `<select>` `change` event, selected `<option>` serialization, and live `.value` reading
+- `e05`: Text input (`focus`, `input`, `keydown`) updating input value and character count preview
+- `e06`: Hover (`mouseover`), checkbox toggle (`click`/`change`), and form `submit` with `preventDefault()`
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.gpu.browser_engine.dom.{DomNodeRoute}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_by_id, be_dom_get_text_content, be_dom_get_attr, be_dom_has_attr
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_script_renderer.{
+    simple_web_render_html_with_scripts_to_rgba_pixels
+}
+
+fn route_for(session: BrowserSession, id_val: text) -> DomNodeRoute:
+    val gen = session.document_generation()
+    val node = be_dom_find_by_id(session.current_dom, id_val).unwrap()
+    DomNodeRoute(generation: gen, node_id: node.node_id)
+
+fn text_of(session: BrowserSession, id_val: text) -> text:
+    be_dom_get_text_content(be_dom_find_by_id(session.current_dom, id_val).unwrap())
+
+fn style_of(session: BrowserSession, id_val: text) -> text:
+    be_dom_get_attr(be_dom_find_by_id(session.current_dom, id_val).unwrap(), "style")
+
+fn build_boot_page(use_simple_script: bool) -> text:
+    val script_tag = if use_simple_script:
+        "<script type='text/simple'>\n" +
+        "val pill = document.getElementById(\"status-pill\")\n" +
+        "pill.textContent = \"Engine Active: 4 modules\"\n" +
+        "pill.style.borderColor = \"#10b981\"\n" +
+        "val cards = document.getElementById(\"cards\")\n" +
+        "for name in [\"DOM\", \"CSS\", \"Events\", \"Raster\"]:\n" +
+        "    val c = document.createElement(\"div\")\n" +
+        "    c.className = \"card\"\n" +
+        "    c.textContent = name\n" +
+        "    cards.appendChild(c)\n" +
+        "console.log(\"e01:boot:4modules\")\n" +
+        "</script>"
+    else:
+        "<script>" +
+        "var pill = document.getElementById('status-pill');" +
+        "pill.textContent = 'Engine Active: 4 modules';" +
+        "pill.style.borderColor = '#10b981';" +
+        "var cards = document.getElementById('cards');" +
+        "var names = ['DOM', 'CSS', 'Events', 'Raster'];" +
+        "for (var i = 0; i < names.length; i = i + 1) {" +
+        "  var c = document.createElement('div');" +
+        "  c.className = 'card';" +
+        "  c.textContent = names[i];" +
+        "  cards.appendChild(c);" +
+        "}" +
+        "console.log('e01:boot:4modules');" +
+        "</script>"
+    "<html><body><div id='status-pill'>Booting...</div><div id='cards'></div>" + script_tag + "</body></html>"
+
+fn build_interactive_page(use_simple_script: bool) -> text:
+    val script_tag = if use_simple_script:
+        "<script type='text/simple'>\n" +
+        "var count = 0\n" +
+        "document.getElementById(\"btn-count\").addEventListener(\"click\", fn(ev):\n" +
+        "    count += 1\n" +
+        "    document.getElementById(\"counter-val\").textContent = \"Clicks: {count}\"\n" +
+        ")\n" +
+        "document.getElementById(\"tab-perf\").addEventListener(\"click\", fn(ev):\n" +
+        "    document.getElementById(\"tab-overview\").classList.remove(\"active\")\n" +
+        "    document.getElementById(\"tab-perf\").classList.add(\"active\")\n" +
+        "    document.getElementById(\"status-badge\").textContent = \"Tab: Performance\"\n" +
+        ")\n" +
+        "val dc = document.getElementById(\"drag-card\")\n" +
+        "val dz = document.getElementById(\"drop-zone\")\n" +
+        "dc.addEventListener(\"dragstart\", fn(ev):\n" +
+        "    ev.dataTransfer.setData(\"text/plain\", \"Layer Card\")\n" +
+        ")\n" +
+        "dz.addEventListener(\"dragover\", fn(ev):\n" +
+        "    ev.preventDefault()\n" +
+        ")\n" +
+        "dz.addEventListener(\"drop\", fn(ev):\n" +
+        "    ev.preventDefault()\n" +
+        "    val item = ev.dataTransfer.getData(\"text/plain\")\n" +
+        "    dz.textContent = \"Dropped: {item}\"\n" +
+        "    dz.style.borderColor = \"#22c55e\"\n" +
+        ")\n" +
+        "val tr = document.getElementById(\"range-track\")\n" +
+        "var dragging = false\n" +
+        "tr.addEventListener(\"mousedown\", fn(ev):\n" +
+        "    dragging = true\n" +
+        ")\n" +
+        "tr.addEventListener(\"mousemove\", fn(ev):\n" +
+        "    if dragging:\n" +
+        "        val pct = clamp(Math.round((ev.offsetX * 100) / 260), 0, 100)\n" +
+        "        document.getElementById(\"range-fill\").style.width = \"{pct}%\"\n" +
+        "        document.getElementById(\"slider-label\").textContent = \"Slider: {pct}%\"\n" +
+        ")\n" +
+        "tr.addEventListener(\"mouseup\", fn(ev):\n" +
+        "    dragging = false\n" +
+        ")\n" +
+        "val sel = document.getElementById(\"theme-select\")\n" +
+        "sel.addEventListener(\"change\", fn(ev):\n" +
+        "    document.getElementById(\"theme-banner\").textContent = \"Theme: {sel.value}\"\n" +
+        ")\n" +
+        "val inp = document.getElementById(\"filter-input\")\n" +
+        "inp.addEventListener(\"input\", fn(ev):\n" +
+        "    val cur = inp.value\n" +
+        "    document.getElementById(\"query-preview\").textContent = \"Query: {cur} ({cur.len()} chars)\"\n" +
+        ")\n" +
+        "var hovered = false\n" +
+        "document.getElementById(\"hover-tile\").addEventListener(\"mouseover\", fn(ev):\n" +
+        "    hovered = true\n" +
+        "    document.getElementById(\"hover-tile\").textContent = \"Hover: Active\"\n" +
+        ")\n" +
+        "document.getElementById(\"agree-form\").addEventListener(\"submit\", fn(ev):\n" +
+        "    ev.preventDefault()\n" +
+        "    val ok = document.getElementById(\"agree-cb\").checked\n" +
+        "    val ok_s = if ok: \"Checked\" else: \"Unchecked\"\n" +
+        "    val hv_s = if hovered: \"Active\" else: \"Idle\"\n" +
+        "    document.getElementById(\"submit-result\").textContent = \"Submitted: {ok_s} | Hover: {hv_s}\"\n" +
+        ")\n" +
+        "</script>"
+    else:
+        "<script>" +
+        "var count = 0;" +
+        "document.getElementById('btn-count').addEventListener('click', function() {" +
+        "  count = count + 1;" +
+        "  document.getElementById('counter-val').textContent = 'Clicks: ' + count;" +
+        "});" +
+        "document.getElementById('tab-perf').addEventListener('click', function() {" +
+        "  document.getElementById('tab-overview').classList.remove('active');" +
+        "  document.getElementById('tab-perf').classList.add('active');" +
+        "  document.getElementById('status-badge').textContent = 'Tab: Performance';" +
+        "});" +
+        "var dc = document.getElementById('drag-card');" +
+        "var dz = document.getElementById('drop-zone');" +
+        "dc.addEventListener('dragstart', function(e) { e.dataTransfer.setData('text/plain', 'Layer Card'); });" +
+        "dz.addEventListener('dragover', function(e) { e.preventDefault(); });" +
+        "dz.addEventListener('drop', function(e) {" +
+        "  e.preventDefault();" +
+        "  var item = e.dataTransfer.getData('text/plain');" +
+        "  dz.textContent = 'Dropped: ' + item;" +
+        "  dz.style.borderColor = '#22c55e';" +
+        "});" +
+        "var tr = document.getElementById('range-track');" +
+        "var dragging = false;" +
+        "tr.addEventListener('mousedown', function() { dragging = true; });" +
+        "tr.addEventListener('mousemove', function(e) {" +
+        "  if (dragging) {" +
+        "    var pct = Math.round((e.offsetX * 100) / 260);" +
+        "    document.getElementById('range-fill').style.width = pct + '%';" +
+        "    document.getElementById('slider-label').textContent = 'Slider: ' + pct + '%';" +
+        "  }" +
+        "});" +
+        "tr.addEventListener('mouseup', function() { dragging = false; });" +
+        "var sel = document.getElementById('theme-select');" +
+        "sel.addEventListener('change', function() {" +
+        "  document.getElementById('theme-banner').textContent = 'Theme: ' + sel.value;" +
+        "});" +
+        "var inp = document.getElementById('filter-input');" +
+        "inp.addEventListener('input', function() {" +
+        "  document.getElementById('query-preview').textContent = 'Query: ' + inp.value + ' (' + inp.value.length + ' chars)';" +
+        "});" +
+        "var hovered = false;" +
+        "document.getElementById('hover-tile').addEventListener('mouseover', function() {" +
+        "  hovered = true;" +
+        "  document.getElementById('hover-tile').textContent = 'Hover: Active';" +
+        "});" +
+        "document.getElementById('agree-form').addEventListener('submit', function(e) {" +
+        "  e.preventDefault();" +
+        "  var ok = document.getElementById('agree-cb').checked;" +
+        "  document.getElementById('submit-result').textContent = 'Submitted: ' + (ok ? 'Checked' : 'Unchecked') + ' | Hover: ' + (hovered ? 'Active' : 'Idle');" +
+        "});" +
+        "</script>"
+    "<html><body>" +
+        "<button id='btn-count'>Count</button><div id='counter-val'>Clicks: 0</div>" +
+        "<button id='tab-overview' class='active'>Overview</button><button id='tab-perf'>Perf</button>" +
+        "<div id='status-badge'>Tab: Overview</div>" +
+        "<div id='drag-card' draggable='true'>Layer Card</div><div id='drop-zone'>Empty</div>" +
+        "<div id='range-track'><div id='range-fill' style='width:20%;'></div></div><div id='slider-label'>Slider: 20%</div>" +
+        "<select id='theme-select'><option value='slate' selected>Slate Dark</option><option value='emerald'>Emerald Pro</option></select>" +
+        "<div id='theme-banner'>Theme: slate</div>" +
+        "<input id='filter-input' type='text' value=''><div id='query-preview'>Query: (0 chars)</div>" +
+        "<div id='hover-tile'>Hover: Idle</div>" +
+        "<form id='agree-form'><input id='agree-cb' type='checkbox'><button id='submit-btn' type='submit'>Submit</button></form>" +
+        "<div id='submit-result'>Waiting...</div>" +
+        script_tag + "</body></html>"
+
+describe "Web engine script JS, SimpleScript, and DOM event parity":
+    # @manual scenario show
+    it "executes initial boot DOM mutations and renders pixels for JS and SimpleScript":
+        # @req REQ-WEB-SCRIPT-JS-EVENTS-001
+        step("Open JS boot page in BrowserSession and inspect mutated DOM")
+        var js_session = BrowserSession.new()
+        val js_html = build_boot_page(false)
+        expect(js_session.open_html("https://example.com/e01_js.html", js_html).is_ok()).to_equal(true)
+        expect(text_of(js_session, "status-pill")).to_equal("Engine Active: 4 modules")
+        expect(style_of(js_session, "status-pill")).to_contain("border-color:#10b981")
+        expect(text_of(js_session, "cards")).to_contain("Raster")
+        expect(js_session.console_logs()).to_contain("e01:boot:4modules")
+
+        step("Open SimpleScript boot page in BrowserSession and inspect mutated DOM")
+        var ss_session = BrowserSession.new()
+        val ss_html = build_boot_page(true)
+        expect(ss_session.open_html("https://example.com/e01_ss.html", ss_html).is_ok()).to_equal(true)
+        expect(text_of(ss_session, "status-pill")).to_equal("Engine Active: 4 modules")
+        expect(style_of(ss_session, "status-pill")).to_contain("border-color:#10b981")
+        expect(text_of(ss_session, "cards")).to_contain("Raster")
+        expect(ss_session.console_logs()).to_contain("e01:boot:4modules")
+
+        step("Verify simple_web_render_html_with_scripts_to_rgba_pixels renders post-script pixels")
+        val rgba = simple_web_render_html_with_scripts_to_rgba_pixels(ss_html, 160, 120)
+        expect(rgba.len()).to_equal(160 * 120 * 4)
+
+    # @manual scenario show
+    it "handles click, drag-and-drop, pointer drag, dropdown, input, hover, checkbox, and form submit parity":
+        # @req REQ-WEB-SCRIPT-JS-EVENTS-001
+        var mode_idx = 0
+        while mode_idx < 2:
+            val is_ss = mode_idx == 1
+            var session = BrowserSession.new()
+            expect(session.open_html("https://example.com/interactive.html", build_interactive_page(is_ss)).is_ok()).to_equal(true)
+
+            step("e02: Click counter button 3 times and activate Performance tab")
+            val _ = session.dispatch_dom_event_route(route_for(session, "btn-count"), "click", true, true)
+            val _ = session.dispatch_dom_event_route(route_for(session, "btn-count"), "click", true, true)
+            val _ = session.dispatch_dom_event_route(route_for(session, "btn-count"), "click", true, true)
+            val _ = session.dispatch_dom_event_route(route_for(session, "tab-perf"), "click", true, true)
+            expect(text_of(session, "counter-val")).to_equal("Clicks: 3")
+            expect(text_of(session, "status-badge")).to_equal("Tab: Performance")
+            expect(be_dom_get_attr(be_dom_find_by_id(session.current_dom, "tab-perf").unwrap(), "class")).to_contain("active")
+
+            step("e03: Drag Layer Card onto Drop Target and pointer-drag slider to 65%")
+            val _ = session.dispatch_dom_drag_and_drop_route(route_for(session, "drag-card"), route_for(session, "drop-zone"), 40, 80, 220, 80)
+            expect(text_of(session, "drop-zone")).to_equal("Dropped: Layer Card")
+            expect(style_of(session, "drop-zone")).to_contain("#22c55e")
+            val tr = route_for(session, "range-track")
+            val _ = session.dispatch_dom_primary_pointer_down_at(tr, 20, 140, 10, 8)
+            val _ = session.dispatch_dom_pointer_move_at(tr, 179, 140, 169, 8, 1)
+            val _ = session.dispatch_dom_primary_pointer_up_at(tr, 179, 140, 169, 8, false, false)
+            expect(text_of(session, "slider-label")).to_equal("Slider: 65%")
+            expect(style_of(session, "range-fill")).to_contain("65%")
+
+            step("e04: Select Emerald Pro in dropdown and verify change listener")
+            val _ = session.set_dom_select_value_route(route_for(session, "theme-select"), "emerald")
+            expect(text_of(session, "theme-banner")).to_equal("Theme: emerald")
+
+            step("e05: Type Simple2D into filter input and verify query preview")
+            val _ = session.set_dom_text_input_route(route_for(session, "filter-input"), "Simple2D")
+            expect(text_of(session, "query-preview")).to_equal("Query: Simple2D (8 chars)")
+
+            step("e06: Hover tile, toggle checkbox, submit form with preventDefault")
+            val _ = session.dispatch_dom_hover_route(route_for(session, "hover-tile"), 420, 30, 16, 10)
+            val _ = session.dispatch_dom_event_route(route_for(session, "agree-cb"), "click", true, true)
+            expect(be_dom_has_attr(be_dom_find_by_id(session.current_dom, "agree-cb").unwrap(), "checked")).to_equal(true)
+            val _ = session.dispatch_dom_event_route(route_for(session, "submit-btn"), "click", true, true)
+            expect(text_of(session, "submit-result")).to_equal("Submitted: Checked | Hover: Active")
+
+            val rendered = session.render_to_pixels(520, 340)
+            expect(rendered.pixels.len()).to_equal(520 * 340)
+            mode_idx = mode_idx + 1

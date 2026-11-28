@@ -300,6 +300,7 @@ impl RuntimeFuncSpec {
 
 // Type aliases for readability
 const I8: types::Type = types::I8;
+const I16: types::Type = types::I16;
 const I32: types::Type = types::I32;
 const I64: types::Type = types::I64;
 const F64: types::Type = types::F64;
@@ -900,12 +901,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // MMIO (memory-mapped I/O — Core tier for baremetal device drivers)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_mmio_read_u8", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmio_read_u8", &[I64], &[I8]), // uint8_t: narrow return, uextend at the call site
     RuntimeFuncSpec::new("rt_ptr_read_u8", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmio_write_u8", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_mmio_read_u16", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmio_read_u16", &[I64], &[I16]), // uint16_t
     RuntimeFuncSpec::new("rt_mmio_write_u16", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_mmio_read_u32", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmio_read_u32", &[I64], &[I32]), // uint32_t
+    RuntimeFuncSpec::new("rt_volatile_read_u8", &[I64], &[I8]), // uint8_t (C, Rust and freestanding lanes agree)
+    RuntimeFuncSpec::new("rt_volatile_read_u16", &[I64], &[I16]), // uint16_t
+    RuntimeFuncSpec::new("rt_volatile_read_u32", &[I64], &[I32]), // uint32_t
+    RuntimeFuncSpec::new("rt_volatile_read_u64", &[I64], &[I64]), // uint64_t
     RuntimeFuncSpec::new("rt_mmio_write_u32", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_mmio_read_u32", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_mmio_read_u64", &[I64], &[I64]),
@@ -1176,6 +1181,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_function_not_found", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_method_not_found", &[I64, I64, I64, I64], &[I64]),
+    // rt_value_not_callable(callee: RuntimeValue) -> RuntimeValue (never returns):
+    // runtime refusal emitted by compile_indirect_call when rt_closure_func_ptr
+    // answers NULL for the callee, instead of jumping through address zero.
+    RuntimeFuncSpec::new("rt_value_not_callable", &[I64], &[I64]),
     // =========================================================================
     // Contract checking (Design by Contract)
     // =========================================================================
@@ -2825,6 +2834,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_spawn_piped_generation_v1", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_piped_environment_v1", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_wait_readable_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn_piped_split_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_read_stdout_bytes_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_read_stderr_bytes_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_read_stderr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_stderr_state_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_write_stdin_bytes_some_v1", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_piped_pid_for_generation_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_read_stdout_ref_v1", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_stdout_state_ref_v1", &[I64, I64], &[I64]),
@@ -2845,6 +2860,25 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64],
     ),
     RuntimeFuncSpec::new("rt_local_unix_close_v1", &[I64], &[I64]),
+    // Privilege drop + dropping spawn (runtime_privdrop_v1.h); text = (ptr, len).
+    RuntimeFuncSpec::new("rt_privcred_new_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privcred_from_user_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privcred_add_group_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privcred_uid_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privcred_gid_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privcred_group_count_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privcred_group_at_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privcred_drop_self_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privcred_free_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_new_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_arg_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_env_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_cred_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_join_procs_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_new_session_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_run_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_free_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_privspawn_wait_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_retained_private_credential_open_v1", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_retained_private_credential_state_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_retained_private_credential_error_v1", &[I64], &[I64]),
@@ -3286,6 +3320,62 @@ mod tests {
             wrong.is_empty(),
             "C `bool` runtime imports must declare an I8 return: {wrong:?}"
         );
+    }
+
+    /// Same garbage-high-bits class as the `bool` test above, for fixed-width
+    /// integer returns: a C `uint8_t`/`uint16_t`/`uint32_t` function only defines
+    /// the low bits of RAX, so its import must declare the narrow width and let
+    /// the call site `uextend`/`sextend` it. Covers every single-line
+    /// `[u]int{8,16,32}_t rt_*` prototype in runtime.h that has a spec (incl. the
+    /// `rt_volatile_read_u*` family; the MMIO reads live in the baremetal runtime
+    /// and are pinned by `mmio_and_volatile_reads_use_narrow_return_abi`).
+    #[test]
+    fn runtime_h_narrow_int_returns_use_narrow_abi() {
+        let header_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/runtime.h");
+        let header = std::fs::read_to_string(&header_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", header_path.display()));
+        let mut checked = 0usize;
+        let mut wrong = Vec::new();
+        for line in header.lines() {
+            let line = line.trim_start();
+            let Some((ty, rest)) = line.split_once(char::is_whitespace) else { continue };
+            let want = match ty {
+                "int8_t" | "uint8_t" => I8,
+                "int16_t" | "uint16_t" => I16,
+                "int32_t" | "uint32_t" => I32,
+                _ => continue,
+            };
+            let Some(name) = rest.trim_start().split(|c: char| c == '(' || c.is_whitespace()).next() else {
+                continue;
+            };
+            if !name.starts_with("rt_") {
+                continue;
+            }
+            let Some(spec) = spec_for(name) else { continue };
+            checked += 1;
+            if spec.returns != [want] {
+                wrong.push(format!("{name}: C {ty} but spec returns {:?}", spec.returns));
+            }
+        }
+        assert!(checked > 0, "no narrow-int `rt_*` prototype in runtime.h matched a spec");
+        assert!(wrong.is_empty(), "narrow C runtime returns must declare the narrow width: {wrong:?}");
+    }
+
+    #[test]
+    fn mmio_and_volatile_reads_use_narrow_return_abi() {
+        for (name, want) in [
+            ("rt_mmio_read_u8", I8),
+            ("rt_mmio_read_u16", I16),
+            ("rt_mmio_read_u32", I32),
+            ("rt_volatile_read_u8", I8),
+            ("rt_volatile_read_u16", I16),
+            ("rt_volatile_read_u32", I32),
+            ("rt_volatile_read_u64", I64),
+        ] {
+            let spec = spec_for(name).unwrap_or_else(|| panic!("missing spec {name}"));
+            assert_eq!(spec.params, [I64], "{name} params");
+            assert_eq!(spec.returns, [want], "{name} return width");
+        }
     }
 
     #[test]

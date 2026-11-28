@@ -1,0 +1,75 @@
+# Purpose and audience: compiler engineers who own cross-module overload
+# resolution in the interpreter.
+# @req REQ-SSPEC-UNIT
+# Tracks: provable_class_rejection_rejects_tier_shim_structs_2026-11-28
+#
+# Re-verification recipe (after touching the seed interpreter's overload
+# path in src/compiler_rust/compiler/src/interpreter_call/mod.rs):
+#   1. Scratch-build the seed driver (does NOT touch build/p3cache/fresh-seed):
+#        cd src/compiler_rust && CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+#          CARGO_TARGET_DIR=$PWD/../../build/p3cache/tiershim/cargo-target \
+#          cargo build --release -p simple-driver
+#   2. RED probe against the pristine seed (must fail with
+#      "selects none of the", exit 1); GREEN probe against the scratch build
+#      (must print "tiershim=builtin_2d", exit 0):
+#        SIMPLE_EXECUTION_MODE=interpret <binary> run test/fixtures/tier_shim/main.spl
+#   3. This spec, with SIMPLE_BIN pointed at the scratch build:
+#        SIMPLE_BIN=<scratch-simple> <scratch-simple> test \
+#          test/01_unit/compiler/interpreter/tier_shim_class_overload_exemption_spec.spl \
+#          --mode=interpret
+#      Expect 3/3. Isolation: SIMPLE_HIR_CACHE_DIR/TMPDIR under
+#      build/p3cache/tiershim.
+"""
+# Tier-shim class argument to an overloaded class-typed parameter
+
+`gc_async_mut`, `nogc_async_mut` and `nogc_sync_mut` each re-declare the
+byte-identical `struct ShaderSource` in `engine/render/shader.spl` (per-tier
+shims; the owner-exact identity can never match across tiers). A
+`ShaderSource` value passed to `create_shader_program` must resolve: the
+provable-class-rejection E1003 has a runtime-tier-shim exemption (same
+source name, verified layout identity, every declaring owner inside a
+runtime-tier library directory). Genuinely different same-named classes
+(see wrong_owner_arg_overload_spec) keep their rejection.
+
+The `run` examples shell out so both execution lanes are covered. Set
+SIMPLE_BIN to target a binary.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+use std.gc_async_mut.engine.render.shader.{ShaderSource, load_builtin_2d_shader, create_shader_program}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_fixture(mode: text) -> (text, i64):
+    val command = "SIMPLE_EXECUTION_MODE=" + mode + " " + simple_binary() + " run test/fixtures/tier_shim/main.spl"
+    val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+describe "tier-shim class argument to an overloaded class-typed parameter":
+    it "resolves create_shader_program for a builtin shader source in the test lane":
+        step("resolves create_shader_program for a builtin shader source in the test lane")
+        val source = load_builtin_2d_shader()
+        expect(source.is_valid()).to_equal(true)
+        val prog = create_shader_program(source)
+        expect(prog.name).to_equal("builtin_2d")
+        expect(prog.is_compiled).to_equal(false)
+
+    it "resolves under the interpreter lane":
+        step("resolves under the interpreter lane")
+        val (out, code) = run_fixture("interpret")
+        expect(out.contains("tiershim=builtin_2d")).to_equal(true)
+        expect(out.contains("selects none of the")).to_equal(false)
+        expect(code == 0).to_equal(true)
+
+    it "resolves under the jit lane after demotion to the interpreter":
+        step("resolves under the jit lane after demotion to the interpreter")
+        val (out, code) = run_fixture("jit")
+        expect(out.contains("tiershim=builtin_2d")).to_equal(true)
+        expect(out.contains("selects none of the")).to_equal(false)
+        expect(code == 0).to_equal(true)

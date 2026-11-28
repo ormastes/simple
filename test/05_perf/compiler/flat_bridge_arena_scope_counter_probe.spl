@@ -1,0 +1,63 @@
+# Child counter probe for flat_bridge_arena_scope_spec.spl
+# (bug flat_ast_bridge_phase3_snapshot_throughput_2026-08-31, acceptance #3:
+# zero rt_env_get*/rt_env_get_i64 crossings from flat-AST getters while the
+# arena bridge scope is active).
+#
+# Standalone script — the spec launches it as
+#   <simple> run test/05_perf/compiler/flat_bridge_arena_scope_counter_probe.spl --mode=interpreter
+# with SIMPLE_BOOTSTRAP=1, SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 and
+# SIMPLE_FLATBRIDGE_ENV_COUNT=1 inherited, on a seed binary that registers the
+# rt_env_get_counter_* diagnostics externs. On any other binary the counter
+# call is an unresolved extern and this probe exits nonzero — the spec treats
+# that as "counter unavailable" and skips the assertion with a notice.
+#
+# Prints one line:
+#   PROBECOUNTER fns=<N> scoped=<n> legacy=<n>
+# `scoped` is the exact number of environment crossings during ONE scoped
+# conversion — only the scope-entry control plane (opt-out gate + the four
+# frozen control flags); `legacy` is the same conversion through the
+# env-mirror getters (thousands at this size).
+
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, env_set, file_write_exact, getpid}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations_with_placeholder_receipt}
+use compiler.frontend.flat_ast_bridge.{flat_ast_to_module}
+
+extern fn rt_env_get_counter_read() -> i64
+extern fn rt_env_get_counter_reset() -> bool
+
+val PERF_FNS: i64 = 400
+val SCRATCH: text = "/tmp/simple-flat-bridge-counter-probe-{getpid()}"
+
+fn perf_fixture() -> text:
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < PERF_FNS:
+        parts.push("fn pf_{i}(a: i64, b: i64) -> i64:\n    return a + b\n")
+        i = i + 1
+    parts.join("\n")
+
+fn main():
+    val _d = dir_create_all(SCRATCH)
+    val path = SCRATCH + "/counter_{PERF_FNS}.spl"
+    val _w = file_write_exact(path, perf_fixture())
+    val source = file_read(path)
+    parser_init_with_path(source, path)
+    parse_module_body()
+    val _ph = expand_string_interpolations_with_placeholder_receipt(0)
+    # Scoped conversion: warm once so every flag cache is filled, then count a
+    # steady-state conversion. Only the scope-entry control plane may read env.
+    val _s = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "")
+    val _warm_scoped = flat_ast_to_module(path)
+    val _r0 = rt_env_get_counter_reset()
+    val scoped_module = flat_ast_to_module(path)
+    val scoped_count = rt_env_get_counter_read()
+    # Legacy conversion through the env-mirror getters, same pool state.
+    val _l = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "0")
+    val _warm_legacy = flat_ast_to_module(path)
+    val _r1 = rt_env_get_counter_reset()
+    val legacy_module = flat_ast_to_module(path)
+    val legacy_count = rt_env_get_counter_read()
+    print "PROBECOUNTER fns={PERF_FNS} scoped={scoped_count} legacy={legacy_count} fns_ok={scoped_module.functions.len()}/{legacy_module.functions.len()}"

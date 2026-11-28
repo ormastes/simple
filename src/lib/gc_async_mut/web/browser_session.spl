@@ -44,11 +44,15 @@ use std.gc_async_mut.gpu.browser_engine.script.simple_script.{
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_get_attr, be_dom_get_text_content, be_dom_serialize_children,
-    be_dom_serialize_html, be_dom_set_children, be_dom_path_for_route
+    be_dom_get_attr, be_dom_has_attr, be_dom_get_text_content,
+    be_dom_serialize_children, be_dom_serialize_html, be_dom_set_children,
+    be_dom_path_for_route, be_dom_find_by_tag
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
 use std.gc_async_mut.gpu.browser_engine.script.form_api.{form_capture_defaults}
+use std.gc_async_mut.web.browser_session_form.{
+    browser_select_value, browser_select_update
+}
 use std.gc_async_mut.gpu.browser_engine.style_block.{CssDecl}
 use std.gc_async_mut.gpu.browser_engine.style_block_parse.{parse_declarations}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
@@ -793,10 +797,19 @@ class BrowserRuntimeState:
     dom_element_index_by_route: Dict<text, i32>
     dom_element_list_id: i64
     dom_style_ids: [i64]
+    dom_attr_ids: [i64]
     dom_id_snapshots: [text]
     dom_class_snapshots: [text]
     dom_value_snapshots: [text]
     dom_style_snapshots: [text]
+    dom_text_snapshots: [text]
+    dom_inner_text_snapshots: [text]
+    dom_inner_html_snapshots: [text]
+    dom_checked_snapshots: [bool]
+    dom_disabled_snapshots: [bool]
+    dom_selected_snapshots: [bool]
+    dom_selected_index_snapshots: [i64]
+    dom_attr_snapshots: [text]
     dom_callable_listeners: [BrowserDomCallableListener]
     dom_listener_indices_by_target_event: Dict<text, [i32]>
     event_prevent_default_fn_id: i64
@@ -1086,7 +1099,11 @@ class BrowserRuntimeState:
         val _history_api_result = runtime_after_history_api.eval(
             "history.pushState = function(state, title, url) { location.__simple_navigation_mode = 'pushState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = location.href; }; history.replaceState = function(state, title, url) { location.__simple_navigation_mode = 'replaceState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = location.href; }; history.back = function() { history.__simple_traversal_delta = -1; }; history.forward = function() { history.__simple_traversal_delta = 1; };"
         )
-        runtime = runtime_after_history_api
+        var runtime_after_console_api = runtime_after_history_api
+        val _console_api_result = runtime_after_console_api.eval(
+            "window.__simple_console_logs = []; (function() { var origLog = console.log; var origWarn = console.warn; var origErr = console.error; function pushMsg(prefix, args) { var parts = []; for (var i = 0; i < args.length; i = i + 1) { parts.push(String(args[i])); } var msg = prefix + parts.join(' '); if (window.__simple_console_logs.length < 512) { window.__simple_console_logs.push(msg); } } console.log = function() { pushMsg('', arguments); if (origLog) { origLog.apply(console, arguments); } }; console.warn = function() { pushMsg('[warn] ', arguments); if (origWarn) { origWarn.apply(console, arguments); } }; console.error = function() { pushMsg('[error] ', arguments); if (origErr) { origErr.apply(console, arguments); } }; })();"
+        )
+        runtime = runtime_after_console_api
         if is_guest_runtime:
             print "[BRS] runtime create stage=after-install-storage"
 
@@ -1124,10 +1141,19 @@ class BrowserRuntimeState:
             dom_element_index_by_route: {},
             dom_element_list_id: -1,
             dom_style_ids: [],
+            dom_attr_ids: [],
             dom_id_snapshots: [],
             dom_class_snapshots: [],
             dom_value_snapshots: [],
             dom_style_snapshots: [],
+            dom_text_snapshots: [],
+            dom_inner_text_snapshots: [],
+            dom_inner_html_snapshots: [],
+            dom_checked_snapshots: [],
+            dom_disabled_snapshots: [],
+            dom_selected_snapshots: [],
+            dom_selected_index_snapshots: [],
+            dom_attr_snapshots: [],
             dom_callable_listeners: [],
             dom_listener_indices_by_target_event: {},
             event_prevent_default_fn_id: event_prevent_default_fn_id,
@@ -1146,6 +1172,128 @@ fn _browser_dom_js_text(value: JsValue) -> text:
             else: "false"
         JsValue.Null: ""
         _: ""
+
+fn _browser_dom_js_bool_val(value: JsValue) -> bool:
+    match value:
+        JsValue.Boolean(v): v
+        JsValue.String(v): v != "" and v != "false"
+        JsValue.Number(v): v != 0.0
+        _: false
+
+fn _browser_dom_js_i64_val(value: JsValue, fallback: i64) -> i64:
+    match value:
+        JsValue.Number(v): v.to_i64()
+        JsValue.String(v): v.trim().parse_i64() ?? fallback
+        _: fallback
+
+fn _browser_dom_select_index(node: BeDomNode) -> i64:
+    var idx: i64 = 0
+    var fallback: i64 = -1
+    for child in node.children:
+        if child.tag_name == "option":
+            if fallback < 0:
+                fallback = idx
+            if be_dom_has_attr(child, "selected"):
+                return idx
+            idx = idx + 1
+    fallback
+
+fn _browser_dom_select_by_index(node: BeDomNode, target_idx: i64) -> BeDomNode:
+    var next = node
+    var opt_idx: i64 = 0
+    var new_children: [BeDomNode] = []
+    for child in next.children:
+        var c = child
+        if c.tag_name == "option":
+            if opt_idx == target_idx and not be_dom_has_attr(c, "disabled"):
+                c.set_attr("selected", "selected")
+            else:
+                c.remove_attr("selected")
+            opt_idx = opt_idx + 1
+        new_children.push(c)
+    next.children = new_children
+    next
+
+fn _browser_dom_max_id(node: BeDomNode) -> i64:
+    var m = node.node_id
+    for c in node.children:
+        val cm = _browser_dom_max_id(c)
+        if cm > m:
+            m = cm
+    m
+
+fn _browser_dom_assign_ids(node: BeDomNode, parent_id: i64, mut next_id: i64) -> (BeDomNode, i64):
+    var cur = node
+    if cur.node_id <= 0:
+        cur.node_id = next_id
+        next_id = next_id + 1
+    cur.parent_id = parent_id
+    var out: [BeDomNode] = []
+    for c in cur.children:
+        val res = _browser_dom_assign_ids(c, cur.node_id, next_id)
+        out.push(res.0)
+        next_id = res.1
+    cur.children = out
+    (cur, next_id)
+
+fn _browser_dom_set_text_child(node: BeDomNode, content: text, mut next_id: i64) -> (BeDomNode, bool, i64):
+    var had_elements = false
+    for c in node.children:
+        if c.tag_name != "#text":
+            had_elements = true
+    var next = node
+    if content == "":
+        next.children = []
+    else:
+        val tid = next_id
+        next_id = next_id + 1
+        next.children = [BeDomNode.text_node(tid, content)]
+    (next, had_elements, next_id)
+
+fn _browser_dom_is_special_attr(name: text) -> bool:
+    (name == "id" or name == "class" or name == "value" or name == "style" or
+     name == "checked" or name == "disabled" or name == "selected" or
+     name.starts_with("\u0000"))
+
+fn _browser_dom_attr_snapshot(runtime: JsRuntime, attr_obj_id: i64) -> text:
+    if attr_obj_id < 0:
+        return ""
+    val obj = runtime.get_host_object(attr_obj_id)
+    var out = ""
+    for prop in obj.properties:
+        if not prop.key.starts_with("__") and not _browser_dom_is_special_attr(prop.key):
+            match prop.value:
+                JsValue.Undefined: pass_dn
+                JsValue.Null: pass_dn
+                _:
+                    out = out + prop.key + "=" + _browser_dom_js_text(prop.value) + ";"
+    out
+
+fn _browser_dom_sync_attrs_to_node(runtime: JsRuntime, attr_obj_id: i64, node: BeDomNode) -> BeDomNode:
+    if attr_obj_id < 0:
+        return node
+    var next = node
+    val obj = runtime.get_host_object(attr_obj_id)
+    var present_keys: [text] = []
+    for prop in obj.properties:
+        if not prop.key.starts_with("__") and not _browser_dom_is_special_attr(prop.key):
+            var is_defined = true
+            match prop.value:
+                JsValue.Undefined: is_defined = false
+                JsValue.Null: is_defined = false
+                _: pass_dn
+            if is_defined:
+                present_keys.push(prop.key)
+                next.set_attr(prop.key, _browser_dom_js_text(prop.value))
+    for existing in node.attr_names():
+        if not _browser_dom_is_special_attr(existing):
+            var keep = false
+            for pk in present_keys:
+                if pk == existing:
+                    keep = true
+            if not keep:
+                next.remove_attr(existing)
+    next
 
 fn _browser_dom_css_name(name: text) -> text:
     if name == "cssFloat":
@@ -1450,6 +1598,9 @@ impl BrowserRuntimeState:
         for style_id in self.dom_style_ids:
             if not (keep_ids.get(style_id.to_text()) ?? false):
                 retired[style_id.to_text()] = true
+        for attr_id in self.dom_attr_ids:
+            if not (keep_ids.get(attr_id.to_text()) ?? false):
+                retired[attr_id.to_text()] = true
         if self.dom_element_list_id >= 0 and not (keep_ids.get(self.dom_element_list_id.to_text()) ?? false):
             retired[self.dom_element_list_id.to_text()] = true
         var runtime = self.runtime
@@ -1569,13 +1720,13 @@ impl BrowserRuntimeState:
 
     me _bind_dom_node(
         node: BeDomNode, element_list_id: i64,
-        generation: DomDocumentGeneration
+        generation: DomDocumentGeneration, parent_elem_id: i64 = -1
     ):
         if self.dom_routes.len() >= BROWSER_DOM_BRIDGE_MAX_ELEMENTS:
             return
         if node.tag_name == "#document":
             for child in node.children:
-                self._bind_dom_node(child, element_list_id, generation)
+                self._bind_dom_node(child, element_list_id, generation, -1)
             return
         if node.tag_name == "#text":
             return
@@ -1587,12 +1738,26 @@ impl BrowserRuntimeState:
             runtime.create_host_object()
         runtime = self._bind_event_target(runtime, element_id)
         val style_id = runtime.create_host_object()
+        val attr_id = runtime.create_host_object()
         val text_content = be_dom_get_text_content(node)
         val inner_html = be_dom_serialize_children(node)
         val author_id = be_dom_get_attr(node, "id")
         val class_name = be_dom_get_attr(node, "class")
-        val value = be_dom_get_attr(node, "value")
+        val value = if node.tag_name == "select":
+            browser_select_value(node)
+        elif node.tag_name == "textarea":
+            text_content
+        else:
+            be_dom_get_attr(node, "value")
         val style_text = be_dom_get_attr(node, "style")
+        val is_checked = be_dom_has_attr(node, "checked")
+        val is_disabled = be_dom_has_attr(node, "disabled")
+        val is_selected = be_dom_has_attr(node, "selected")
+        val sel_idx = if node.tag_name == "select": _browser_dom_select_index(node) else: -1
+
+        for aname in node.attr_names():
+            if not aname.starts_with("\u0000"):
+                runtime.set_host_property(attr_id, aname, JsValue.String(v: node.get_attr(aname)))
 
         runtime.set_host_property(style_id, "cssText", JsValue.String(v: ""))
         for declaration in style_text.split(";"):
@@ -1608,11 +1773,21 @@ impl BrowserRuntimeState:
                         JsValue.String(v: property_value)
                     )
         runtime.set_host_property(element_id, "style", JsValue.Object(id: style_id))
+        runtime.set_host_property(element_id, "__attrs", JsValue.Object(id: attr_id))
+        runtime.set_host_property(element_id, "__simple_id", JsValue.Number(v: element_id.to_f64()))
+        runtime.set_host_property(element_id, "__simple_parent_id", JsValue.Number(v: parent_elem_id.to_f64()))
+        runtime.set_host_property(element_id, "__simple_children_dirty", JsValue.Boolean(v: false))
         runtime.set_host_property(element_id, "tagName", JsValue.String(v: node.tag_name.upper()))
+        runtime.set_host_property(element_id, "nodeType", JsValue.Number(v: 1.0))
         runtime.set_host_property(element_id, "id", JsValue.String(v: author_id))
         runtime.set_host_property(element_id, "className", JsValue.String(v: class_name))
         runtime.set_host_property(element_id, "value", JsValue.String(v: value))
+        runtime.set_host_property(element_id, "checked", JsValue.Boolean(v: is_checked))
+        runtime.set_host_property(element_id, "disabled", JsValue.Boolean(v: is_disabled))
+        runtime.set_host_property(element_id, "selected", JsValue.Boolean(v: is_selected))
+        runtime.set_host_property(element_id, "selectedIndex", JsValue.Number(v: sel_idx.to_f64()))
         runtime.set_host_property(element_id, "textContent", JsValue.String(v: text_content))
+        runtime.set_host_property(element_id, "innerText", JsValue.String(v: text_content))
         runtime.set_host_property(element_id, "innerHTML", JsValue.String(v: inner_html))
         val element_index = self.dom_element_ids.len()
         runtime.set_host_property(
@@ -1625,12 +1800,20 @@ impl BrowserRuntimeState:
         ))
         self.dom_element_ids.push(element_id)
         self.dom_style_ids.push(style_id)
+        self.dom_attr_ids.push(attr_id)
         self.dom_id_snapshots.push(author_id)
         self.dom_class_snapshots.push(class_name)
         self.dom_value_snapshots.push(value)
-        self.dom_style_snapshots.push(
-            _browser_dom_style_snapshot(runtime, style_id)
-        )
+        val style_snap = _browser_dom_style_snapshot(runtime, style_id)
+        self.dom_style_snapshots.push(style_snap)
+        self.dom_text_snapshots.push(text_content)
+        self.dom_inner_text_snapshots.push(text_content)
+        self.dom_inner_html_snapshots.push(inner_html)
+        self.dom_checked_snapshots.push(is_checked)
+        self.dom_disabled_snapshots.push(is_disabled)
+        self.dom_selected_snapshots.push(is_selected)
+        self.dom_selected_index_snapshots.push(sel_idx)
+        self.dom_attr_snapshots.push(_browser_dom_attr_snapshot(runtime, attr_id))
         val route_index = self.dom_routes.len() - 1
         self.dom_route_index_by_object_id[element_id.to_text()] = route_index
         self.dom_element_index_by_route[
@@ -1638,21 +1821,22 @@ impl BrowserRuntimeState:
         ] = route_index
 
         for child in node.children:
-            self._bind_dom_node(child, element_list_id, generation)
+            self._bind_dom_node(child, element_list_id, generation, element_id)
 
     me _refresh_dom_node(
         node: BeDomNode, element_list_id: i64,
         generation: DomDocumentGeneration,
         old_element_index_by_route: Dict<text, i32>,
         old_element_ids: [i64], old_style_ids: [i64],
-        old_style_snapshots: [text]
+        old_attr_ids: [i64], old_style_snapshots: [text],
+        parent_elem_id: i64 = -1
     ) -> bool:
         if node.tag_name == "#document":
             for child in node.children:
                 if not self._refresh_dom_node(
                     child, element_list_id, generation,
                     old_element_index_by_route, old_element_ids,
-                    old_style_ids, old_style_snapshots
+                    old_style_ids, old_attr_ids, old_style_snapshots, -1
                 ):
                     return false
             return true
@@ -1672,6 +1856,10 @@ impl BrowserRuntimeState:
         val element_id = old_element_ids[old_index]
         val style_id = old_style_ids[old_index]
         var runtime = self._bind_event_target(self.runtime, element_id)
+        val attr_id = if old_index < old_attr_ids.len():
+            old_attr_ids[old_index]
+        else:
+            runtime.create_host_object()
         val style_text = be_dom_get_attr(node, "style")
         if old_index < old_style_snapshots.len():
             for declaration in old_style_snapshots[old_index].split(";"):
@@ -1703,9 +1891,35 @@ impl BrowserRuntimeState:
                     )
         val author_id = be_dom_get_attr(node, "id")
         val class_name = be_dom_get_attr(node, "class")
-        val value = be_dom_get_attr(node, "value")
+        val text_content = be_dom_get_text_content(node)
+        val inner_html = be_dom_serialize_children(node)
+        val value = if node.tag_name == "select":
+            browser_select_value(node)
+        elif node.tag_name == "textarea":
+            text_content
+        else:
+            be_dom_get_attr(node, "value")
+        val is_checked = be_dom_has_attr(node, "checked")
+        val is_disabled = be_dom_has_attr(node, "disabled")
+        val is_selected = be_dom_has_attr(node, "selected")
+        val sel_idx = if node.tag_name == "select": _browser_dom_select_index(node) else: -1
+        for aname in node.attr_names():
+            if not aname.starts_with("\u0000"):
+                runtime.set_host_property(attr_id, aname, JsValue.String(v: node.get_attr(aname)))
         runtime.set_host_property(
             element_id, "style", JsValue.Object(id: style_id)
+        )
+        runtime.set_host_property(
+            element_id, "__attrs", JsValue.Object(id: attr_id)
+        )
+        runtime.set_host_property(
+            element_id, "__simple_id", JsValue.Number(v: element_id.to_f64())
+        )
+        runtime.set_host_property(
+            element_id, "__simple_parent_id", JsValue.Number(v: parent_elem_id.to_f64())
+        )
+        runtime.set_host_property(
+            element_id, "__simple_children_dirty", JsValue.Boolean(v: false)
         )
         runtime.set_host_property(
             element_id, "tagName", JsValue.String(v: node.tag_name.upper())
@@ -1720,12 +1934,38 @@ impl BrowserRuntimeState:
             element_id, "value", JsValue.String(v: value)
         )
         runtime.set_host_property(
+            element_id, "checked", JsValue.Boolean(v: is_checked)
+        )
+        runtime.set_host_property(
+            element_id, "disabled", JsValue.Boolean(v: is_disabled)
+        )
+        runtime.set_host_property(
+            element_id, "selected", JsValue.Boolean(v: is_selected)
+        )
+        runtime.set_host_property(
+            element_id, "selectedIndex", JsValue.Number(v: sel_idx.to_f64())
+        )
+        if be_dom_has_attr(node, "data-scroll-top"):
+            val scroll_top_node = (be_dom_get_attr(node, "data-scroll-top").trim().parse_i64() ?? 0).to_f64()
+            runtime.set_host_property(
+                element_id, "scrollTop", JsValue.Number(v: scroll_top_node)
+            )
+        if be_dom_has_attr(node, "data-scroll-left"):
+            val scroll_left_node = (be_dom_get_attr(node, "data-scroll-left").trim().parse_i64() ?? 0).to_f64()
+            runtime.set_host_property(
+                element_id, "scrollLeft", JsValue.Number(v: scroll_left_node)
+            )
+        runtime.set_host_property(
             element_id, "textContent",
-            JsValue.String(v: be_dom_get_text_content(node))
+            JsValue.String(v: text_content)
+        )
+        runtime.set_host_property(
+            element_id, "innerText",
+            JsValue.String(v: text_content)
         )
         runtime.set_host_property(
             element_id, "innerHTML",
-            JsValue.String(v: be_dom_serialize_children(node))
+            JsValue.String(v: inner_html)
         )
         val element_index = self.dom_element_ids.len()
         runtime.set_host_property(
@@ -1736,12 +1976,21 @@ impl BrowserRuntimeState:
         self.dom_routes.push(route)
         self.dom_element_ids.push(element_id)
         self.dom_style_ids.push(style_id)
+        self.dom_attr_ids.push(attr_id)
         self.dom_id_snapshots.push(author_id)
         self.dom_class_snapshots.push(class_name)
         self.dom_value_snapshots.push(value)
         self.dom_style_snapshots.push(
             _browser_dom_style_snapshot(runtime, style_id)
         )
+        self.dom_text_snapshots.push(text_content)
+        self.dom_inner_text_snapshots.push(text_content)
+        self.dom_inner_html_snapshots.push(inner_html)
+        self.dom_checked_snapshots.push(is_checked)
+        self.dom_disabled_snapshots.push(is_disabled)
+        self.dom_selected_snapshots.push(is_selected)
+        self.dom_selected_index_snapshots.push(sel_idx)
+        self.dom_attr_snapshots.push(_browser_dom_attr_snapshot(runtime, attr_id))
         self.dom_route_index_by_object_id[element_id.to_text()] = element_index
         self.dom_element_index_by_route[
             _browser_dom_route_key(route)
@@ -1750,7 +1999,7 @@ impl BrowserRuntimeState:
             if not self._refresh_dom_node(
                 child, element_list_id, generation,
                 old_element_index_by_route, old_element_ids,
-                old_style_ids, old_style_snapshots
+                old_style_ids, old_attr_ids, old_style_snapshots, element_id
             ):
                 return false
         true
@@ -1773,6 +2022,7 @@ impl BrowserRuntimeState:
         val old_element_index_by_route = self.dom_element_index_by_route
         val old_element_ids = self.dom_element_ids
         val old_style_ids = self.dom_style_ids
+        val old_attr_ids = self.dom_attr_ids
         val old_style_snapshots = self.dom_style_snapshots
         val old_element_list_id = self.dom_element_list_id
         if replaces_document:
@@ -1784,10 +2034,19 @@ impl BrowserRuntimeState:
         self.dom_route_index_by_object_id = {}
         self.dom_element_index_by_route = {}
         self.dom_style_ids = []
+        self.dom_attr_ids = []
         self.dom_id_snapshots = []
         self.dom_class_snapshots = []
         self.dom_value_snapshots = []
         self.dom_style_snapshots = []
+        self.dom_text_snapshots = []
+        self.dom_inner_text_snapshots = []
+        self.dom_inner_html_snapshots = []
+        self.dom_checked_snapshots = []
+        self.dom_disabled_snapshots = []
+        self.dom_selected_snapshots = []
+        self.dom_selected_index_snapshots = []
+        self.dom_attr_snapshots = []
         if replaces_document:
             self.dom_callable_listeners = []
             self.dom_listener_indices_by_target_event = {}
@@ -1802,11 +2061,11 @@ impl BrowserRuntimeState:
         self.dom_element_list_id = element_list_id
         self.runtime = runtime
         if replaces_document:
-            self._bind_dom_node(root, element_list_id, generation)
+            self._bind_dom_node(root, element_list_id, generation, -1)
         elif not self._refresh_dom_node(
             root, element_list_id, generation,
             old_element_index_by_route, old_element_ids, old_style_ids,
-            old_style_snapshots
+            old_attr_ids, old_style_snapshots, -1
         ):
             return false
         runtime = self.runtime
@@ -1820,7 +2079,39 @@ impl BrowserRuntimeState:
         )
         if replaces_document:
             if val Err(_) = runtime.eval(
-                "function __simple_dom_matches(el, selector) { if (el === null || el === undefined || selector === '') { return false; } var first = selector.slice(0, 1); if (first === '#') { return el.id === selector.slice(1); } if (first === '.') { return (' ' + el.className + ' ').indexOf(' ' + selector.slice(1) + ' ') >= 0; } return el.tagName.toLowerCase() === selector.toLowerCase(); } function __simple_css_key(name) { name = String(name); if (name.slice(0, 2) === '--') { return name; } var out = ''; var upper = false; for (var i = 0; i < name.length; i = i + 1) { var ch = name.slice(i, i + 1); if (ch === '-') { upper = true; } else { out = out + (upper ? ch.toUpperCase() : ch); upper = false; } } return out; } document.getElementById = function(id) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (all[i].id === String(id)) { return all[i]; } } return null; }; document.querySelector = function(selector) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { return all[i]; } } return null; }; document.querySelectorAll = function(selector) { var all = document.__simple_elements; var out = []; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { out.push(all[i]); } } return out; }; function __simple_dom_install(el) { el.style.setProperty = function(name, value) { this[__simple_css_key(name)] = String(value); }; el.style.getPropertyValue = function(name) { var value = this[__simple_css_key(name)]; return value === undefined || value === null ? '' : String(value); }; el.style.removeProperty = function(name) { var key = __simple_css_key(name); var old = this.getPropertyValue(name); this[key] = ''; return old; }; } for (var __simple_i = 0; __simple_i < document.__simple_elements.length; __simple_i = __simple_i + 1) { __simple_dom_install(document.__simple_elements[__simple_i]); }"
+                "function __simple_split_ws(s) { var raw = String(s || '').trim(); if (raw === '') { return []; } var out = []; var parts = raw.split(' '); for (var i = 0; i < parts.length; i = i + 1) { var p = parts[i].trim(); if (p !== '') { out.push(p); } } return out; } " +
+                "function __simple_match_compound(el, raw) { if (el === null || el === undefined || el.nodeType === 3) { return false; } var sel = String(raw || '').trim(); if (sel === '') { return false; } var attr_idx = sel.indexOf('['); if (attr_idx >= 0) { var close_idx = sel.indexOf(']'); if (close_idx > attr_idx) { var head = sel.slice(0, attr_idx); var inner = sel.slice(attr_idx + 1, close_idx); var tail = sel.slice(close_idx + 1); var eq = inner.indexOf('='); var attr_ok = false; if (eq >= 0) { var aname = inner.slice(0, eq).trim(); var aval = inner.slice(eq + 1).trim(); if (aval.length >= 2 && (aval.slice(0, 1) === '\"' || aval.slice(0, 1) === \"'\")) { aval = aval.slice(1, aval.length - 1); } attr_ok = el.hasAttribute(aname) && el.getAttribute(aname) === aval; } else { attr_ok = el.hasAttribute(inner.trim()); } if (!attr_ok) { return false; } var combined = head + tail; if (combined === '') { return true; } return __simple_match_compound(el, combined); } } var tag = ''; var i = 0; while (i < sel.length) { var c = sel.slice(i, i + 1); if (c === '#' || c === '.') { break; } tag = tag + c; i = i + 1; } if (tag !== '' && tag !== '*') { if (String(el.tagName || '').toLowerCase() !== tag.toLowerCase()) { return false; } } while (i < sel.length) { var kind = sel.slice(i, i + 1); var start = i + 1; i = start; while (i < sel.length) { var c2 = sel.slice(i, i + 1); if (c2 === '#' || c2 === '.') { break; } i = i + 1; } var tok = sel.slice(start, i); if (kind === '#') { if (el.id !== tok) { return false; } } else if (kind === '.') { var list = __simple_split_ws(el.className); var found = false; for (var j = 0; j < list.length; j = j + 1) { if (list[j] === tok) { found = true; break; } } if (!found) { return false; } } } return true; } " +
+                "function __simple_dom_matches(el, selector) { var raw = String(selector || ''); var groups = raw.split(','); for (var gi = 0; gi < groups.length; gi = gi + 1) { var parts = __simple_split_ws(groups[gi]); if (parts.length > 0 && __simple_match_compound(el, parts[parts.length - 1])) { if (parts.length === 1) { return true; } var cur = el.parentNode; var idx = parts.length - 2; while (idx >= 0 && cur !== null && cur !== undefined) { if (__simple_match_compound(cur, parts[idx])) { idx = idx - 1; } cur = cur.parentNode; } if (idx < 0) { return true; } } } return false; } " +
+                "function __simple_css_key(name) { name = String(name); if (name.slice(0, 2) === '--') { return name; } var out = ''; var upper = false; for (var i = 0; i < name.length; i = i + 1) { var ch = name.slice(i, i + 1); if (ch === '-') { upper = true; } else { out = out + (upper ? ch.toUpperCase() : ch); upper = false; } } return out; } " +
+                "function __simple_esc_html(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); } " +
+                "function __simple_serialize_node(n) { if (n === null || n === undefined) { return ''; } if (n.nodeType === 3) { return __simple_esc_html(n.data || n.textContent || ''); } var tag = String(n.tagName || 'div').toLowerCase(); var attrs = ''; if (n.id) { attrs = attrs + ' id=\"' + String(n.id) + '\"'; } if (n.className) { attrs = attrs + ' class=\"' + String(n.className) + '\"'; } if (n.value !== undefined && n.value !== '' && (tag === 'input' || tag === 'textarea')) { attrs = attrs + ' value=\"' + String(n.value) + '\"'; } if (n.checked) { attrs = attrs + ' checked=\"checked\"'; } if (n.disabled) { attrs = attrs + ' disabled=\"disabled\"'; } if (n.__attrs) { for (var k in n.__attrs) { if (k !== 'id' && k !== 'class' && k !== 'value' && k !== 'checked' && k !== 'disabled' && k !== 'style' && n.__attrs[k] !== undefined && n.__attrs[k] !== null) { attrs = attrs + ' ' + k + '=\"' + String(n.__attrs[k]) + '\"'; } } } var st = ''; if (n.style) { if (n.style.cssText) { st = String(n.style.cssText); } for (var sk in n.style) { if (sk !== 'cssText' && sk !== 'setProperty' && sk !== 'getPropertyValue' && sk !== 'removeProperty' && sk.slice(0, 2) !== '__' && typeof n.style[sk] === 'string' && n.style[sk] !== '') { var cssk = sk.replace(/([A-Z])/g, function(m) { return '-' + m.toLowerCase(); }); st = st + cssk + ':' + n.style[sk] + ';'; } } } if (st !== '') { attrs = attrs + ' style=\"' + st + '\"'; } if (tag === 'br' || tag === 'hr' || tag === 'img' || tag === 'input') { return '<' + tag + attrs + '>'; } var inner = __simple_serialize_children(n); return '<' + tag + attrs + '>' + inner + '</' + tag + '>'; } " +
+                "function __simple_serialize_children(el) { var ch = el.childNodes || el.children || []; if (ch.length === 0) { return el.textContent ? __simple_esc_html(el.textContent) : ''; } var out = ''; for (var i = 0; i < ch.length; i = i + 1) { out = out + __simple_serialize_node(ch[i]); } return out; } " +
+                "function __simple_collect_text(el) { if (!el) { return ''; } if (el.nodeType === 3) { return String(el.data || el.textContent || ''); } var ch = el.childNodes || el.children || []; if (ch.length === 0) { return String(el.textContent || ''); } var out = ''; for (var i = 0; i < ch.length; i = i + 1) { out = out + __simple_collect_text(ch[i]); } return out; } " +
+                "document.getElementById = function(id) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (all[i].id === String(id)) { return all[i]; } } return null; }; " +
+                "document.querySelector = function(selector) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { return all[i]; } } return null; }; " +
+                "document.querySelectorAll = function(selector) { var all = document.__simple_elements; var out = []; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { out.push(all[i]); } } return out; }; " +
+                "document.createElement = function(tag) { var upper = String(tag || 'div').toUpperCase(); var el = { nodeType: 1, tagName: upper, nodeName: upper, id: '', className: '', value: '', checked: false, disabled: false, selected: false, scrollTop: 0, scrollLeft: 0, textContent: '', innerText: '', innerHTML: '', parentNode: null, children: [], childNodes: [], __attrs: {}, style: { cssText: '' } }; return __simple_dom_install(el); }; " +
+                "document.createTextNode = function(txt) { var s = String(txt || ''); return { nodeType: 3, tagName: '#text', nodeName: '#text', data: s, nodeValue: s, textContent: s, parentNode: null, children: [], childNodes: [] }; }; " +
+                "function __simple_walk_subtree(root, sel, firstOnly, out) { var ch = root.children || []; for (var i = 0; i < ch.length; i = i + 1) { var n = ch[i]; if (n.nodeType !== 3 && __simple_dom_matches(n, sel)) { out.push(n); if (firstOnly) { return true; } } if (__simple_walk_subtree(n, sel, firstOnly, out) && firstOnly) { return true; } } return false; } " +
+                "function __simple_dom_install(el) { if (!el || el.__simple_dom_ready) { return el; } el.__simple_dom_ready = true; if (!el.__attrs) { el.__attrs = {}; } if (!el.children) { el.children = []; } if (!el.childNodes) { el.childNodes = el.children; } if (el.parentNode === undefined) { el.parentNode = null; } if (el.scrollTop === undefined) { el.scrollTop = Number(el.__attrs['data-scroll-top'] || 0); } if (el.scrollLeft === undefined) { el.scrollLeft = Number(el.__attrs['data-scroll-left'] || 0); } if (!el.addEventListener) { el.addEventListener = document.addEventListener; el.removeEventListener = document.removeEventListener; el.dispatchEvent = document.dispatchEvent; } " +
+                "el.style.setProperty = function(name, value) { this[__simple_css_key(name)] = String(value); }; el.style.getPropertyValue = function(name) { var value = this[__simple_css_key(name)]; return value === undefined || value === null ? '' : String(value); }; el.style.removeProperty = function(name) { var key = __simple_css_key(name); var old = this.getPropertyValue(name); this[key] = ''; return old; }; " +
+                "el.getAttribute = function(name) { var k = String(name); if (k === 'id') { return this.id === '' ? (this.__attrs.id !== undefined ? String(this.__attrs.id) : null) : String(this.id); } if (k === 'class') { return this.className === '' ? (this.__attrs['class'] !== undefined ? String(this.__attrs['class']) : null) : String(this.className); } if (k === 'value') { return this.__attrs.value !== undefined ? String(this.__attrs.value) : (this.value !== '' ? String(this.value) : null); } var v = this.__attrs[k]; return v === undefined || v === null ? null : String(v); }; " +
+                "el.hasAttribute = function(name) { var k = String(name); if (k === 'checked') { return !!this.checked || this.__attrs.checked !== undefined; } if (k === 'disabled') { return !!this.disabled || this.__attrs.disabled !== undefined; } if (k === 'selected') { return !!this.selected || this.__attrs.selected !== undefined; } return this.getAttribute(k) !== null; }; " +
+                "el.setAttribute = function(name, value) { var k = String(name); var s = String(value); this.__attrs[k] = s; if (k === 'id') { this.id = s; } else if (k === 'class') { this.className = s; } else if (k === 'value') { this.value = s; } else if (k === 'style') { this.style.cssText = s; } else if (k === 'checked') { this.checked = true; } else if (k === 'disabled') { this.disabled = true; } else if (k === 'selected') { this.selected = true; } }; " +
+                "el.removeAttribute = function(name) { var k = String(name); this.__attrs[k] = undefined; if (k === 'id') { this.id = ''; } else if (k === 'class') { this.className = ''; } else if (k === 'value') { this.value = ''; } else if (k === 'style') { this.style.cssText = ''; } else if (k === 'checked') { this.checked = false; } else if (k === 'disabled') { this.disabled = false; } else if (k === 'selected') { this.selected = false; } }; " +
+                "el.classList = { __el: el, contains: function(c) { var list = __simple_split_ws(this.__el.className); for (var i = 0; i < list.length; i = i + 1) { if (list[i] === String(c)) { return true; } } return false; }, add: function() { var list = __simple_split_ws(this.__el.className); for (var a = 0; a < arguments.length; a = a + 1) { var c = String(arguments[a] || '').trim(); if (c !== '') { var has = false; for (var i = 0; i < list.length; i = i + 1) { if (list[i] === c) { has = true; break; } } if (!has) { list.push(c); } } } var joined = list.join(' '); this.__el.className = joined; this.__el.__attrs['class'] = joined; }, remove: function() { var list = __simple_split_ws(this.__el.className); var kept = []; for (var i = 0; i < list.length; i = i + 1) { var drop = false; for (var a = 0; a < arguments.length; a = a + 1) { if (list[i] === String(arguments[a])) { drop = true; break; } } if (!drop) { kept.push(list[i]); } } var joined = kept.join(' '); this.__el.className = joined; this.__el.__attrs['class'] = joined; }, toggle: function(c) { if (this.contains(c)) { this.remove(c); return false; } this.add(c); return true; } }; " +
+                "el.appendChild = function(child) { if (!child) { return child; } if (child.parentNode && child.parentNode.removeChild) { child.parentNode.removeChild(child); } child.parentNode = this; this.childNodes.push(child); if (child.nodeType !== 3 && this.children !== this.childNodes) { this.children.push(child); } this.innerHTML = __simple_serialize_children(this); var t = __simple_collect_text(this); this.textContent = t; this.innerText = t; this.__simple_children_dirty = true; return child; }; " +
+                "el.insertBefore = function(child, refNode) { if (!child) { return child; } if (!refNode) { return this.appendChild(child); } if (child.parentNode && child.parentNode.removeChild) { child.parentNode.removeChild(child); } child.parentNode = this; var next = []; var inserted = false; for (var i = 0; i < this.childNodes.length; i = i + 1) { if (this.childNodes[i] === refNode && !inserted) { next.push(child); inserted = true; } next.push(this.childNodes[i]); } if (!inserted) { next.push(child); } this.childNodes = next; var els = []; for (var j = 0; j < next.length; j = j + 1) { if (next[j].nodeType !== 3) { els.push(next[j]); } } this.children = els; this.innerHTML = __simple_serialize_children(this); var t = __simple_collect_text(this); this.textContent = t; this.innerText = t; this.__simple_children_dirty = true; return child; }; " +
+                "el.removeChild = function(child) { var next = []; var els = []; for (var i = 0; i < this.childNodes.length; i = i + 1) { if (this.childNodes[i] !== child) { next.push(this.childNodes[i]); if (this.childNodes[i].nodeType !== 3) { els.push(this.childNodes[i]); } } } this.childNodes = next; this.children = els; if (child) { child.parentNode = null; } this.innerHTML = __simple_serialize_children(this); var t = __simple_collect_text(this); this.textContent = t; this.innerText = t; this.__simple_children_dirty = true; return child; }; " +
+                "el.querySelector = function(sel) { var out = []; __simple_walk_subtree(this, String(sel), true, out); return out.length > 0 ? out[0] : null; }; " +
+                "el.querySelectorAll = function(sel) { var out = []; __simple_walk_subtree(this, String(sel), false, out); return out; }; " +
+                "el.focus = function() { this.setAttribute('data-focused', 'true'); }; " +
+                "el.click = function() { if (this.tagName === 'INPUT' && this.getAttribute('type') === 'checkbox') { this.checked = !this.checked; } if (typeof this.dispatchEvent === 'function') { this.dispatchEvent({ type: 'click', target: this, currentTarget: this, bubbles: true, cancelable: true, preventDefault: function(){}, stopPropagation: function(){} }); } }; " +
+                "el.getBoundingClientRect = function() { return this.__simple_rect || { left: 0, top: 0, width: 200, height: 32, right: 200, bottom: 32 }; }; return el; } " +
+                "function __simple_link_tree() { var all = document.__simple_elements; var byId = {}; for (var i = 0; i < all.length; i = i + 1) { var el = all[i]; __simple_dom_install(el); el.children = []; el.childNodes = el.children; el.parentNode = null; byId[String(el.__simple_id)] = el; } for (var j = 0; j < all.length; j = j + 1) { var c = all[j]; var p = byId[String(c.__simple_parent_id)]; if (p) { c.parentNode = p; p.children.push(c); } } } " +
+                "window.__simple_bind_dt = function(dt) { if (!dt) { return; } if (!dt.__map) { dt.__map = {}; } dt.setData = function(k, v) { this.__map[String(k)] = String(v); }; dt.getData = function(k) { var v = this.__map[String(k)]; return v === undefined || v === null ? '' : String(v); }; dt.clearData = function(k) { if (k === undefined) { this.__map = {}; } else { this.__map[String(k)] = undefined; } }; }; " +
+                "if (window.scrollX === undefined) { window.scrollX = 0; } if (window.scrollY === undefined) { window.scrollY = 0; } if (!window.scrollTo) { window.scrollTo = function(x, y) { window.scrollX = Math.max(0, Number(x || 0)); window.scrollY = Math.max(0, Number(y || 0)); }; } " +
+                "__simple_link_tree();"
             ):
                 return false
         var interpreter = runtime.interpreter
@@ -1882,6 +2173,7 @@ impl BrowserRuntimeState:
         val old_element_index_by_route = self.dom_element_index_by_route
         val old_element_ids = self.dom_element_ids
         val old_style_ids = self.dom_style_ids
+        val old_attr_ids = self.dom_attr_ids
         val old_id_snapshots = self.dom_id_snapshots
         val old_class_snapshots = self.dom_class_snapshots
         val old_value_snapshots = self.dom_value_snapshots
@@ -1911,6 +2203,8 @@ impl BrowserRuntimeState:
                 ):
                     keep_ids[old_element_ids[old_idx].to_text()] = true
                     keep_ids[old_style_ids[old_idx].to_text()] = true
+                    if old_idx < old_attr_ids.len():
+                        keep_ids[old_attr_ids[old_idx].to_text()] = true
                 di = di + 1
         self._retire_dom_objects_except(keep_ids)
 
@@ -1922,10 +2216,19 @@ impl BrowserRuntimeState:
         self.dom_routes = []
         self.dom_element_ids = []
         self.dom_style_ids = []
+        self.dom_attr_ids = []
         self.dom_id_snapshots = []
         self.dom_class_snapshots = []
         self.dom_value_snapshots = []
         self.dom_style_snapshots = []
+        self.dom_text_snapshots = []
+        self.dom_inner_text_snapshots = []
+        self.dom_inner_html_snapshots = []
+        self.dom_checked_snapshots = []
+        self.dom_disabled_snapshots = []
+        self.dom_selected_snapshots = []
+        self.dom_selected_index_snapshots = []
+        self.dom_attr_snapshots = []
         self.dom_route_index_by_object_id = {}
         self.dom_element_index_by_route = {}
 
@@ -1951,9 +2254,10 @@ impl BrowserRuntimeState:
             )
             var element_id: i64 = -1
             var style_id: i64 = -1
+            var attr_id: i64 = -1
             var snap_id = be_dom_get_attr(node, "id")
             var snap_class = be_dom_get_attr(node, "class")
-            var snap_value = be_dom_get_attr(node, "value")
+            var snap_value = if node.tag_name == "select": browser_select_value(node) else: be_dom_get_attr(node, "value")
             var snap_style = ""
             if idx < dom_body_idx:
                 var old_idx = -1
@@ -1969,6 +2273,8 @@ impl BrowserRuntimeState:
                 ):
                     element_id = old_element_ids[old_idx]
                     style_id = old_style_ids[old_idx]
+                    if old_idx < old_attr_ids.len():
+                        attr_id = old_attr_ids[old_idx]
                     snap_id = old_id_snapshots[old_idx]
                     snap_class = old_class_snapshots[old_idx]
                     snap_value = old_value_snapshots[old_idx]
@@ -1976,11 +2282,15 @@ impl BrowserRuntimeState:
                 else:
                     element_id = runtime.create_host_object()
                     style_id = runtime.create_host_object()
+                    attr_id = runtime.create_host_object()
                     runtime.set_host_property(
                         style_id, "cssText", JsValue.String(v: "")
                     )
                     runtime.set_host_property(
                         element_id, "style", JsValue.Object(id: style_id)
+                    )
+                    runtime.set_host_property(
+                        element_id, "__attrs", JsValue.Object(id: attr_id)
                     )
                     runtime.set_host_property(
                         element_id, "tagName",
@@ -1995,9 +2305,12 @@ impl BrowserRuntimeState:
                     runtime.set_host_property(
                         element_id, "value", JsValue.String(v: snap_value)
                     )
+                    val tc = be_dom_get_text_content(node)
                     runtime.set_host_property(
-                        element_id, "textContent",
-                        JsValue.String(v: be_dom_get_text_content(node))
+                        element_id, "textContent", JsValue.String(v: tc)
+                    )
+                    runtime.set_host_property(
+                        element_id, "innerText", JsValue.String(v: tc)
                     )
                     runtime.set_host_property(
                         element_id, "innerHTML",
@@ -2011,6 +2324,30 @@ impl BrowserRuntimeState:
                 snap_class = post_host_class_snaps[h_idx]
                 snap_value = post_host_value_snaps[h_idx]
                 snap_style = post_host_style_snaps[h_idx]
+                attr_id = runtime.create_host_object()
+                for aname in node.attr_names():
+                    if not aname.starts_with("\u0000"):
+                        runtime.set_host_property(attr_id, aname, JsValue.String(v: node.get_attr(aname)))
+                runtime.set_host_property(element_id, "__attrs", JsValue.Object(id: attr_id))
+            val tc_node = be_dom_get_text_content(node)
+            val ih_node = be_dom_serialize_children(node)
+            val chk_node = be_dom_has_attr(node, "checked")
+            val dis_node = be_dom_has_attr(node, "disabled")
+            val sel_node = be_dom_has_attr(node, "selected")
+            val sel_idx_node = if node.tag_name == "select": _browser_dom_select_index(node) else: -1
+            runtime.set_host_property(element_id, "__simple_id", JsValue.Number(v: element_id.to_f64()))
+            runtime.set_host_property(element_id, "__simple_children_dirty", JsValue.Boolean(v: false))
+            runtime.set_host_property(element_id, "checked", JsValue.Boolean(v: chk_node))
+            runtime.set_host_property(element_id, "disabled", JsValue.Boolean(v: dis_node))
+            runtime.set_host_property(element_id, "selected", JsValue.Boolean(v: sel_node))
+            runtime.set_host_property(element_id, "selectedIndex", JsValue.Number(v: sel_idx_node.to_f64()))
+            if be_dom_has_attr(node, "data-scroll-top"):
+                val scroll_top_sync = (be_dom_get_attr(node, "data-scroll-top").trim().parse_i64() ?? 0).to_f64()
+                runtime.set_host_property(element_id, "scrollTop", JsValue.Number(v: scroll_top_sync))
+            if be_dom_has_attr(node, "data-scroll-left"):
+                val scroll_left_sync = (be_dom_get_attr(node, "data-scroll-left").trim().parse_i64() ?? 0).to_f64()
+                runtime.set_host_property(element_id, "scrollLeft", JsValue.Number(v: scroll_left_sync))
+            runtime.set_host_property(element_id, "innerText", JsValue.String(v: tc_node))
             if strict_equals(
                 runtime.get_host_property(element_id, "addEventListener"),
                 JsValue.Undefined
@@ -2023,10 +2360,19 @@ impl BrowserRuntimeState:
             self.dom_routes.push(route)
             self.dom_element_ids.push(element_id)
             self.dom_style_ids.push(style_id)
+            self.dom_attr_ids.push(attr_id)
             self.dom_id_snapshots.push(snap_id)
             self.dom_class_snapshots.push(snap_class)
             self.dom_value_snapshots.push(snap_value)
             self.dom_style_snapshots.push(snap_style)
+            self.dom_text_snapshots.push(tc_node)
+            self.dom_inner_text_snapshots.push(tc_node)
+            self.dom_inner_html_snapshots.push(ih_node)
+            self.dom_checked_snapshots.push(chk_node)
+            self.dom_disabled_snapshots.push(dis_node)
+            self.dom_selected_snapshots.push(sel_node)
+            self.dom_selected_index_snapshots.push(sel_idx_node)
+            self.dom_attr_snapshots.push(_browser_dom_attr_snapshot(runtime, attr_id))
             self.dom_route_index_by_object_id[element_id.to_text()] = route_index
             self.dom_element_index_by_route[
                 _browser_dom_route_key(route)
@@ -2086,10 +2432,19 @@ impl BrowserRuntimeState:
             dom_element_index_by_route: self.dom_element_index_by_route,
             dom_element_list_id: self.dom_element_list_id,
             dom_style_ids: self.dom_style_ids,
+            dom_attr_ids: self.dom_attr_ids,
             dom_id_snapshots: self.dom_id_snapshots,
             dom_class_snapshots: self.dom_class_snapshots,
             dom_value_snapshots: self.dom_value_snapshots,
             dom_style_snapshots: self.dom_style_snapshots,
+            dom_text_snapshots: self.dom_text_snapshots,
+            dom_inner_text_snapshots: self.dom_inner_text_snapshots,
+            dom_inner_html_snapshots: self.dom_inner_html_snapshots,
+            dom_checked_snapshots: self.dom_checked_snapshots,
+            dom_disabled_snapshots: self.dom_disabled_snapshots,
+            dom_selected_snapshots: self.dom_selected_snapshots,
+            dom_selected_index_snapshots: self.dom_selected_index_snapshots,
+            dom_attr_snapshots: self.dom_attr_snapshots,
             dom_callable_listeners: cloned_listeners,
             dom_listener_indices_by_target_event: self.dom_listener_indices_by_target_event,
             event_prevent_default_fn_id: self.event_prevent_default_fn_id,
@@ -2097,10 +2452,12 @@ impl BrowserRuntimeState:
             event_stop_immediate_propagation_fn_id: self.event_stop_immediate_propagation_fn_id
         )
 
-    me _apply_dom_element(node: BeDomNode, index: i32) -> BeDomNode:
+    me _apply_dom_element(node: BeDomNode, index: i32, mut next_alloc_id: i64) -> (BeDomNode, bool, i64):
         var next = node
+        var id_changed = false
         val element_id = self.dom_element_ids[index]
         val style_id = self.dom_style_ids[index]
+        val attr_id = if index < self.dom_attr_ids.len(): self.dom_attr_ids[index] else: -1
         var next_id = _browser_dom_js_text(
             self.runtime.get_host_property(element_id, "id")
         )
@@ -2111,6 +2468,32 @@ impl BrowserRuntimeState:
             self.runtime.get_host_property(element_id, "value")
         )
         var next_style = _browser_dom_style_snapshot(self.runtime, style_id)
+        val next_checked = _browser_dom_js_bool_val(
+            self.runtime.get_host_property(element_id, "checked")
+        )
+        val next_disabled = _browser_dom_js_bool_val(
+            self.runtime.get_host_property(element_id, "disabled")
+        )
+        val next_selected = _browser_dom_js_bool_val(
+            self.runtime.get_host_property(element_id, "selected")
+        )
+        val old_sel_idx = if index < self.dom_selected_index_snapshots.len(): self.dom_selected_index_snapshots[index] else: -1
+        val next_sel_idx = _browser_dom_js_i64_val(
+            self.runtime.get_host_property(element_id, "selectedIndex"), old_sel_idx
+        )
+        val children_dirty = _browser_dom_js_bool_val(
+            self.runtime.get_host_property(element_id, "__simple_children_dirty")
+        )
+        val next_inner_html = _browser_dom_js_text(
+            self.runtime.get_host_property(element_id, "innerHTML")
+        )
+        val next_text = _browser_dom_js_text(
+            self.runtime.get_host_property(element_id, "textContent")
+        )
+        val next_inner_text = _browser_dom_js_text(
+            self.runtime.get_host_property(element_id, "innerText")
+        )
+        val next_attr_snap = _browser_dom_attr_snapshot(self.runtime, attr_id)
         if not browser_resource_size_allowed(next_id.len()):
             next_id = self.dom_id_snapshots[index]
         if not browser_resource_size_allowed(next_class.len()):
@@ -2121,6 +2504,7 @@ impl BrowserRuntimeState:
             next_style = self.dom_style_snapshots[index]
 
         if next_id != self.dom_id_snapshots[index]:
+            id_changed = true
             if next_id == "":
                 next.remove_attr("id")
             else:
@@ -2131,22 +2515,95 @@ impl BrowserRuntimeState:
             else:
                 next.set_attr("class", next_class)
         if next_value != self.dom_value_snapshots[index]:
-            next.set_attr("value", next_value)
+            if next.tag_name == "select":
+                val sel_upd = browser_select_update(next, next_value)
+                if sel_upd.found:
+                    next = sel_upd.node
+            elif next.tag_name == "textarea":
+                val tres = _browser_dom_set_text_child(next, next_value, next_alloc_id)
+                next = tres.0
+                next_alloc_id = tres.2
+            else:
+                next.set_attr("value", next_value)
         if next_style != self.dom_style_snapshots[index]:
             if next_style == "":
                 next.remove_attr("style")
             else:
                 next.set_attr("style", next_style)
+        if index < self.dom_checked_snapshots.len() and next_checked != self.dom_checked_snapshots[index]:
+            if next_checked:
+                next.set_attr("checked", "checked")
+            else:
+                next.remove_attr("checked")
+        if index < self.dom_disabled_snapshots.len() and next_disabled != self.dom_disabled_snapshots[index]:
+            if next_disabled:
+                next.set_attr("disabled", "disabled")
+            else:
+                next.remove_attr("disabled")
+        if index < self.dom_selected_snapshots.len() and next_selected != self.dom_selected_snapshots[index]:
+            if next_selected:
+                next.set_attr("selected", "selected")
+            else:
+                next.remove_attr("selected")
+        if next.tag_name == "select" and index < self.dom_selected_index_snapshots.len() and next_sel_idx != self.dom_selected_index_snapshots[index]:
+            next = _browser_dom_select_by_index(next, next_sel_idx)
+        val next_scroll_top = _browser_dom_js_i64_val(
+            self.runtime.get_host_property(element_id, "scrollTop"),
+            (be_dom_get_attr(next, "data-scroll-top").trim().parse_i64() ?? 0)
+        )
+        val cur_scroll_top = be_dom_get_attr(next, "data-scroll-top").trim().parse_i64() ?? 0
+        if next_scroll_top != cur_scroll_top:
+            val clamped_st = if next_scroll_top < 0: 0 else: next_scroll_top
+            next.set_attr("data-scroll-top", "{clamped_st}")
+            self.runtime.set_host_property(attr_id, "data-scroll-top", JsValue.String(v: "{clamped_st}"))
+        if index < self.dom_attr_snapshots.len() and next_attr_snap != self.dom_attr_snapshots[index]:
+            next = _browser_dom_sync_attrs_to_node(self.runtime, attr_id, next)
+            if next.has_attr("id") and next.get_attr("id") != self.dom_id_snapshots[index]:
+                id_changed = true
+
+        val old_ih = if index < self.dom_inner_html_snapshots.len(): self.dom_inner_html_snapshots[index] else: ""
+        val old_tc = if index < self.dom_text_snapshots.len(): self.dom_text_snapshots[index] else: ""
+        val old_it = if index < self.dom_inner_text_snapshots.len(): self.dom_inner_text_snapshots[index] else: ""
+        if next.tag_name != "body" and (children_dirty or (next_inner_html != old_ih and browser_resource_size_allowed(next_inner_html.len()))):
+            val parsed = html_tree_builder_build("<html><body>" + next_inner_html + "</body></html>")
+            val bodies = be_dom_find_by_tag(parsed, "body")
+            var new_children: [BeDomNode] = []
+            if bodies.len() > 0:
+                for c in bodies[0].children:
+                    val ares = _browser_dom_assign_ids(c, next.node_id, next_alloc_id)
+                    new_children.push(ares.0)
+                    next_alloc_id = ares.1
+            next = be_dom_set_children(next, new_children)
+            id_changed = true
+            self.runtime.set_host_property(element_id, "__simple_children_dirty", JsValue.Boolean(v: false))
+        elif next.tag_name != "body" and (next_text != old_tc or next_inner_text != old_it):
+            val chosen_text = if next_inner_text != old_it and next_text == old_tc: next_inner_text else: next_text
+            val tres = _browser_dom_set_text_child(next, chosen_text, next_alloc_id)
+            next = tres.0
+            if tres.1:
+                id_changed = true
+            next_alloc_id = tres.2
+
         self.dom_id_snapshots[index] = next_id
         self.dom_class_snapshots[index] = next_class
         self.dom_value_snapshots[index] = next_value
         self.dom_style_snapshots[index] = next_style
-        next
+        if index < self.dom_text_snapshots.len():
+            self.dom_text_snapshots[index] = be_dom_get_text_content(next)
+            self.dom_inner_text_snapshots[index] = self.dom_text_snapshots[index]
+            self.dom_inner_html_snapshots[index] = be_dom_serialize_children(next)
+            self.dom_checked_snapshots[index] = next_checked
+            self.dom_disabled_snapshots[index] = next_disabled
+            self.dom_selected_snapshots[index] = next_selected
+            self.dom_selected_index_snapshots[index] = next_sel_idx
+            self.dom_attr_snapshots[index] = next_attr_snap
+        (next, id_changed, next_alloc_id)
 
     me sync_dom(
         root: BeDomNode, identity_index: DomIdentityIndex
     ) -> BrowserDomSyncResult:
         var next_root = root
+        var next_alloc_id = _browser_dom_max_id(root) + 1
         var mutation_bytes: i64 = 0
         var image_source_changed = false
         var identity_changed = false
@@ -2155,6 +2612,7 @@ impl BrowserRuntimeState:
         var index = 0
         while index < self.dom_element_ids.len():
             val element_id = self.dom_element_ids[index]
+            val attr_id = if index < self.dom_attr_ids.len(): self.dom_attr_ids[index] else: -1
             var next_id = _browser_dom_js_text(
                 self.runtime.get_host_property(element_id, "id")
             )
@@ -2167,6 +2625,32 @@ impl BrowserRuntimeState:
             var next_style = _browser_dom_style_snapshot(
                 self.runtime, self.dom_style_ids[index]
             )
+            val next_checked = _browser_dom_js_bool_val(
+                self.runtime.get_host_property(element_id, "checked")
+            )
+            val next_disabled = _browser_dom_js_bool_val(
+                self.runtime.get_host_property(element_id, "disabled")
+            )
+            val next_selected = _browser_dom_js_bool_val(
+                self.runtime.get_host_property(element_id, "selected")
+            )
+            val old_sel_idx = if index < self.dom_selected_index_snapshots.len(): self.dom_selected_index_snapshots[index] else: -1
+            val next_sel_idx = _browser_dom_js_i64_val(
+                self.runtime.get_host_property(element_id, "selectedIndex"), old_sel_idx
+            )
+            val children_dirty = _browser_dom_js_bool_val(
+                self.runtime.get_host_property(element_id, "__simple_children_dirty")
+            )
+            val next_inner_html = _browser_dom_js_text(
+                self.runtime.get_host_property(element_id, "innerHTML")
+            )
+            val next_text = _browser_dom_js_text(
+                self.runtime.get_host_property(element_id, "textContent")
+            )
+            val next_inner_text = _browser_dom_js_text(
+                self.runtime.get_host_property(element_id, "innerText")
+            )
+            val next_attr_snap = _browser_dom_attr_snapshot(self.runtime, attr_id)
             if not browser_resource_size_allowed(next_id.len()):
                 next_id = self.dom_id_snapshots[index]
             if not browser_resource_size_allowed(next_class.len()):
@@ -2175,17 +2659,30 @@ impl BrowserRuntimeState:
                 next_value = self.dom_value_snapshots[index]
             if next_style == BROWSER_DOM_BRIDGE_OVERSIZE:
                 next_style = self.dom_style_snapshots[index]
+            val extra_changed = (
+                (index < self.dom_checked_snapshots.len() and next_checked != self.dom_checked_snapshots[index]) or
+                (index < self.dom_disabled_snapshots.len() and next_disabled != self.dom_disabled_snapshots[index]) or
+                (index < self.dom_selected_snapshots.len() and next_selected != self.dom_selected_snapshots[index]) or
+                (index < self.dom_selected_index_snapshots.len() and next_sel_idx != self.dom_selected_index_snapshots[index]) or
+                (index < self.dom_attr_snapshots.len() and next_attr_snap != self.dom_attr_snapshots[index]) or
+                children_dirty or
+                (index < self.dom_inner_html_snapshots.len() and next_inner_html != self.dom_inner_html_snapshots[index] and self.dom_routes[index].node_id > 0) or
+                (index < self.dom_text_snapshots.len() and next_text != self.dom_text_snapshots[index]) or
+                (index < self.dom_inner_text_snapshots.len() and next_inner_text != self.dom_inner_text_snapshots[index])
+            )
             val element_changed = (
                 next_id != self.dom_id_snapshots[index] or
                 next_class != self.dom_class_snapshots[index] or
                 next_value != self.dom_value_snapshots[index] or
-                next_style != self.dom_style_snapshots[index]
+                next_style != self.dom_style_snapshots[index] or
+                extra_changed
             )
             if element_changed:
-                val id_changed = next_id != self.dom_id_snapshots[index]
+                val prev_id_snap = self.dom_id_snapshots[index]
+                val prev_style_snap = self.dom_style_snapshots[index]
                 val element_bytes = (
                     next_id.len() + next_class.len() +
-                    next_value.len() + next_style.len()
+                    next_value.len() + next_style.len() + next_inner_html.len()
                 )
                 if browser_resource_size_allowed(
                     document_bytes + mutation_bytes + element_bytes
@@ -2195,9 +2692,13 @@ impl BrowserRuntimeState:
                         next_root, identity_index, route
                     )
                     if path.len() > 0:
-                        val replacement = self._apply_dom_element(
-                            path[path.len() - 1], index
+                        val applied = self._apply_dom_element(
+                            path[path.len() - 1], index, next_alloc_id
                         )
+                        val replacement = applied.0
+                        if applied.1:
+                            identity_changed = true
+                        next_alloc_id = applied.2
                         var next = replacement
                         var ancestor = path.len() - 2
                         while ancestor >= 0:
@@ -2212,11 +2713,11 @@ impl BrowserRuntimeState:
                             ancestor = ancestor - 1
                         next_root = next
                         changed = true
-                        if id_changed:
+                        if next_id != prev_id_snap:
                             identity_changed = true
                     mutation_bytes = mutation_bytes + element_bytes
                     if (
-                        next_style != self.dom_style_snapshots[index] and
+                        next_style != prev_style_snap and
                         next_style.lower().contains("url(")
                     ):
                         image_source_changed = true
@@ -2396,6 +2897,15 @@ class BrowserSession:
     dom_dispatch_depth: i32
     dom_dispatch_budget_remaining: i32
     active_label_activation_keys: Dict<text, bool>
+    drag_data_transfer_keys: [text]
+    drag_data_transfer_vals: [text]
+    wheel_delta_x: f64
+    wheel_delta_y: f64
+    pending_wheel_delta_x: f64
+    pending_wheel_delta_y: f64
+    pending_wheel_delta_mode: i32
+    element_scroll_ids: [text]
+    element_scroll_tops: [i32]
 
     static fn new() -> BrowserSession:
         BrowserSession._create(true).unwrap()
@@ -2505,7 +3015,16 @@ class BrowserSession:
             script_cookie_write_overflow: false,
             dom_dispatch_depth: 0,
             dom_dispatch_budget_remaining: 0,
-            active_label_activation_keys: {}
+            active_label_activation_keys: {},
+            drag_data_transfer_keys: [],
+            drag_data_transfer_vals: [],
+            wheel_delta_x: 0.0,
+            wheel_delta_y: 0.0,
+            pending_wheel_delta_x: 0.0,
+            pending_wheel_delta_y: 0.0,
+            pending_wheel_delta_mode: 0,
+            element_scroll_ids: [],
+            element_scroll_tops: []
         ))
 
 impl BrowserSession:
@@ -2612,6 +3131,8 @@ impl BrowserSession:
             self.text_selection_anchor_byte = 0
             self.text_selection_focus_byte = 0
             self.active_label_activation_keys = {}
+            self.element_scroll_ids = []
+            self.element_scroll_tops = []
         Ok(true)
 
     fn _cookie_now_seconds() -> i64:

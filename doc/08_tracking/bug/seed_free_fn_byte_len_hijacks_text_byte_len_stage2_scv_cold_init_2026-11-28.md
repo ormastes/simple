@@ -156,23 +156,50 @@ in-scope probe (imported free `byte_len`, `ByteBuf.byte_len`, an untyped
 parameter holding a `ByteBuf`) is unchanged at `99 1007 5 5 99`. Pinned by
 `bare_text_only_builtin_method_needs_an_in_scope_user_definition`.
 
+## Seed fix, script lane and use map (2026-11-28)
+
+`simple main.spl` flattens every imported module into one unit and compiles it
+with Cranelift: no use map, every function "defined here", so the Cranelift
+scope test above cannot separate modules. The flattener's owner tags and import
+markers can. `Lowerer::flatten_free_fn_out_of_scope`
+(`src/compiler_rust/compiler/src/hir/lower/lowerer.rs`) answers whether the
+unit's free `byte_len` / `char_count` is one the calling module neither defines
+nor imports (selectively, by glob, or through a re-export). When it is, and no
+type in the unit declares a method of that name, the erased-receiver arm of
+method lowering (`hir/lower/expr/mod.rs`) types the receiver as text, so the
+call lowers as the typed `str.byte_len` builtin.
+
+Use map: `collect_use_imports` (`pipeline/native_project/imports.rs`) also
+inserts every bare name with SEVERAL candidates in the project that the
+imported module owns, so with a second `byte_len` anywhere (a struct method is
+enough) `use util.bytes.{helper}` put the free `byte_len` in the importer's use
+map. That scan now skips `byte_len` / `char_count`; they enter a use map only
+when the `use` names them.
+
+Fixture `test/fixtures/seed_byte_len_scope/` (prints `typed loop untyped count
+entry free`, wanted `5 5 9 3 4 154`): `5 5 99 55 99 154` on the `f43f68c218e`
+seed, as wanted on the fixed seed. The second-candidate probe (free `byte_len`
+plus a struct method `byte_len`, importer names another symbol) goes from 99
+to 9 on both native lanes. Pinned by
+`test/01_unit/compiler/text_byte_len_out_of_scope_free_fn_spec.spl` (fails
+against the old seed, passes against the fixed one),
+`flattened_out_of_scope_free_byte_len_leaves_text_builtin_on_untyped_receiver`
+and `use_map_bare_scan_never_imports_text_only_builtin_names`.
+
+The fixture declares a free `byte_len` under `test/fixtures/`; none exists
+under `src/`, which is what the `lb_byte_len` workaround relies on.
+
 ## Open
 
 - The seed fix is not yet exercised by a Stage 2 bootstrap. Remove the
   `lb_byte_len` `@workaround` only after a `--full-bootstrap
   --stop-after-stage2` run on the fixed seed passes.
-- JIT (`simple main.spl`), not fixed: an untyped parameter's `.byte_len()`
-  still calls the unit's free `byte_len` (99, before and after). The JIT
-  compiles the whole program as one unit, so every function is "defined here"
-  and the Cranelift scope test below cannot tell the modules apart.
-- The use map is wider than the authored `use`: `collect_use_imports`
-  (`pipeline/native_project/imports.rs`) also inserts every bare name with
-  SEVERAL candidates in the project that the imported module owns. With a free
-  `byte_len` in `util/bytes.spl` and any second `byte_len` in the project (a
-  struct method is enough), `use util.bytes.{helper_unused}` puts a bare
-  `byte_len` in the importer's use map, and an untyped `.byte_len()` there
-  still binds to the free function on both lanes. A lone free `byte_len` (the
-  shape of this bug) has one candidate and is not inserted.
+- Script lane, ambiguous case: when the unit also holds a TYPE with a
+  `byte_len` method, an untyped `.byte_len()` in a module that sees neither
+  still binds to the out-of-scope free function (99). The receiver could be
+  that type, so the lowering cannot call it a text; sound dispatch there needs
+  a runtime type switch. An untyped parameter holding such a struct also
+  prints 99 (wanted 1007).
 - LLVM lane: an untyped parameter holding a struct whose own module defines
   `byte_len` as a method binds to the unit's free `byte_len` (99, wanted 1007;
   Cranelift is correct). Same before and after both seed fixes.

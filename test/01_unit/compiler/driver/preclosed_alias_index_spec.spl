@@ -1,0 +1,205 @@
+# Shared preclosed alias index: a second consumer of one frozen selection must
+# replay the alias rows with ZERO import resolutions and byte-identical rows.
+# Bug: doc/08_tracking/bug/unit_child_replays_preclosed_alias_walk_2026-11-28.md
+use std.spec.{describe, it, expect}
+use app.io.env_ops.{env_set}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_remove_process}
+use std.nogc_async_mut.sosix.environment.{sosix_cwd}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1,
+    driver_preclosed_alias_resolution_count_v1}
+use compiler.driver.driver_preclosed_alias_index_v1.{driver_preclosed_source_aliases_indexed_v1,
+    preclosed_alias_index_enabled_v1, preclosed_alias_index_path_v1,
+    preclosed_alias_index_stamp_v1, preclosed_alias_index_encode_v1,
+    preclosed_alias_index_decode_v1, PreclosedAliasIndexRowsV1}
+use compiler.driver.driver_source_loading.{
+    _driver_entry_import_dirname, _driver_collect_frozen_compiler_source_v1}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn fresh_root(label: text) -> text:
+    val root = sosix_cwd() + "/build/test_tmp/preclosed-alias-index-{label}-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    expect(rt_dir_create(root + "/queue", true)).to_equal(true)
+    root
+
+fn admitted(root: text, relative: text, content: text) -> [SourceFile]:
+    val path = root + "/" + relative
+    expect(rt_dir_create(_driver_entry_import_dirname(path), true)).to_equal(true)
+    expect(rt_file_write_text(path, content)).to_equal(true)
+    val loaded = _driver_collect_frozen_compiler_source_v1(path, sha256_text(content), content.len())
+    expect(loaded.is_ok()).to_equal(true)
+    loaded.unwrap()
+
+# Two importers of one provider under a library family: the walk appends the
+# authored spelling `file_system.types` as an alias row of the provider.
+fn fixture(root: text) -> [SourceFile]:
+    val entry = admitted(root, "src/app/main.spl", "use file_system.types.\{sentinel\}\nfn main() -> i64:\n    sentinel()\n")
+    val other = admitted(root, "src/app/other.spl", "use file_system.types.\{sentinel\}\nfn other() -> i64:\n    sentinel()\n")
+    val provider = admitted(root, "src/lib/nogc_async_mut/file_system/types.spl", "pub fn sentinel() -> i64:\n    41\n")
+    entry + other + provider
+
+fn roots_of(root: text) -> [text]:
+    [root + "/src/app", root + "/src/lib"]
+
+fn with_snapshot_direct(sources: [SourceFile], roots: [text], root: text) -> Result<[SourceFile], text>:
+    val previous = env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT")
+    expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_equal(true)
+    val replay = driver_preclosed_source_aliases_v1(sources, roots, root)
+    val restored = if previous != nil:
+        env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous!)
+    else: env_remove_process("SIMPLE_SCV_SNAPSHOT_ROOT")
+    expect(restored).to_equal(true)
+    replay
+
+fn with_snapshot_indexed(sources: [SourceFile], roots: [text], root: text,
+        enabled: bool, queue: text) -> Result<[SourceFile], text>:
+    val previous = env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT")
+    expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_equal(true)
+    val replay = driver_preclosed_source_aliases_indexed_v1(sources, roots, root, "", enabled, queue)
+    val restored = if previous != nil:
+        env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous!)
+    else: env_remove_process("SIMPLE_SCV_SNAPSHOT_ROOT")
+    expect(restored).to_equal(true)
+    replay
+
+fn expect_same_rows(left: [SourceFile], right: [SourceFile]):
+    expect(left.len()).to_equal(right.len())
+    var index = 0
+    while index < left.len() and index < right.len():
+        expect(left[index].path).to_equal(right[index].path)
+        expect(left[index].authored_path).to_equal(right[index].authored_path)
+        expect(left[index].module_name).to_equal(right[index].module_name)
+        expect(left[index].content).to_equal(right[index].content)
+        index = index + 1
+
+describe "preclosed alias index":
+    it "replays the second consumer with zero import resolutions and identical rows":
+        val root = fresh_root("second")
+        val sources = fixture(root)
+        val queue = root + "/queue"
+        val direct = with_snapshot_direct(sources, roots_of(root), root)
+        expect(direct.is_ok()).to_equal(true)
+        expect(direct.unwrap().len() > sources.len()).to_equal(true)
+        val before_first = driver_preclosed_alias_resolution_count_v1()
+        val first = with_snapshot_indexed(sources, roots_of(root), root, true, queue)
+        val after_first = driver_preclosed_alias_resolution_count_v1()
+        expect(first.is_ok()).to_equal(true)
+        # The first consumer pays the walk and publishes it.
+        expect(after_first > before_first).to_equal(true)
+        expect(file_exists(preclosed_alias_index_path_v1(queue))).to_equal(true)
+        expect_same_rows(direct.unwrap(), first.unwrap())
+        val second = with_snapshot_indexed(sources, roots_of(root), root, true, queue)
+        expect(second.is_ok()).to_equal(true)
+        expect(driver_preclosed_alias_resolution_count_v1()).to_equal(after_first)
+        expect_same_rows(direct.unwrap(), second.unwrap())
+
+    it "walks again when a source body changes under the same paths":
+        val root = fresh_root("content")
+        val sources = fixture(root)
+        val queue = root + "/queue"
+        expect(with_snapshot_indexed(sources, roots_of(root), root, true, queue).is_ok()).to_equal(true)
+        val entry = admitted(root, "src/app/main.spl", "use file_system.types.\{sentinel\}\nfn main() -> i64:\n    sentinel() + 1\n")
+        var edited: [SourceFile] = []
+        for row in entry: edited.push(row)
+        var index = entry.len()
+        while index < sources.len():
+            edited.push(sources[index])
+            index = index + 1
+        val before = driver_preclosed_alias_resolution_count_v1()
+        val replay = with_snapshot_indexed(edited, roots_of(root), root, true, queue)
+        expect(replay.is_ok()).to_equal(true)
+        expect(driver_preclosed_alias_resolution_count_v1() > before).to_equal(true)
+        val direct = with_snapshot_direct(edited, roots_of(root), root)
+        expect_same_rows(direct.unwrap(), replay.unwrap())
+
+    it "walks again when the row order or the resolution roots change":
+        val root = fresh_root("order")
+        val sources = fixture(root)
+        val queue = root + "/queue"
+        expect(with_snapshot_indexed(sources, roots_of(root), root, true, queue).is_ok()).to_equal(true)
+        var reordered: [SourceFile] = []
+        var index = sources.len() - 1
+        while index >= 0:
+            reordered.push(sources[index])
+            index = index - 1
+        val before_order = driver_preclosed_alias_resolution_count_v1()
+        val by_order = with_snapshot_indexed(reordered, roots_of(root), root, true, queue)
+        expect(by_order.is_ok()).to_equal(true)
+        expect(driver_preclosed_alias_resolution_count_v1() > before_order).to_equal(true)
+        expect_same_rows(with_snapshot_direct(reordered, roots_of(root), root).unwrap(), by_order.unwrap())
+        val wider = [root + "/src/app", root + "/src/lib", root + "/src/os"]
+        val before_roots = driver_preclosed_alias_resolution_count_v1()
+        val by_roots = with_snapshot_indexed(reordered, wider, root, true, queue)
+        expect(by_roots.is_ok()).to_equal(true)
+        expect(driver_preclosed_alias_resolution_count_v1() > before_roots).to_equal(true)
+
+    it "falls back to the walk on a truncated index and republishes it":
+        val root = fresh_root("truncated")
+        val sources = fixture(root)
+        val queue = root + "/queue"
+        val first = with_snapshot_indexed(sources, roots_of(root), root, true, queue)
+        expect(first.is_ok()).to_equal(true)
+        val target = preclosed_alias_index_path_v1(queue)
+        val whole = file_read(target)
+        expect(file_write(target, whole.substring(0, whole.len() - 3))).to_equal(true)
+        val before = driver_preclosed_alias_resolution_count_v1()
+        val replay = with_snapshot_indexed(sources, roots_of(root), root, true, queue)
+        expect(replay.is_ok()).to_equal(true)
+        expect(driver_preclosed_alias_resolution_count_v1() > before).to_equal(true)
+        expect_same_rows(first.unwrap(), replay.unwrap())
+        expect(file_read(target)).to_equal(whole)
+
+    it "never reads or writes an index when switched off or without a queue":
+        val root = fresh_root("off")
+        val sources = fixture(root)
+        val queue = root + "/queue"
+        val before_off = driver_preclosed_alias_resolution_count_v1()
+        expect(with_snapshot_indexed(sources, roots_of(root), root, false, queue).is_ok()).to_equal(true)
+        expect(driver_preclosed_alias_resolution_count_v1() > before_off).to_equal(true)
+        expect(file_exists(preclosed_alias_index_path_v1(queue))).to_equal(false)
+        val before_none = driver_preclosed_alias_resolution_count_v1()
+        expect(with_snapshot_indexed(sources, roots_of(root), root, true, "").is_ok()).to_equal(true)
+        expect(driver_preclosed_alias_resolution_count_v1() > before_none).to_equal(true)
+        expect(preclosed_alias_index_enabled_v1("")).to_equal(true)
+        expect(preclosed_alias_index_enabled_v1("1")).to_equal(true)
+        expect(preclosed_alias_index_enabled_v1("0")).to_equal(false)
+        expect(preclosed_alias_index_enabled_v1("false")).to_equal(false)
+        expect(preclosed_alias_index_enabled_v1(" off ")).to_equal(false)
+
+    it "decodes only an index bound to the same stamp, row count and row range":
+        val rows = PreclosedAliasIndexRowsV1(rows: [2, 0], names: ["file_system.types", "app.entry"])
+        val wire = preclosed_alias_index_encode_v1(3, "stamp-a", rows)
+        val decoded = preclosed_alias_index_decode_v1(3, "stamp-a", wire)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().rows).to_equal([2, 0])
+        expect(decoded.unwrap().names).to_equal(["file_system.types", "app.entry"])
+        expect(preclosed_alias_index_decode_v1(3, "stamp-b", wire).is_err()).to_equal(true)
+        expect(preclosed_alias_index_decode_v1(4, "stamp-a", wire).is_err()).to_equal(true)
+        expect(preclosed_alias_index_decode_v1(2, "stamp-a", wire).is_err()).to_equal(true)
+        expect(preclosed_alias_index_decode_v1(3, "stamp-a", wire + "\n0\textra").is_err()).to_equal(true)
+        expect(preclosed_alias_index_decode_v1(3, "stamp-a",
+            wire.replace("2\tfile_system.types", "2\t")).is_err()).to_equal(true)
+        expect(preclosed_alias_index_decode_v1(3, "stamp-a",
+            wire.replace("2\tfile_system.types", "x\tfile_system.types")).is_err()).to_equal(true)
+
+    it "stamps every row field, the roots, the mode and the ambient resolver inputs":
+        val a = SourceFile(path: "/s/a.spl", authored_path: "", content: "fn a():\n    ()\n", module_name: "a")
+        val b = SourceFile(path: "/s/b.spl", authored_path: "", content: "fn b():\n    ()\n", module_name: "b")
+        val base = preclosed_alias_index_stamp_v1([a, b], ["/s"], "/s", "", ["/cwd"])
+        expect(preclosed_alias_index_stamp_v1([a, b], ["/s"], "/s", "", ["/cwd"])).to_equal(base)
+        expect(preclosed_alias_index_stamp_v1([b, a], ["/s"], "/s", "", ["/cwd"]) != base).to_equal(true)
+        expect(preclosed_alias_index_stamp_v1([a, b], ["/s", "/t"], "/s", "", ["/cwd"]) != base).to_equal(true)
+        expect(preclosed_alias_index_stamp_v1([a, b], ["/s"], "/t", "", ["/cwd"]) != base).to_equal(true)
+        expect(preclosed_alias_index_stamp_v1([a, b], ["/s"], "/s", "nogc_sync_mut", ["/cwd"]) != base).to_equal(true)
+        expect(preclosed_alias_index_stamp_v1([a, b], ["/s"], "/s", "", ["/other"]) != base).to_equal(true)
+        val renamed = SourceFile(path: "/s/b.spl", authored_path: "", content: "fn b():\n    ()\n", module_name: "b2")
+        expect(preclosed_alias_index_stamp_v1([a, renamed], ["/s"], "/s", "", ["/cwd"]) != base).to_equal(true)
+        val authored = SourceFile(path: "/s/b.spl", authored_path: "/w/b.spl", content: "fn b():\n    ()\n", module_name: "b")
+        expect(preclosed_alias_index_stamp_v1([a, authored], ["/s"], "/s", "", ["/cwd"]) != base).to_equal(true)
+        val edited = SourceFile(path: "/s/b.spl", authored_path: "", content: "fn b():\n    1\n", module_name: "b")
+        expect(preclosed_alias_index_stamp_v1([a, edited], ["/s"], "/s", "", ["/cwd"]) != base).to_equal(true)

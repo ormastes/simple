@@ -219,6 +219,23 @@ fn apply_lcd_filter(bitmap: GlyphBitmap, order: LcdOrder) -> GlyphBitmap:
         GlyphBitmap(width: w, height: h, left: bitmap.left, top: bitmap.top, pixels: out_pixels)
 
 fn apply_subpixel(bitmap: GlyphBitmap, offset: SubpixelOffset) -> GlyphBitmap:
-    # TODO(skia-glyph): use offset to shift filter kernel for subpixel positioning.
-    # For now applies default Rgb LCD filter.
-    apply_lcd_filter(bitmap, LcdOrder.Rgb)
+    val base = apply_lcd_filter(bitmap, LcdOrder.Rgb)
+    val shift: i64 = match offset:
+        case SubpixelOffset.Zero: 0
+        case SubpixelOffset.OneThird: 1
+        case SubpixelOffset.TwoThird: 2
+    if shift == 0 or base.width <= 0 or base.height <= 0:
+        return base
+    val row_channels = base.width * 3
+    if base.pixels.len() != row_channels * base.height:
+        return base
+    var shifted: [u8] = [0u8; base.pixels.len()]
+    var row: i64 = 0
+    while row < base.height:
+        val row_off = row * row_channels
+        var ch: i64 = shift
+        while ch < row_channels:
+            shifted[row_off + ch] = base.pixels[row_off + (ch - shift)]
+            ch = ch + 1
+        row = row + 1
+    GlyphBitmap(width: base.width, height: base.height, left: base.left, top: base.top, pixels: shifted)

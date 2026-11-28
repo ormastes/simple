@@ -1,0 +1,226 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# LLVM backend verification for value-position `if val ... else: match ...` with diverging arms
+
+Bug: doc/08_tracking/bug/phase2_llvm_if_val_match_value_void_2026-11-16.md
+Proves that pure-Simple HIR -> MIR -> MirToLlvm lowering preserves concrete
+non-void value types (struct, f64, text, i64) across value-position
+`if val ... else: match ...` and `if/elif/else: match ...` forms with
+returning/diverging arms, emitting zero MIR errors, zero LLVM codegen errors
+(including no `E-BACKEND-LLVM-CONST-TYPE` on untyped float joins and no
+`unsupported LLVM value conversion ... to void`), and no `void` value operands.
+"""
+
+# @tag: unit, compiler, mir, llvm
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct LlvmLowerProbe:
+    hir_errors: [text]
+    mir_errors: [text]
+    llvm_errors: [text]
+    ir: text
+
+fn lower_to_llvm(label: text, source: text) -> LlvmLowerProbe:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("app.main", surfaces)
+    val hir = hl.lower_module(ast)
+    var ml = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = ml.lower_module(hir, [hir])
+    var tr = MirToLlvm.create("if_val_match_llvm." + label, CodegenTarget.X86_64, None)
+    val ir = tr.translate_module(mir)
+    var hir_errs: [text] = []
+    for e in hl.errors:
+        hir_errs.push(e.message)
+    var mir_errs: [text] = []
+    for e in ml.errors:
+        mir_errs.push(e.message)
+    LlvmLowerProbe(
+        hir_errors: hir_errs,
+        mir_errors: mir_errs,
+        llvm_errors: tr.codegen_errors,
+        ir: ir
+    )
+
+describe "MirToLlvm value-position if val else match with diverging arms":
+    it "lowers untyped _drain_completions while-loop if-val/else-match struct shape with zero LLVM errors and no void operands":
+        val src = """
+struct RingToken:
+    id: i64
+
+struct RingCompletion:
+    token: RingToken
+    task_key: i64
+
+class Bridge:
+    pending: RingCompletion?
+    drained: i64
+
+    fn pull(flag: i64) -> Result<RingCompletion?, text>:
+        if flag == 0:
+            return Err("ring-err")
+        if flag == 1:
+            return Ok(Some(RingCompletion(token: RingToken(id: 11), task_key: 7)))
+        Ok(None)
+
+    me drain_completions(flag: i64) -> Result<(), text>:
+        var count = 0
+        while count < 4:
+            val completion = if val retained = self.pending:
+                retained
+            else:
+                val taken = self.pull(flag)
+                match taken:
+                    case Err(error):
+                        return Err(error)
+                    case Ok(Some(value)):
+                        self.pending = Some(value)
+                        value
+                    case Ok(_):
+                        return Ok(())
+            if completion.task_key != 7:
+                return Err("bad-key")
+            self.pending = None
+            self.drained = self.drained + completion.token.id
+            count = count + 1
+        Ok(())
+"""
+        val res = lower_to_llvm("drain_struct_untyped", src)
+        expect(res.hir_errors).to_equal([])
+        expect(res.mir_errors).to_equal([])
+        expect(res.llvm_errors).to_equal([])
+        expect(res.ir.contains("(void ")).to_equal(false)
+        expect(res.ir.contains(", void ")).to_equal(false)
+        expect(res.ir.contains("drain_completions(")).to_equal(true)
+
+    it "lowers untyped if-val/else-match yielding f64 without E-BACKEND-LLVM-CONST-TYPE":
+        val src = """
+fn pull_f64(flag: i64) -> Result<f64?, text>:
+    if flag == 0:
+        return Err("fail")
+    if flag == 1:
+        return Ok(Some(3.5))
+    Ok(None)
+
+fn pick_f64(pending: f64?, flag: i64) -> Result<f64, text>:
+    val taken = pull_f64(flag)
+    val chosen = if val retained = pending:
+        retained
+    else:
+        match taken:
+            case Err(error):
+                return Err(error)
+            case Ok(Some(value)):
+                value
+            case Ok(_):
+                return Ok(0.0)
+    Ok(chosen + 1.0)
+"""
+        val res = lower_to_llvm("if_val_match_f64", src)
+        expect(res.hir_errors).to_equal([])
+        expect(res.mir_errors).to_equal([])
+        expect(res.llvm_errors).to_equal([])
+        expect(res.ir.contains("(void ")).to_equal(false)
+        expect(res.ir.contains(", void ")).to_equal(false)
+        expect(res.ir.contains("pick_f64(")).to_equal(true)
+
+    it "lowers untyped if-elif-else-match chain yielding f64 with diverging arms cleanly in LLVM":
+        val src = """
+fn pull_metric(flag: i64) -> Result<f64?, text>:
+    if flag == 0:
+        return Err("err")
+    if flag == 1:
+        return Ok(Some(9.25))
+    Ok(None)
+
+fn pick_chain_f64(mode: i64, flag: i64) -> Result<f64, text>:
+    val taken = pull_metric(flag)
+    val chosen = if mode == 1:
+        1.5
+    elif mode == 2:
+        2.5
+    else:
+        match taken:
+            case Err(e):
+                return Err(e)
+            case Ok(Some(v)):
+                v
+            case Ok(_):
+                return Ok(0.0)
+    Ok(chosen + 0.5)
+"""
+        val res = lower_to_llvm("if_chain_match_f64", src)
+        expect(res.hir_errors).to_equal([])
+        expect(res.mir_errors).to_equal([])
+        expect(res.llvm_errors).to_equal([])
+        expect(res.ir.contains("(void ")).to_equal(false)
+        expect(res.ir.contains(", void ")).to_equal(false)
+        expect(res.ir.contains("pick_chain_f64(")).to_equal(true)
+
+    it "lowers if-val whose then-arm returns and else-arm match yields a value with zero LLVM errors":
+        val src = """
+struct Boxed:
+    v: i64
+
+fn pick_else_yield(skip: i64?, r: Result<Boxed, text>) -> Result<i64, text>:
+    val chosen = if val _ignored = skip:
+        return Ok(0)
+    else:
+        match r:
+            case Err(e):
+                return Err(e)
+            case Ok(b):
+                b
+    Ok(chosen.v)
+"""
+        val res = lower_to_llvm("then_returns_else_match", src)
+        expect(res.hir_errors).to_equal([])
+        expect(res.mir_errors).to_equal([])
+        expect(res.llvm_errors).to_equal([])
+        expect(res.ir.contains("(void ")).to_equal(false)
+        expect(res.ir.contains(", void ")).to_equal(false)
+        expect(res.ir.contains("pick_else_yield(")).to_equal(true)
+
+    it "lowers if-val with all-diverging else match to LLVM without void conversion errors":
+        val src = """
+struct Item:
+    token: i64
+
+fn pick_or_diverge(opt: Item?, flag: i64) -> i64:
+    val chosen = if val retained = opt:
+        retained
+    else:
+        match flag:
+            case 0:
+                return 10
+            case 1:
+                return 20
+            case _:
+                return 30
+    chosen.token
+"""
+        val res = lower_to_llvm("all_diverging_else_match", src)
+        expect(res.hir_errors).to_equal([])
+        expect(res.mir_errors).to_equal([])
+        expect(res.llvm_errors).to_equal([])
+        expect(res.ir.contains("(void ")).to_equal(false)
+        expect(res.ir.contains(", void ")).to_equal(false)
+        expect(res.ir.contains("pick_or_diverge(")).to_equal(true)
