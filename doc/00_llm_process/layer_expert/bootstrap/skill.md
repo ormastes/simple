@@ -1048,6 +1048,16 @@ imports" and
   closure-wide by design (split-part facades have no use/import entry).
 - Reproduce on `--backend llvm` only: Cranelift and the JIT do not run
   `mangle.rs`. A seed without `--features llvm` cannot show this class at all.
+- Cranelift has its own half in `codegen/instr/closures_structs.rs`: a bare
+  (untyped-receiver) `byte_len` / `char_count` takes the text builtin unless
+  the calling module defines or imports one. The JIT is one unit, so that scope
+  test does not separate modules there.
+- "In the use map" is wider than "named in a `use`": `collect_use_imports`
+  also inserts bare names with several project candidates that the imported
+  module owns.
+- A copied seed binary stops linking Cranelift probes once the worktree it was
+  built from is deleted (`refusing to weak-stub core enum runtime symbols`);
+  measure baselines before removing the worktree.
 - A small reproducer needs the Rust handler and a runtime archive:
   `SIMPLE_NATIVE_BUILD_RUST=1 <seed> native-build --source src --entry
   src/main.spl --backend llvm --runtime-path <dir with libsimple_runtime.a>`.

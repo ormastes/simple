@@ -138,15 +138,44 @@ Still bound, as before: a function the module defines or names in a `use`, a
 by `closure_wide_free_fn_never_captures_text_builtin_method_calls` (red with
 the guard disabled, green with it).
 
+## Seed fix, Cranelift lane (2026-11-28)
+
+The Cranelift lane resolves methods in
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
+(`compile_method_call_static`), not in `mangle.rs`. Typed text receivers arrive
+as `str.byte_len` and take the builtin first. An UNTYPED receiver arrives as
+bare `byte_len`, and name resolution bound it to the one `<module>__byte_len`
+in the unit, imported or not: `fn f(x): x.byte_len()` printed 99 for a text.
+
+Fix: `is_bare_text_only_builtin_method` + `bare_method_is_in_scope`. A bare
+zero-argument `byte_len` / `char_count` lowers to `rt_string_len` /
+`rt_string_char_count` unless the calling module defines a function or method
+of that name or its use map carries one. Second probe, `--backend cranelift`
+(wanted `3 7 6 4 5 9 3`): `3 7 6 4 5 99 3` before, `3 7 6 4 5 9 3` after. The
+in-scope probe (imported free `byte_len`, `ByteBuf.byte_len`, an untyped
+parameter holding a `ByteBuf`) is unchanged at `99 1007 5 5 99`. Pinned by
+`bare_text_only_builtin_method_needs_an_in_scope_user_definition`.
+
 ## Open
 
 - The seed fix is not yet exercised by a Stage 2 bootstrap. Remove the
   `lb_byte_len` `@workaround` only after a `--full-bootstrap
   --stop-after-stage2` run on the fixed seed passes.
-- Cranelift / JIT, not fixed here: `fn f(x): x.byte_len()` with an UNTYPED
-  parameter holding a text calls the closure's free `byte_len` (prints 99,
-  both seeds). That lane resolves in `codegen/instr/calls.rs` through
-  `ctx.import_map`, not `mangle.rs`. Typed receivers are correct there.
+- JIT (`simple main.spl`), not fixed: an untyped parameter's `.byte_len()`
+  still calls the unit's free `byte_len` (99, before and after). The JIT
+  compiles the whole program as one unit, so every function is "defined here"
+  and the Cranelift scope test below cannot tell the modules apart.
+- The use map is wider than the authored `use`: `collect_use_imports`
+  (`pipeline/native_project/imports.rs`) also inserts every bare name with
+  SEVERAL candidates in the project that the imported module owns. With a free
+  `byte_len` in `util/bytes.spl` and any second `byte_len` in the project (a
+  struct method is enough), `use util.bytes.{helper_unused}` puts a bare
+  `byte_len` in the importer's use map, and an untyped `.byte_len()` there
+  still binds to the free function on both lanes. A lone free `byte_len` (the
+  shape of this bug) has one candidate and is not inserted.
+- LLVM lane: an untyped parameter holding a struct whose own module defines
+  `byte_len` as a method binds to the unit's free `byte_len` (99, wanted 1007;
+  Cranelift is correct). Same before and after both seed fixes.
 - Residual, by construction: the mangler has no receiver types. A bare
   (erased-receiver) `.byte_len()` in a module that defines or imports a free
   `byte_len` still binds to that function (measured: an untyped parameter
