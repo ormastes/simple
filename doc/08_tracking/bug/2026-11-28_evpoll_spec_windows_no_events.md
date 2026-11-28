@@ -1,6 +1,6 @@
 # extern_shape_evpoll_spec readiness cases fail on Windows (2026-11-28)
 
-Status: open (found in review of PR #12418)
+Status: verification-pending (took the exact per-platform pin, not a backend: `_expect_one_triple` in the spec asserts len() == 0 on `rt_platform_name() == "windows"` and the exact (fd, ready, token) triple everywhere else; asserts unchanged. A WSAPoll backend was not small: the interpreter and Rust runtime pass registry socket HANDLES, not raw SOCKETs, so each lane needs handle->SOCKET plumbing. Remaining work: real Windows backend in all three lanes, then drop the windows branch. Linux interpreter ready == 1 for a write-only socket NOT confirmed (no Linux host this session; note the Linux interpreter epoll backend passes the interpreter socket handle straight to epoll_ctl as a raw fd, which deserves a check))
 
 `test/01_unit/runtime/extern_shape_evpoll_spec.spl` cases "reports fd, Read and the
 registered token ..." and "reports Write readiness ..." expect one (fd, ready, token)
