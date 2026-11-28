@@ -63,36 +63,45 @@ pub fn workaround_path_valid(path: text) -> WorkaroundCheckV1:
 
 fn workaround_lexical_state(line: text, previous: text) -> text:
     # Ignore marker examples embedded in multiline strings or C block comments.
+    # Scan UTF-8 bytes directly so multi-byte characters (e.g. `§`, `—`) inside
+    # single-line docstrings never skew char-len vs byte-substring offsets and
+    # leave triple-quoted state stuck open for the rest of the file.
+    val bytes = line.bytes()
+    val n = bytes.len()
     var state = previous
-    var quote = ""
+    var quote: i64 = 0
     var escaped = false
     var i = 0
-    while i < line.len():
-        val ch = line.substring(i, i + 1)
-        val pair = if i + 2 <= line.len(): line.substring(i, i + 2) else: ""
-        val triple = if i + 3 <= line.len(): line.substring(i, i + 3) else: ""
+    while i < n:
+        val b = bytes[i] as i64
+        val b1 = if i + 1 < n: bytes[i + 1] as i64 else: -1
+        val b2 = if i + 2 < n: bytes[i + 2] as i64 else: -1
         if state == "/*":
-            if pair == "*/":
+            if b == 42 and b1 == 47:
                 state = ""
                 i = i + 1
         elif state != "":
-            if triple == state and not escaped:
+            val delim: i64 = if state == "\"\"\"": 34 else: 39
+            if b == delim and b1 == delim and b2 == delim and not escaped:
                 state = ""
                 i = i + 2
-            escaped = ch == "\\" and not escaped
-        elif quote != "":
-            if ch == quote and not escaped: quote = ""
-            escaped = ch == "\\" and not escaped
-        elif ch == "#" or pair == "//":
+            escaped = b == 92 and not escaped
+        elif quote != 0:
+            if b == quote and not escaped: quote = 0
+            escaped = b == 92 and not escaped
+        elif b == 35 or (b == 47 and b1 == 47):
             return state
-        elif pair == "/*":
+        elif b == 47 and b1 == 42:
             state = "/*"
             i = i + 1
-        elif triple == "\"\"\"" or triple == "'''":
-            state = triple
+        elif b == 34 and b1 == 34 and b2 == 34:
+            state = "\"\"\""
             i = i + 2
-        elif ch == "\"" or ch == "'":
-            quote = ch
+        elif b == 39 and b1 == 39 and b2 == 39:
+            state = "'''"
+            i = i + 2
+        elif b == 34 or b == 39:
+            quote = b
         i = i + 1
     state
 
