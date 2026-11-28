@@ -1,6 +1,6 @@
 # Native Vulkan 8K retained-damage evidence benchmark.
 # Measures one 64x64 dynamic rectangle per frame after a full mirror seed.
-# The timed interval includes compute submission, completion, exact strided
+# The timed interval includes compute submission, completion, exact per-row
 # device-to-host transfer, and host-mirror patching. It excludes initialization,
 # the first full seed, final checksum, and shutdown.
 
@@ -9,8 +9,6 @@ use std.gc_async_mut.gpu.engine2d.color.rgb
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_selected_device_driver_identity_hash
 }
-use common.ui.render_opt.damage_plan.{DamageFramePlan, DAMAGE_PLAN_LOCAL, DAMAGE_FALLBACK_NONE}
-
 extern fn rt_time_now_nanos() -> i64
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -22,47 +20,17 @@ val DAMAGE_W: i32 = 64
 val DAMAGE_H: i32 = 64
 val WARMUP_FRAMES: i64 = 10
 val TIMED_FRAMES: i64 = 200
-val SEED_ROWS: i32 = 64
-
-fn exact_damage_plan() -> DamageFramePlan:
-    DamageFramePlan(
-        rects: [DAMAGE_X as i64, DAMAGE_Y as i64, DAMAGE_W as i64, DAMAGE_H as i64],
-        mode: DAMAGE_PLAN_LOCAL,
-        source_tile_count: 1, output_rect_count: 1, merged_tile_count: 0,
-        dirty_pixels: (DAMAGE_W as i64) * (DAMAGE_H as i64),
-        planned_pixels: (DAMAGE_W as i64) * (DAMAGE_H as i64),
-        tiles_examined: 1, full_fallback_count: 0,
-        fallback_reason: DAMAGE_FALLBACK_NONE)
-
-fn strip_damage_plan(y: i32, rows: i32) -> DamageFramePlan:
-    val pixels = (FRAME_W as i64) * (rows as i64)
-    DamageFramePlan(
-        rects: [0, y as i64, FRAME_W as i64, rows as i64],
-        mode: DAMAGE_PLAN_LOCAL,
-        source_tile_count: 1, output_rect_count: 1, merged_tile_count: 0,
-        dirty_pixels: pixels, planned_pixels: pixels,
-        tiles_examined: 1, full_fallback_count: 0,
-        fallback_reason: DAMAGE_FALLBACK_NONE)
+fn exact_damage_rects() -> [i64]:
+    [DAMAGE_X as i64, DAMAGE_Y as i64, DAMAGE_W as i64, DAMAGE_H as i64]
 
 fn seed_retained_mirror(backend: VulkanBackend) -> bool:
-    # Avoid one 132.7 MB staging allocation. The strided runtime admits at most
-    # 64 MiB packed per call. Full-width 64-row strips are 1.97 MB each,
-    # keeping the JIT byte-array conversion comfortably bounded as well.
-    # host_buf is already full-sized. It becomes valid only after every exact
-    # strip has been copied from the completed device clear.
-    if not backend.submit_batch():
-        return false
-    backend.host_mirror_valid = true
-    var y: i32 = 0
-    while y < FRAME_H:
-        var rows = SEED_ROWS
-        if y + rows > FRAME_H:
-            rows = FRAME_H - y
-        if not backend.present_damage_plan(strip_damage_plan(y, rows)):
-            backend.host_mirror_valid = false
-            return false
-        y = y + rows
-    true
+    # The mirror is unseeded after init, so present() fails closed to exactly
+    # one full native readback into host_buf (`_refresh_host_full`). Every
+    # later frame stages exact damage through the production
+    # stage_present_damage + present route.
+    backend.present()
+    backend.host_mirror_valid and backend.frame_host_cache_refresh_completed and
+        backend.present_full_readback_count == 1
 
 fn sort_samples(samples: [i64]):
     var i: i64 = 1
@@ -96,10 +64,13 @@ fn rss_kb() -> i64:
         i = i + 1
     value
 
-fn draw_frame(backend: VulkanBackend, frame: i64, plan: DamageFramePlan) -> bool:
+fn draw_frame(backend: VulkanBackend, frame: i64, rects: [i64]) -> bool:
     val colour = if frame % 2 == 0: rgb(230, 40, 70) else: rgb(30, 200, 110)
     backend.draw_rect_filled(DAMAGE_X, DAMAGE_Y, DAMAGE_W, DAMAGE_H, colour)
-    backend.present_damage_plan(plan)
+    if not backend.stage_present_damage(rects):
+        return false
+    backend.present()
+    backend.frame_host_cache_refresh_completed and backend.frame_fallback_reason == ""
 
 fn main():
     var backend = VulkanBackend.create()
@@ -115,39 +86,46 @@ fn main():
         return
     print("VULKAN_8K_LIFETIME post_seed=" + backend.host_buf.len().to_i64().to_string())
 
-    val plan = exact_damage_plan()
+    val rects = exact_damage_rects()
     var warmup: i64 = 0
     while warmup < WARMUP_FRAMES:
-        if not draw_frame(backend, warmup, plan):
+        if not draw_frame(backend, warmup, rects):
             print("VULKAN_8K_RETAINED status=fail reason=warmup-transfer")
             backend.shutdown()
             return
         warmup = warmup + 1
     print("VULKAN_8K_LIFETIME post_warmup=" + backend.host_buf.len().to_i64().to_string())
 
-    val calls_before = backend.damage_readback_calls
-    val bytes_before = backend.damage_readback_bytes
-    val fallback_before = backend.damage_full_fallbacks
+    # Per-frame receipts are reset by every present(), so accumulate them after
+    # each timed frame (outside the timed interval).
+    val full_readbacks_before = backend.present_full_readback_count
+    var transferred_calls: i64 = 0
+    var transferred_bytes: i64 = 0
+    var full_fallbacks: i64 = 0
     var samples: [i64] = [0; TIMED_FRAMES]
     var frame: i64 = 0
     while frame < TIMED_FRAMES:
         val started = rt_time_now_nanos()
-        val completed = draw_frame(backend, frame + WARMUP_FRAMES, plan)
+        val completed = draw_frame(backend, frame + WARMUP_FRAMES, rects)
         val elapsed = rt_time_now_nanos() - started
         if not completed:
-            print("VULKAN_8K_RETAINED status=fail reason=timed-transfer frame=" + frame.to_string())
+            print("VULKAN_8K_RETAINED status=fail reason=timed-transfer frame=" + frame.to_string() +
+                " fallback=" + backend.frame_fallback_reason)
             backend.shutdown()
             return
         samples[frame] = elapsed
+        if backend.present_readback_rect_count == 1:
+            transferred_calls = transferred_calls + 1
+        transferred_bytes = transferred_bytes + backend.present_readback_bytes
+        if backend.frame_full_fallback:
+            full_fallbacks = full_fallbacks + 1
         frame = frame + 1
     print("VULKAN_8K_LIFETIME post_timed=" + backend.host_buf.len().to_i64().to_string())
     sort_samples(samples)
 
     val p50 = percentile(samples, 50)
     val p95 = percentile(samples, 95)
-    val transferred_calls = backend.damage_readback_calls - calls_before
-    val transferred_bytes = backend.damage_readback_bytes - bytes_before
-    val full_fallbacks = backend.damage_full_fallbacks - fallback_before
+    full_fallbacks = full_fallbacks + backend.present_full_readback_count - full_readbacks_before
     val expected_bytes = TIMED_FRAMES * (DAMAGE_W as i64) * (DAMAGE_H as i64) * 4
     val retained_len = backend.host_buf.len()
     if retained_len != FRAME_W * FRAME_H:
@@ -160,8 +138,14 @@ fn main():
     val damage_sample = backend.host_buf[DAMAGE_Y * FRAME_W + DAMAGE_X]
     val edge_sample = backend.host_buf[FRAME_W * FRAME_H - 1]
     val sampled_checksum = outside_sample.to_i64() + damage_sample.to_i64() * 3 + edge_sample.to_i64() * 7
+    # The direct external host_buf reads above are the shape that crashed under
+    # strict JIT; the owner-local sampler must agree with them exactly.
+    val owner_samples = backend.sample_host_mirror(
+        [0, (DAMAGE_Y * FRAME_W + DAMAGE_X) as i64, (FRAME_W * FRAME_H - 1) as i64])
+    val owner_parity = (owner_samples.len() == 3 and owner_samples[0] == outside_sample and
+        owner_samples[1] == damage_sample and owner_samples[2] == edge_sample)
     val sampled_parity = (outside_sample == background and damage_sample == final_damage and
-        edge_sample == background and sampled_checksum != 0)
+        edge_sample == background and sampled_checksum != 0 and owner_parity)
     val meets_target = (p95 <= 12500000 and transferred_calls == TIMED_FRAMES and
         transferred_bytes == expected_bytes and full_fallbacks == 0 and
         not backend.cpu_fallback_used and not backend.completion_unknown and sampled_parity)
