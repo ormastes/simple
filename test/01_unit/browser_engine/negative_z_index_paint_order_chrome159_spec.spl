@@ -1,0 +1,193 @@
+"""
+## Purpose and audience
+Purpose: A negative `z-index` stacking context paints under the in-flow
+content of its parent stacking context (CSS 2.2 Appendix E Step 3: after the
+context's own background, before its in-flow blocks), ordered by z-index.
+Simple dropped the sign (`z-index:-1` read as 1), so every negative-z box
+painted on top of the page.
+Audience: style parsing (`parse_int`) and Draw IR paint order
+(`_html_draw_ir_node_paint_order`, `_html_draw_ir_emit_scope`).
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400x300 CSS px, PNG read back through a canvas. Same font both sides
+('Liberation Sans' 16px). Each case is a 60px block. R `#aa0000`, G
+`#00aa00`, B `#0000aa`, W the white page. A cell lists the colour runs down
+one CSS column as device rows (k=4; k=1 is the same divided by 4).
+
+| case (top CSS y) | column | Chrome k=4 | base k=4 |
+|------|--------|-----------|----------|
+| z-index:-1 R box (with a B child) after a G block and a text line (0) | 25 | G 0..79, R 80..99, B 100..139, R 140..159 | R 0..99, B 100..139, R 140..159 |
+| same | 75 | G 0..79, R 80..159 | R 0..159 |
+| same, text x 110..189 over R, rows 20..39 | - | text ink (2928 px not R at k=4, 378 at k=1; pinned > 0) | 0 |
+| z-index:-2 B (x 50..149) before z-index:-5 R (x 0..99), after a G block (60) | 75 | G 240..319, B 320..399 | R 240..399 |
+| absolute z-index:-1 R child of a flex container, after a G item (120) | 75 | G 480..559, R 560..639 | R 480..639 |
+
+The flex case is the absolute / fixed exclusion of the flex/grid item test in
+`_html_draw_ir_node_paint_order` (PR #12425): an absolute child of a flex
+container is not a flex item.
+"""
+
+"""
+Traceability: REQ-WEB-001 — a negative z-index stacking context paints after its parent context's background and before its in-flow content, lowest z first (CSS 2.2 Appendix E Step 3).
+"""
+# @tag: unit, browser_engine, device_scale, paint, z_index, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_html, build_child_index}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.{compute_styles, extract_css_vw}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_layout.{_html_draw_ir_node_paint_order}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 200
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:60px}}.g{{background:#00aa00}}.a{{position:absolute}}</style></head><body><div class=\"b\"><div class=\"g\" style=\"width:200px;height:20px\"></div><div style=\"height:20px;padding-left:110px\">HHHH</div><div class=\"a\" style=\"z-index:-1;left:0;top:0;width:200px;height:40px;background:#aa0000\"><div style=\"margin-top:25px;width:50px;height:10px;background:#0000aa\"></div></div></div><div class=\"b\"><div class=\"g\" style=\"width:200px;height:20px\"></div><div class=\"a\" style=\"z-index:-2;left:50px;top:60px;width:100px;height:40px;background:#0000aa\"></div><div class=\"a\" style=\"z-index:-5;left:0;top:60px;width:100px;height:40px;background:#aa0000\"></div></div><div class=\"b\" style=\"display:flex\"><div class=\"g\" style=\"width:100px;height:20px\">HH</div><div class=\"a\" style=\"z-index:-1;left:0;top:120px;width:150px;height:40px;background:#aa0000\"></div></div></body></html>"
+
+var g_px4: [u32] = []
+var g_px1: [u32] = []
+
+fn _px(k: i32) -> [u32]:
+    if k == 4:
+        if g_px4.len() == 0:
+            g_px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        return g_px4
+    if g_px1.len() == 0:
+        g_px1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+    g_px1
+
+fn _name(c: u32) -> text:
+    val v = c & 0xFFFFFFu32
+    if v == 0xFFFFFFu32: return "W"
+    if v == 0xAA0000u32: return "R"
+    if v == 0x00AA00u32: return "G"
+    if v == 0x0000AAu32: return "B"
+    "?"
+
+# Colour runs down CSS column css_x of the 60px case `c`, as device rows.
+fn _runs(k: i32, c: i32, css_x: i32) -> text:
+    val px = _px(k)
+    val w = CSS_W * k
+    val x = css_x * k
+    val y1 = (c * 60 + 60) * k
+    var y = c * 60 * k
+    var start = y
+    var cur = _name(px[y * w + x])
+    var out = ""
+    y = y + 1
+    while y < y1:
+        val n = _name(px[y * w + x])
+        if n != cur:
+            out = out + "{cur}:{start}..{y - 1} "
+            cur = n
+            start = y
+        y = y + 1
+    out + "{cur}:{start}..{y - 1}"
+
+# Pixels that are not `name` on CSS x0..x1-1, y0..y1-1.
+fn _non(k: i32, x0: i32, x1: i32, y0: i32, y1: i32, name: text) -> i32:
+    val px = _px(k)
+    val w = CSS_W * k
+    var n = 0
+    var y = y0 * k
+    while y < y1 * k:
+        var x = x0 * k
+        while x < x1 * k:
+            if _name(px[y * w + x]) != name:
+                n = n + 1
+            x = x + 1
+        y = y + 1
+    n
+
+describe "A negative z-index paints under in-flow content (Chrome 159)":
+    it "AC-1: k=4, a z-index:-1 box paints under an in-flow block background, with its own child":
+        expect(_px(4).len()).to_equal((CSS_W * 4 * CSS_H * 4) as i64)
+        expect(_runs(4, 0, 25)).to_equal("G:0..79 R:80..99 B:100..139 R:140..159 W:160..239")
+        expect(_runs(4, 0, 75)).to_equal("G:0..79 R:80..159 W:160..239")
+
+    it "AC-2: k=1, a z-index:-1 box paints under an in-flow block background, with its own child":
+        expect(_runs(1, 0, 25)).to_equal("G:0..19 R:20..24 B:25..34 R:35..39 W:40..59")
+        expect(_runs(1, 0, 75)).to_equal("G:0..19 R:20..39 W:40..59")
+
+    it "AC-3: in-flow text paints over a z-index:-1 box, k=4 and k=1":
+        expect(_non(4, 110, 190, 20, 40, "R") > 0).to_equal(true)
+        expect(_non(1, 110, 190, 20, 40, "R") > 0).to_equal(true)
+
+    it "AC-4: z-index:-5 paints under z-index:-2 whatever the tree order, k=4 and k=1":
+        expect(_runs(4, 1, 25)).to_equal("G:240..319 R:320..399 W:400..479")
+        expect(_runs(4, 1, 75)).to_equal("G:240..319 B:320..399 W:400..479")
+        expect(_runs(4, 1, 125)).to_equal("G:240..319 B:320..399 W:400..479")
+        expect(_runs(1, 1, 75)).to_equal("G:60..79 B:80..99 W:100..119")
+
+    it "AC-5: an absolute z-index:-1 child of a flex container is not a flex item, k=4 and k=1":
+        expect(_runs(4, 2, 75)).to_equal("G:480..559 R:560..639 W:640..719")
+        expect(_runs(4, 2, 125)).to_equal("R:480..639 W:640..719")
+        expect(_runs(1, 2, 75)).to_equal("G:120..139 R:140..159 W:160..179")
+        expect(_runs(1, 2, 125)).to_equal("R:120..159 W:160..179")
+
+# The 1x catalog entry (`web_render_page_ppm.spl` at K=1) renders through
+# `simple_web_render_html_to_pixels_with_engine2d_backend`, not the
+# device-scale entry above.
+var g_px1_catalog: [u32] = []
+
+fn _catalog_runs(c: i32, css_x: i32) -> text:
+    if g_px1_catalog.len() == 0:
+        g_px1_catalog = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, CSS_W, CSS_H, "cpu_simd")
+    val px = g_px1_catalog
+    val y1 = c * 60 + 60
+    var y = c * 60
+    var start = y
+    var cur = _name(px[y * CSS_W + css_x])
+    var out = ""
+    y = y + 1
+    while y < y1:
+        val n = _name(px[y * CSS_W + css_x])
+        if n != cur:
+            out = out + "{cur}:{start}..{y - 1} "
+            cur = n
+            start = y
+        y = y + 1
+    out + "{cur}:{start}..{y - 1}"
+
+describe "The 1x catalog entry paints negative z-index the same way (Chrome 159)":
+    it "AC-6: k=1 catalog entry, all three cases":
+        expect(_catalog_runs(0, 25)).to_equal("G:0..19 R:20..24 B:25..34 R:35..39 W:40..59")
+        expect(_catalog_runs(1, 75)).to_equal("G:60..79 B:80..99 W:100..119")
+        expect(_catalog_runs(2, 75)).to_equal("G:120..139 R:140..159 W:160..179")
+
+# A `body` / `html` opacity group with a negative-z child. Chrome 159 (k=1,
+# column 50; k=4 rows x4): `#7ed47e` 0..19 (G over R in the 50 % group),
+# `#d47e7e` 20..39, W after. Simple paints the negative box outside the group
+# (opacity is not yet a stacking context: bug
+# web_render_negative_z_index_parsed_positive_2026-11-28 follow-up), so these
+# cases pin only that each node is emitted exactly once.
+val BODY_OPACITY_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;opacity:0.5}}</style></head><body><div style=\"width:200px;height:20px;background:#00aa00\"></div><div style=\"position:absolute;z-index:-1;left:0;top:0;width:100px;height:40px;background:#aa0000\"></div></body></html>"
+val HTML_OPACITY_PAGE: text = "<!doctype html><html style=\"opacity:0.5;background:#fff\"><head><meta charset=\"utf-8\"></head><body style=\"margin:0\"><div style=\"width:200px;height:20px;background:#00aa00\"></div><div style=\"position:absolute;z-index:-1;left:0;top:0;width:100px;height:40px;background:#aa0000\"></div></body></html>"
+
+# "<emitted>/<nodes> dups=[...]" for the Draw IR paint order of `html`.
+fn _paint_order_dups(html: text) -> text:
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, CSS_W, false)
+    val styles = compute_styles(nodes, rules, build_child_index(nodes), false, true)
+    val order = _html_draw_ir_node_paint_order(nodes, styles)
+    var seen: [i32] = [0; nodes.len()]
+    var dups = ""
+    for o in order:
+        seen[o] = seen[o] + 1
+        if seen[o] == 2:
+            dups = dups + "{nodes[o].tag} "
+    "{order.len()}/{nodes.len()} dups=[{dups}]"
+
+describe "An opacity root with a negative-z child is emitted once":
+    it "AC-7: body opacity:0.5 and a z-index:-1 box":
+        val n = parse_html(BODY_OPACITY_PAGE).len()
+        expect(_paint_order_dups(BODY_OPACITY_PAGE)).to_equal("{n}/{n} dups=[]")
+
+    it "AC-8: html opacity:0.5 and a z-index:-1 box":
+        val n = parse_html(HTML_OPACITY_PAGE).len()
+        expect(_paint_order_dups(HTML_OPACITY_PAGE)).to_equal("{n}/{n} dups=[]")

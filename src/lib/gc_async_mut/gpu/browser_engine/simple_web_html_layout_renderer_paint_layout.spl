@@ -676,7 +676,7 @@ fn _html_draw_ir_visible_nodes(
     visible
 
 fn _html_draw_ir_opens_context(st: Style) -> bool:
-    (st.position_absolute or st.position_fixed or st.position_relative) and st.z_index >= 0
+    st.position_absolute or st.position_fixed or st.position_relative
 
 fn _html_draw_ir_opens_group(st: Style) -> bool:
     st.opacity_pct < 100 or st.backdrop_filter_raw != ""
@@ -696,6 +696,53 @@ fn _html_draw_ir_emit_scope(
         val root_node = scope_self[scope_id]
         if root_node >= 0:
             result.push(root_node)
+    # Child stacking contexts, z ascending, ties in tree order.
+    var children: [i32] = []
+    var next_child = 0
+    if emit_contexts:
+        children = _sort_positive_z_indices(
+            child_contexts[scope_id],
+            child_contexts[scope_id].len(),
+            styles
+        )
+    # The document's Steps 1-2: the root element's box, and `body` when its
+    # background is the propagated canvas one, paint under negative contexts.
+    var early_root = -1
+    var early_html = -1
+    var early_body = -1
+    if scope_id == 0 and children.len() > 0 and styles[children[0]].z_index < 0:
+        # cpu-lane-loop-ok: scans the document scope's leading block members for #root/html/body; stops at the first other block
+        for b in scope_blocks[0]:
+            # An opacity/backdrop root is a Step 8 layer (emitted there whole),
+            # so it and every root box after it stay in their own steps.
+            if scope_self[b + 1] == b:
+                break
+            if nodes[b].tag == "#root" and early_root < 0:
+                early_root = b
+            elif nodes[b].tag == "html" and early_html < 0:
+                early_html = b
+            elif nodes[b].tag == "body" and early_body < 0:
+                early_body = b
+            else:
+                break
+        if early_root >= 0:
+            result.push(early_root)
+        if early_html >= 0:
+            result.push(early_html)
+            if styles[early_html].bg != 0u32:
+                early_body = -1
+        if early_body >= 0:
+            result.push(early_body)
+    if emit_contexts:
+        # CSS 2.2 Appendix E Step 3: negative z-index contexts, after the
+        # context's own background, before its in-flow blocks.
+        # cpu-lane-loop-ok: recurses into the z<0 prefix of the sorted child contexts once each
+        while next_child < children.len() and styles[children[next_child]].z_index < 0:
+            result = _html_draw_ir_emit_scope(
+                nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+                child_contexts, children[next_child] + 1, true, result
+            )
+            next_child = next_child + 1
     # CSS 2.2 Appendix E Step 4: non-positioned normal-flow blocks in tree order.
     # A block-level opacity/backdrop sub-scope is a layer: it waits for Step 8.
     var has_layer = false
@@ -703,7 +750,7 @@ fn _html_draw_ir_emit_scope(
     for b in scope_blocks[scope_id]:
         if scope_self[b + 1] == b:
             has_layer = true
-        else:
+        elif b != early_root and b != early_html and b != early_body:
             result.push(b)
     # CSS 2.2 Appendix E Step 5: non-positioned floats & their non-positioned subtrees.
     # cpu-lane-loop-ok: appends each float subtree of one scope once after normal-flow blocks
@@ -735,18 +782,14 @@ fn _html_draw_ir_emit_scope(
                     nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
                     child_contexts, b + 1, false, result
                 )
-    if emit_contexts:
-        val children = _sort_positive_z_indices(
-            child_contexts[scope_id],
-            child_contexts[scope_id].len(),
-            styles
+    # CSS 2.2 Appendix E Steps 8-9: z-index 0 / auto, then positive contexts.
+    # cpu-lane-loop-ok: recurses into the z>=0 rest of the sorted child contexts once each
+    while next_child < children.len():
+        result = _html_draw_ir_emit_scope(
+            nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+            child_contexts, children[next_child] + 1, true, result
         )
-        # cpu-lane-loop-ok: recurses into z-sorted child stacking contexts once per context
-        for child in children:
-            result = _html_draw_ir_emit_scope(
-                nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
-                child_contexts, child + 1, true, result
-            )
+        next_child = next_child + 1
     result
 
 # Context id per node, as `_html_draw_ir_node_paint_order` groups them: 0 is
@@ -824,7 +867,7 @@ fn _html_draw_ir_node_paint_order(
     nodes: [HNode], styles: [Style]
 ) -> [i32]:
     val node_count = nodes.len()
-    # Context zero is the document. Positive positioned nodes open stacking
+    # Context zero is the document. Positioned nodes open stacking
     # contexts (`i + 1`); non-positioned floats (`float_mode != 0`) and
     # opacity/backdrop groups open local sub-scopes inside their context so
     # floats paint in CSS 2.2 Appendix E Step 5 (after normal-flow blocks,
@@ -873,10 +916,9 @@ fn _html_draw_ir_node_paint_order(
             node_context[i] = parent_context
             val is_text = nodes[i].tag == "#text"
             # A flex or grid item ignores `float` and paints atomically. An
-            # absolute / fixed child is out of flow, not an item. Unreachable
-            # today: `z-index` parses without its sign, so every absolute /
-            # fixed box opens a context above (bug
-            # web_render_negative_z_index_parsed_positive_2026-11-28).
+            # absolute / fixed child is out of flow, not an item. Defensive:
+            # every absolute / fixed box opens a context above, so none
+            # reaches this branch today.
             val is_item = not is_text and parent_valid and _html_draw_ir_lays_out_items(styles[parent]) and not (st.position_absolute or st.position_fixed)
             if st.float_mode != 0 and not is_item:
                 scope_floats[parent_scope].push(i)
