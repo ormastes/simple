@@ -16,11 +16,14 @@ describe "SimpleOS processing CPU fallback daemon wire":
         step("normalizes writable mmap flags before the native ABI")
         val app_file_ops = file_read("src/app/io/file_ops.spl")
         val lib_file_ops = file_read("src/lib/nogc_sync_mut/io/file_ops.spl")
-        for source in [app_file_ops, lib_file_ops]:
-            expect(source).to_contain(
-                "extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64")
-            expect(source).to_contain(
-                "rt_mmap(path, size, offset, if readonly: 1 else: 0)")
+        # src/app/io/file_ops.spl is now a re-export facade over the lib module,
+        # which owns the extern declaration and the flag normalization.
+        expect(app_file_ops).to_contain("std.nogc_sync_mut.io.file_ops.{")
+        expect(app_file_ops).to_contain("rt_mmap")
+        expect(lib_file_ops).to_contain(
+            "extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64")
+        expect(lib_file_ops).to_contain(
+            "rt_mmap(path, size, offset, if readonly: 1 else: 0)")
 
     it "owns the daemon lifetime outside the native array ABI":
         # @req REQ-SSPEC-SYSTEM
@@ -119,10 +122,12 @@ describe "SimpleOS processing CPU fallback daemon wire":
         val runtime = file_read("src/compiler_rust/runtime/src/value/collections.rs")
         val simple_core = file_read("src/runtime/simple_core/core_string.spl")
         expect(strings).to_contain("fn str_len(s: text) -> i64:\n    rt_string_len(s)")
-        expect(strings).to_contain("fn str_contains(s: text, sub: text) -> bool:\n    rt_string_contains(s, sub)")
-        expect(strings).to_contain("fn str_starts_with(s: text, prefix: text) -> bool:\n    rt_string_starts_with(s, prefix)")
-        expect(strings).to_contain("fn str_index_of(s: text, sub: text) -> i64:\n    rt_string_find(s, sub)")
-        expect(strings).to_contain("fn str_last_index_of(s: text, sub: text) -> i64:\n    rt_string_rfind(s, sub)")
+        # Search helpers are now implemented natively (substring / index_of), not
+        # through rt_string_* externs that the interpreter never registered.
+        expect(strings).to_contain("fn str_contains(s: text, sub: text) -> bool:\n    str_index_of(s, sub) >= 0")
+        expect(strings).to_contain("s.substring(0, plen) == prefix")
+        expect(strings).to_contain("s.index_of(sub, 0)")
+        expect(strings).to_contain("s.substring(i, i + sublen) == sub")
         expect(strings.contains("\n    s.contains(sub)")).to_equal(false)
         expect(strings.contains("\n    s.starts_with(prefix)")).to_equal(false)
         expect(runtime).to_contain("pub extern \"C\" fn rt_string_contains")
@@ -135,10 +140,11 @@ describe "SimpleOS processing CPU fallback daemon wire":
         val probe = file_read("src/app/test/simpleos_gpu_fallback_wire_probe.spl")
         expect(bridge).to_contain("HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS: i64 = 50000000")
         expect(bridge).to_contain("HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS: i64 = 250000000")
-        expect(bridge).to_contain("HOST_GPU_IVSHMEM_REQUEST_BUDGET_US: i64 = 5000000")
-        expect(bridge).to_contain("boot_monotonic_deadline_us(started_now, HOST_GPU_IVSHMEM_REQUEST_BUDGET_US)")
-        expect(bridge).to_contain("val bounded_timeout_polls = if timeout_polls < HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS:")
-        expect(bridge).to_contain("polls < bounded_timeout_polls and observed < generation and now_us > 0 and now_us <= deadline_us")
+        # The independent deadline is now a caller-supplied absolute monotonic
+        # time (deadline_us), checked before publish and on every poll.
+        expect(bridge).to_contain("timeout_polls: i64, deadline_us: i64")
+        expect(bridge).to_contain("if deadline_us <= 0 or started_now <= 0 or started_now >= deadline_us:")
+        expect(bridge).to_contain("polls < timeout_polls and observed < generation and now_us > 0 and now_us <= deadline_us")
         expect(bridge).to_contain("observed != generation or now_us <= 0 or now_us > deadline_us")
         expect(probe).to_contain("HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS")
         expect(probe.contains("50000000")).to_equal(false)
