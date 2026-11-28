@@ -167,8 +167,9 @@ pub fn eval_unit_scope_file() -> text:
 
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
-use compiler.core.ast.{arm_get_binding, arm_get_body, arm_get_guard, arm_get_pattern, decl_get}
+use compiler.core.ast.{arm_get_binding, arm_body_len, arm_body_at, arm_get_guard, arm_get_pattern, decl_get}
 use compiler.core.ast.{decl_get_fields, expr_get, module_get_path}
+use compiler.core.{stmt_body_len, stmt_body_at}
 use compiler.core.ast_expr.{EXPR_ARRAY_LIT, EXPR_ASM, EXPR_ASM_MATCH, EXPR_ASSIGN, EXPR_ATOM}
 use compiler.core.ast_expr.{EXPR_AWAIT, EXPR_BINARY, EXPR_BLOCK, EXPR_BOOL_LIT, EXPR_BREAK}
 use compiler.core.ast_expr.{EXPR_CALL, EXPR_CAST, EXPR_COMPOUND_ASSIGN, EXPR_CONTINUE, EXPR_DICT_COMP}
@@ -926,6 +927,31 @@ pub fn eval_block(stmts: [i64], value_expr: i64) -> i64:
     env_pop_scope()
     last_val
 
+# Zero-allocation variant for statement blocks: reads body statements directly
+# from the flat statement body pool instead of building a copied [i64] via
+# stmt_get_body(sid).
+pub fn eval_stmt_body_block(block_sid: i64) -> i64:
+    env_push_scope()
+    eval_defer_depth = eval_defer_depth + 1
+    val my_depth = eval_defer_depth
+
+    var last_val = val_make_nil()
+    val body_len = stmt_body_len(block_sid)
+    var bi: i64 = 0
+    while bi < body_len:
+        if eval_had_error: break
+        if eval_returning: break
+        if eval_breaking: break
+        if eval_continuing: break
+        last_val = eval_stmt(stmt_body_at(block_sid, bi))
+        bi = bi + 1
+
+    # Execute deferred expressions at this depth in reverse order (LIFO)
+    eval_run_scope_defers(my_depth)
+
+    env_pop_scope()
+    last_val
+
 # ===== For Expression =====
 
 fn eval_for_expr(eid: i64) -> i64:
@@ -1104,7 +1130,6 @@ fn eval_match_expr(eid: i64) -> i64:
     for arm_id in arm_ids:
         val pattern_eid = arm_get_pattern(arm_id)
         val guard_eid = arm_get_guard(arm_id)
-        val body_stmts = arm_get_body(arm_id)
 
         env_push_scope()
         val matched = match_pattern(scrutinee, pattern_eid)
@@ -1145,10 +1170,13 @@ fn eval_match_expr(eid: i64) -> i64:
             if binding_name != "":
                 env_define(binding_name, val_copy_if_value_struct(scrutinee))
             var last_val = val_make_nil()
-            for sid in body_stmts:
+            val body_len = arm_body_len(arm_id)
+            var bi: i64 = 0
+            while bi < body_len:
                 if eval_had_error: break
                 if eval_returning: break
-                last_val = eval_stmt(sid)
+                last_val = eval_stmt(arm_body_at(arm_id, bi))
+                bi = bi + 1
             env_pop_scope()
             return last_val
         env_pop_scope()
@@ -1461,7 +1489,7 @@ use compiler.core.interpreter.eval_calls.val_copy_if_value_struct
 
 # ===== Exports =====
 # Symbols defined in this file
-export eval_warnings, eval_clear_warnings, eval_match_exhaustive_check_count, eval_run_scope_defers
+export eval_warnings, eval_clear_warnings, eval_match_exhaustive_check_count, eval_run_scope_defers, eval_stmt_body_block
 
 # Re-exports from eval_tables.spl
 

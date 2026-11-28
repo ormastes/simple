@@ -33,6 +33,12 @@ class Style:
     # applies: `A ` is 14.234, not 10.672 + 4.453). -1 = no such edge space.
     resolved_lead_space_milli: i64 = -1
     resolved_trail_space_milli: i64 = -1
+    # The four widths above in 2^-20 px, from font-unit sums (-1 = none): what
+    # an inline item's LayoutUnit ceil is taken from (`inline_item_width_err_milli`).
+    resolved_font_width_q20: i64 = -1
+    resolved_space_q20: i64 = -1
+    resolved_lead_space_q20: i64 = -1
+    resolved_trail_space_q20: i64 = -1
     resolved_font_line_height: i32
     # #text only: line-metric units of the face that shaped the run when it is
     # not the primary font's (`ResolvedFontMetrics.used_face_units`), else [].
@@ -1293,6 +1299,8 @@ class CssDeclarationPrioritySplit:
     important: text
 
 fn css_important_marker_start(raw_value: text) -> i64:
+    if find_from(raw_value, "!", 0) < 0:
+        return -1
     val keyword = "important"
     val lower_value = raw_value.lower()
     if not lower_value.ends_with(keyword):
@@ -1320,8 +1328,9 @@ fn css_declaration_priority_split(decls: text) -> CssDeclarationPrioritySplit:
     # source block that apply_decls previously rejected.
     if _decl_over_quota(decls):
         return CssDeclarationPrioritySplit(normal: "", important: "")
-    var normal = ""
-    var important = ""
+    val has_bang = find_from(decls, "!", 0) >= 0
+    var norm_parts: [text] = []
+    var imp_parts: [text] = []
     var pos = 0
     val decls_len = decls.byte_len()
     while pos < decls_len:
@@ -1331,16 +1340,18 @@ fn css_declaration_priority_split(decls: text) -> CssDeclarationPrioritySplit:
         if colon >= 0 and colon < end:
             val name = decls.substring(pos, colon).trim().lower()
             val raw_value = decls.substring(colon + 1, end).trim()
-            val important_marker = css_important_marker_start(raw_value)
+            val important_marker = if has_bang: css_important_marker_start(raw_value) else: -1
             if name != "" and important_marker >= 0:
                 val value = raw_value.substring(0, important_marker).trim()
                 if value != "":
-                    important = important + name + ":" + value + ";"
+                    imp_parts.push(name + ":" + value + ";")
             elif name != "" and raw_value != "":
-                normal = normal + name + ":" + raw_value + ";"
+                norm_parts.push(name + ":" + raw_value + ";")
         if semi < 0:
             break
         pos = semi + 1
+    val normal = if norm_parts.len() == 0: "" else: norm_parts.join("")
+    val important = if imp_parts.len() == 0: "" else: imp_parts.join("")
     CssDeclarationPrioritySplit(normal: normal, important: important)
 
 # W1 (doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md section 7,

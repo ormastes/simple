@@ -100,7 +100,7 @@ fn rti_key_ref(key: CalleeKey) -> DeclRef:
         return rti_method_ref(owner, key.name)
     rti_fn_ref(key.module_id, key.name)
 
-fn rti_key_text(key: CalleeKey) -> text:
+pub fn rti_key_text(key: CalleeKey) -> text:
     var owner_id = ""
     if val owner = key.owner:
         owner_id = owner.decl_id
@@ -328,6 +328,8 @@ fn rti_owner_type_params(module: HirModule, owner_name: text) -> [text]:
         if c.name == owner_name: return rti_type_param_names(c.type_params)
     for e in module.enums.values():
         if e.name == owner_name: return rti_type_param_names(e.type_params)
+    for tr in module.traits.values():
+        if tr.name == owner_name: return rti_type_param_names(tr.type_params)
     []
 
 struct RtiCallableSignatureV1:
@@ -417,17 +419,61 @@ fn rti_function_is_unannotated(f: HirFunction, module_name: text, symbols: Symbo
         case HirTypeKind.Infer(_, _): true
         case _: false
 
+# @allow(primitive_api) reason: internal trait-method RTI builder mirrors HirFunction.is_static flag directly
+pub fn rti_row_of_trait_method_v1(module_name: text, symbols: SymbolTable,
+        trait_symbol: SymbolId, trait_name: text, trait_type_params: [text],
+        method_symbol: SymbolId, method_name: text, method_type_params: [text],
+        return_type: HirType, is_static: bool) -> Result<ReturnTypeRow, RtiError>:
+    """Build an RTI row for a trait method or default method using the trait's defining module."""
+    val trait_mod = rti_symbol_module(symbols, trait_symbol.id)
+    val module_id = if trait_mod != "": trait_mod else: rti_module_id(module_name)
+    val owner_ref = rti_type_ref(module_id, "trait", rti_last_segment(trait_name))
+    val parts = rti_method_parts(method_name)
+    val key_name = if parts.len() == 2: parts[1] else: rti_last_segment(method_name)
+    val decl = rti_method_ref(owner_ref, key_name)
+    var params = method_type_params
+    for p in trait_type_params:
+        params = params.push(p)
+    val semantic_return = rti_semantic_callable_return_v1(module_name, symbols,
+        method_symbol, method_name, return_type)
+    val term = rti_term_of_hir_type(semantic_return, symbols, params)
+    match term:
+        case Ok(t):
+            val key = CalleeKey(module_id: module_id, owner: Some(owner_ref), name: key_name, is_static: is_static)
+            Ok(ReturnTypeRow(decl: decl, key: key, type_param_count: params.len(),
+                entry: ReturnTypeEntry.Decided(t), owner_type_param_count: trait_type_params.len()))
+        case Err(e):
+            Err(rti_error(e.code, "callee '{decl.display}' of module '{module_id}': {e.message}"))
+
 fn rti_rows_from_hir_v1(module: HirModule) -> Result<RtiRowsV1, RtiError>:
-    """One row per top-level function and struct/class/enum method (incl. static).
+    """One row per top-level function, struct/class/enum method (incl. static), and trait method.
     An unannotated return (Infer) makes no interface claim and gets no row."""
     val module_id = rti_module_id(module.name)
     var rows: [ReturnTypeRow] = []
+    var seen_keys: Dict<text, bool> = {}
     var skipped_infer: i64 = 0
     for f in module.functions.values():
         if rti_function_is_unannotated(f, module.name, module.symbols):
             skipped_infer = skipped_infer + 1
         else:
-            rows = rows.push(rti_row_of_function(module, rti_function_module(module, module_id, f), f)?)
+            val row = rti_row_of_function(module, rti_function_module(module, module_id, f), f)?
+            seen_keys[rti_key_text(row.key)] = true
+            rows = rows.push(row)
+    for tr in module.traits.values():
+        val t_params = rti_type_param_names(tr.type_params)
+        for group in [tr.methods, tr.defaults]:
+            for m in group:
+                if rti_function_is_unannotated(m, module.name, module.symbols):
+                    continue
+                match rti_row_of_trait_method_v1(module.name, module.symbols, tr.symbol, tr.name,
+                        t_params, m.symbol, m.name, rti_type_param_names(m.type_params),
+                        m.return_type, m.is_static):
+                    case Ok(row):
+                        val kt = rti_key_text(row.key)
+                        if not seen_keys.has(kt):
+                            seen_keys[kt] = true
+                            rows = rows.push(row)
+                    case Err(_): ()
     Ok(RtiRowsV1(rows: rows, skipped_infer: skipped_infer))
 
 # ============================================================================
@@ -440,6 +486,7 @@ fn rti_term_head_may_own_methods_v1(term: RtType) -> bool:
     is undecided until substituted and keeps the concrete-consumer check."""
     match term:
         case RtType.Nominal(_, _): true
+        case RtType.DynTraitT(_): true
         case RtType.Param(_): true
         case _: false
 
@@ -797,7 +844,7 @@ impl ReturnTypeInterfaceTable:
         if val declared = receiver_type:
             match declared.kind:
                 case HirTypeKind.Named(sym, args): return Ok((rti_type_decl_ref(symbols, sym.id)?, false, rti_owner_args_v1(sym.id, args, symbols, consumer_params)))
-                case HirTypeKind.DynTrait(_): return Err(rti_error("E-RTI-001", "dyn-trait receivers are RTI PR2"))
+                case HirTypeKind.DynTrait(trait_sym): return Ok((rti_type_decl_ref(symbols, trait_sym.id)?, false, []))
                 case _: ()
         match receiver.kind:
             case HirExprKind.Var(sym): return self.static_or_value_owner(symbols, sym.id, consumer_params)
@@ -819,6 +866,8 @@ impl ReturnTypeInterfaceTable:
                 match head:
                     case RtType.Nominal(decl, args):
                         return Ok((decl, false, args))
+                    case RtType.DynTraitT(decl):
+                        return Ok((decl, false, []))
                     case _:
                         if not rti_term_head_may_own_methods_v1(head):
                             return Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(head)}' is not a struct/class (trait receivers are RTI PR2)"))
@@ -826,6 +875,7 @@ impl ReturnTypeInterfaceTable:
         val term = self.require_concrete(resolved)?
         match term:
             case RtType.Nominal(decl, args): Ok((decl, false, args))
+            case RtType.DynTraitT(decl): Ok((decl, false, []))
             case _: Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(term)}' is not a struct/class (trait receivers are RTI PR2)"))
 
     fn static_or_value_owner(symbols: SymbolTable, raw: i64, consumer_params: [text] = []) -> Result<(DeclRef, bool, [RtType]), RtiError>:
@@ -835,6 +885,7 @@ impl ReturnTypeInterfaceTable:
             if val declared = sym.type_:
                 match declared.kind:
                     case HirTypeKind.Named(type_sym, type_args): return Ok((rti_type_decl_ref(symbols, type_sym.id)?, false, rti_owner_args_v1(type_sym.id, type_args, symbols, consumer_params)))
+                    case HirTypeKind.DynTrait(trait_sym): return Ok((rti_type_decl_ref(symbols, trait_sym.id)?, false, []))
                     case _: ()
         Err(rti_error("E-RTI-001", "receiver symbol {raw} has no declared struct/class type (trait receivers are RTI PR2)"))
 

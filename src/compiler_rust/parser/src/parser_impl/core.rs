@@ -452,7 +452,19 @@ impl<'a> Parser<'a> {
             }
 
             self.debug_verbose(&format!("Parsing item {}", iterations));
-            items.push(self.parse_item()?);
+            let item = self.parse_item()?;
+            // `pass(x)` is the pass-with-message statement, so a bare call can
+            // never reach a free function of that name. Members stay legal:
+            // `T.pass(..)` is reached through `.` and parsed by the type body.
+            if let Node::Function(f) = &item {
+                if f.name == "pass" {
+                    return Err(ParseError::syntax_error_with_span(
+                        "reserved keyword 'pass' cannot be used as a function name",
+                        f.span,
+                    ));
+                }
+            }
+            items.push(item);
             items.append(&mut self.pending_statements);
         }
 

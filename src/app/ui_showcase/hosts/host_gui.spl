@@ -12,8 +12,9 @@
 
 use nogc_sync_mut.ui.gui_renderer.{
     GuiRenderer, GuiWindowEvent,
-    GUI_EVT_NONE, GUI_EVT_CLOSE, GUI_EVT_RESIZED,
-    GUI_EVT_KEYBOARD, GUI_EVT_MOUSE_BUTTON, GUI_EVT_MOUSE_MOVED, GUI_EVT_MOUSE_WHEEL
+    GUI_EVT_NONE, GUI_EVT_CLOSE, GUI_EVT_RESIZED, GUI_EVT_SCALE_CHANGED,
+    GUI_EVT_KEYBOARD, GUI_EVT_TEXT_INPUT,
+    GUI_EVT_MOUSE_BUTTON, GUI_EVT_MOUSE_MOVED, GUI_EVT_MOUSE_WHEEL
 }
 use common.ui.draw_ir_v3.{DrawIrV3Scene}
 use common.ui.screen_host.{ScreenHost}
@@ -26,6 +27,7 @@ use common.ui.key_code.{
 }
 use common.ui.host_input_event.{
     HostInputEvent, HOST_BTN_LEFT, HOST_BTN_RIGHT, HOST_BTN_MIDDLE, HOST_BTN_NONE,
+    HOST_MOD_SHIFT,
     host_pointer_down, host_pointer_up, host_pointer_move, host_pointer_wheel,
     host_key_down, host_key_up, host_resize
 }
@@ -63,7 +65,8 @@ fn gui_event_to_logical(ev: GuiWindowEvent, scale: i32) -> GuiWindowEvent:
     val s = scale as f64
     GuiWindowEvent(native_id: ev.native_id, kind: ev.kind, scancode: ev.scancode,
         keycode: ev.keycode, btn: ev.btn, pressed: ev.pressed,
-        x: ev.x / s, y: ev.y / s)
+        x: ev.x / s, y: ev.y / s,
+        mods: ev.mods, text_ch: ev.text_ch, scale_milli: ev.scale_milli)
 
 fn gui_button_to_host(btn: i64) -> i64:
     """GuiRenderer button code -> HOST_BTN_*. winit/SDL both report
@@ -107,6 +110,16 @@ fn gui_canon_to_ch(code: i64) -> text:
     if code == CANON_QUOTE: return "'"
     ""
 
+fn gui_shift_ch(ch: text) -> text:
+    if ch.byte_len() != 1:
+        return ch
+    val lo = "abcdefghijklmnopqrstuvwxyz0123456789;=[],-./`\\'"
+    val hi = "ABCDEFGHIJKLMNOPQRSTUVWXYZ)!@#$%^&*(:+<_>?~{|}\""
+    val idx = lo.index_of(ch) ?? -1
+    if idx >= 0:
+        return hi[idx:idx + 1]
+    ch
+
 fn gui_event_to_host(ev: GuiWindowEvent) -> HostInputEvent?:
     """The whole GUI->widget ingress translation, in one testable function.
 
@@ -133,14 +146,18 @@ fn gui_event_to_host(ev: GuiWindowEvent) -> HostInputEvent?:
         # the position fill-in and the sign flip.
         return host_pointer_wheel(0, 0, y)
     if ev.kind == GUI_EVT_KEYBOARD:
-        # Producer contract (host_input_event.spl): raw codes route through
-        # the matching *_to_canon mapper; unmapped keys become CANON_UNKNOWN
-        # (0), never a guess. ch carries the unshifted printable glyph.
         val code = winit_keycode_to_canon(ev.keycode)
-        val ch = gui_canon_to_ch(code)
+        var ch = gui_canon_to_ch(code)
+        if (ev.mods & HOST_MOD_SHIFT) != 0 and ch != "":
+            ch = gui_shift_ch(ch)
         if ev.pressed:
-            return host_key_down(code, ch, 0)
-        return host_key_up(code, ch, 0)
+            return host_key_down(code, ch, ev.mods)
+        return host_key_up(code, ch, ev.mods)
+    if ev.kind == GUI_EVT_TEXT_INPUT:
+        if ev.text_ch == "":
+            return None
+        val code = winit_keycode_to_canon(ev.keycode)
+        return host_key_down(code, ev.text_ch, ev.mods)
     if ev.kind == GUI_EVT_RESIZED:
         return host_resize(x, y)
     nil
@@ -166,6 +183,8 @@ class ScreenGuiHost:
     var has_retained_scene: bool
     var retained_pixels: [u32]
     var raster_count: i64
+    var last_key_code: i64 = 0
+    var last_key_ch: text = ""
 
     static fn open(w: i32, h: i32, title: text) -> ScreenGuiHost?:
         """nil when no window could be created (no display, no libspl_winit).
@@ -236,18 +255,43 @@ impl ScreenHost for ScreenGuiHost:
             # sdl2_wheel_to_mouse_wheel.
             val notch = ev.y.to_i64() as i32
             return host_pointer_wheel(self.mouse_x, self.mouse_y, 0 - notch)
+        if ev.kind == GUI_EVT_SCALE_CHANGED:
+            val new_scale = gui_device_scale(env_get("SIMPLE_GUI_SCALE") ?? "", ev.scale_milli)
+            val inner = self.g.inner_size()
+            val phys_w = if inner[0] > 0: inner[0] as i32 elif ev.x > 0.0: ev.x.to_i64() as i32 else: self.w * new_scale
+            val phys_h = if inner[1] > 0: inner[1] as i32 elif ev.y > 0.0: ev.y.to_i64() as i32 else: self.h * new_scale
+            self.scale = new_scale
+            self.dev_w = if phys_w > 0: phys_w else: 1
+            self.dev_h = if phys_h > 0: phys_h else: 1
+            self.w = if self.dev_w / new_scale > 0: self.dev_w / new_scale else: 1
+            self.h = if self.dev_h / new_scale > 0: self.dev_h / new_scale else: 1
+            self.has_retained_scene = false
+            self.retained_pixels = []
+            return host_resize(self.w, self.h)
+        if ev.kind == GUI_EVT_TEXT_INPUT and ev.keycode != 0 and ev.keycode == self.last_key_code and self.last_key_ch != "":
+            # KeyboardInput already emitted a printable glyph for this physical press;
+            # keep TEXT_INPUT when it differs (dead keys / non-US layout / IME commit).
+            if ev.text_ch == self.last_key_ch:
+                self.last_key_ch = ""
+                return self.poll_input()
         val out = gui_event_to_host(ev)
         if out.is_some():
-            # Resize is a public layout update, not merely another input
-            # record -- keep size() coherent for the next present_scene,
-            # mirroring ScreenWmHost.poll_input.
             match out!:
+                HostInputEvent.Key(code, ch, down, mods):
+                    if ev.kind == GUI_EVT_KEYBOARD:
+                        if down and ch != "":
+                            self.last_key_code = ev.keycode
+                            self.last_key_ch = ch
+                        elif not down:
+                            self.last_key_code = 0
+                            self.last_key_ch = ""
                 HostInputEvent.Resize(resize_w, resize_h):
                     if resize_w > 0 and resize_h > 0:
                         self.w = resize_w
                         self.h = resize_h
-                        self.dev_w = resize_w * self.scale
-                        self.dev_h = resize_h * self.scale
+                        val inner = self.g.inner_size()
+                        self.dev_w = if inner[0] > 0: inner[0] as i32 else: resize_w * self.scale
+                        self.dev_h = if inner[1] > 0: inner[1] as i32 else: resize_h * self.scale
                         self.has_retained_scene = false
                         self.retained_pixels = []
                 _:
@@ -259,5 +303,5 @@ impl ScreenHost for ScreenGuiHost:
             self.closed = true
             self.g.close()
 
-export ScreenGuiHost, gui_event_to_host, gui_button_to_host, gui_canon_to_ch
+export ScreenGuiHost, gui_event_to_host, gui_button_to_host, gui_canon_to_ch, gui_shift_ch
 export gui_device_scale, gui_event_to_logical

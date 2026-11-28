@@ -17,8 +17,11 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_last_render_degraded,
     simple_web_layout_material_provenance_after_backend_execution,
     simple_web_layout_render_html_draw_ir_result_with_images,
-    simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time,
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images,
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images_with_element_scroll
 }
+use std.common.web.browser_renderer_protocol.{browser_text_input_overlay_empty}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
     simple_web_layout_clear_render_degraded,
     simple_web_layout_render_budget_floor_ms,
@@ -1325,6 +1328,22 @@ pub fn simple_web_layout_render_html_engine2d_result_with_images(
         html, width, height, backend_name, -1, [], images, false
     ).render
 
+fn _simple_web_layout_execute_pixels_from_result(
+    layout_result: SimpleWebLayoutDrawIrResult, width: i32, height: i32, backend_name: text
+) -> [u32]:
+    if (
+        web_gpu_paint_enabled() and
+        web_gpu_paint_backend_verdict(backend_name) == "gpu-paint-candidate"
+    ):
+        return _web_draw_ir_choose_route(
+            layout_result.composition, width, height, backend_name)
+    val execution = _simple_web_layout_execute_draw_ir_composition(
+        layout_result.composition, layout_result.material_witness,
+        width, height, backend_name, [])
+    if execution.render.skipped_command_count != 0:
+        return []
+    execution.render.pixels
+
 pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
@@ -1348,18 +1367,21 @@ pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, hei
     # would leave the steady frame recomposing the document every frame.
     val layout_result = _simple_web_layout_draw_ir_cached(
         html, width, height, -1, [], [], true)
-    if (
-        web_gpu_paint_enabled() and
-        web_gpu_paint_backend_verdict(backend_name) == "gpu-paint-candidate"
-    ):
-        return _web_draw_ir_choose_route(
-            layout_result.composition, width, height, backend_name)
-    val execution = _simple_web_layout_execute_draw_ir_composition(
-        layout_result.composition, layout_result.material_witness,
-        width, height, backend_name, [])
-    if execution.render.skipped_command_count != 0:
+    _simple_web_layout_execute_pixels_from_result(layout_result, width, height, backend_name)
+
+# reason: mirrors sibling simple_web_layout_render_html_pixels_engine2d(html, width, height, backend_name) scalar API
+# @allow(primitive_api)
+pub fn simple_web_layout_render_html_pixels_engine2d_at_scroll(
+    html: text, width: i32, height: i32, scroll_y: i32, backend_name: text
+) -> [u32]:
+    if width <= 0 or height <= 0:
         return []
-    execution.render.pixels
+    if scroll_y == 0:
+        return simple_web_layout_render_html_pixels_engine2d(html, width, height, backend_name)
+    val layout_result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+        html, width, height, 0, scroll_y, browser_text_input_overlay_empty()
+    )
+    _simple_web_layout_execute_pixels_from_result(layout_result, width, height, backend_name)
 
 # Device-pixel-ratio twin of simple_web_layout_render_html_pixels_engine2d.
 # Layout (and the document cache key) stay in CSS px; the composed Draw IR is
@@ -1541,6 +1563,27 @@ pub fn simple_web_layout_render_html_presentable_engine2d_at_time_with_animation
     )
     _web_presentable_frame(execution.render, width, height)
 
+# reason: mirrors simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images with element scroll offset
+# @allow(primitive_api)
+pub fn simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images_with_element_scroll(
+    html: text, width: i32, height: i32, backend_name: text,
+    animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource],
+    element_id: text,
+    scroll_top: i32
+) -> SimpleWebLayoutEngine2DPresentableFrame:
+    if width <= 0 or height <= 0:
+        return SimpleWebLayoutEngine2DPresentableFrame(pixels: [], skipped_command_count: 0, occluded_command_count: 0, skip_reason: "empty-viewport")
+    val layout_result = simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images_with_element_scroll(
+        html, width, height, animation_time_ms, animation_instances, images, element_id, scroll_top
+    )
+    val execution = _simple_web_layout_execute_draw_ir_composition(
+        layout_result.composition, layout_result.material_witness,
+        width, height, backend_canonical_name(backend_name), images
+    )
+    _web_presentable_frame(execution.render, width, height)
+
 fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> SimpleWebLayoutEngine2DReadbackResult:
     if width <= 0 or height <= 0:
         return SimpleWebLayoutEngine2DReadbackResult(
@@ -1618,11 +1661,11 @@ pub fn engine2d_fast_metal_available() -> bool:
     val probe = Engine2D.probe_backend(1, 1, "metal")
     probe.status == BackendStatus.Initialized
 
-export simple_web_layout_render_html_pixels_engine2d, simple_web_layout_render_html_pixels_engine2d_at_device_scale
+export simple_web_layout_render_html_pixels_engine2d, simple_web_layout_render_html_pixels_engine2d_at_scroll, simple_web_layout_render_html_pixels_engine2d_at_device_scale
 export simple_web_layout_render_html_readback_engine2d
 export simple_web_layout_render_html_readback_engine2d_result
 export simple_web_layout_render_html_engine2d_result
-export simple_web_layout_render_html_presentable_engine2d, simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images, SimpleWebLayoutEngine2DPresentableFrame
+export simple_web_layout_render_html_presentable_engine2d, simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images, simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images_with_element_scroll, SimpleWebLayoutEngine2DPresentableFrame
 export SimpleWebLayoutEngine2DReadbackResult
 export engine2d_fast_metal_available
 export web_draw_ir_gpu_route_policy_reset

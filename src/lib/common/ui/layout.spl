@@ -1,10 +1,18 @@
 # UI Layout Engine
 #
-# Computes WidgetRect positions for a WidgetNode tree.
-# Supports VBox (vertical stack), HBox (horizontal split),
-# Grid, and Fixed layout modes with flex sizing.
+# Computes WidgetRect positions for a WidgetNode tree using shared
+# ConstraintSpace, EdgeInsets, GapSpacing, and axis_distribute primitives
+# from common.layout.constraint_space.
+# Supports VBox (vertical stack), HBox (horizontal split), Grid, and Fixed modes.
 
 use common.ui.widget.{WidgetNode, WidgetRect}
+use common.layout.constraint_space.{
+    LAYOUT_UNIT_CELLS, LAYOUT_UNIT_PIXELS,
+    ConstraintSpace, EdgeInsets, GapSpacing, MinMaxSizes, LayoutBounds,
+    AxisTrackSpec, AxisSlot, AxisDistributionResult,
+    ui_constraint_space_cells, ui_constraint_space_pixels,
+    clamp_span, axis_distribute
+}
 
 # =========================================================================
 # DPI / scale helper
@@ -18,15 +26,8 @@ fn _apply_scale(v: i32, scale_permille: i32) -> i32:
         return v
     (v * scale_permille) / 1000
 
-# =========================================================================
-# Layout Computation
-# =========================================================================
-
 # Scale an authored size constraint into device units. `max_*` accessors
-# return -1 for "unset" (uncapped), which is a sentinel and not a length, so
-# it must survive scaling unchanged — `_apply_scale(-1, 2000)` would give -2,
-# still negative and still read as uncapped by clamp_dim, but the sentinel is
-# pinned here rather than left to that coincidence.
+# return -1 for "unset" (uncapped), which is a sentinel and not a length.
 fn _scaled_max(v: i32, scale_permille: i32) -> i32:
     if v < 0:
         return v
@@ -34,54 +35,128 @@ fn _scaled_max(v: i32, scale_permille: i32) -> i32:
 
 val PIXEL_PANEL_TITLE_HEIGHT: i32 = 18
 
+# =========================================================================
+# Property Parsing Helpers (Padding, Gap, Units)
+# =========================================================================
+
+fn _parse_ui_length(raw: text, default_val: i32) -> i32:
+    """Parse a positive/zero integer or `<N>px` widget prop length."""
+    var s = raw.trim()
+    if s == "":
+        return default_val
+    if s.ends_with("px") and s.byte_len() > 2:
+        s = s.substring(0, s.byte_len() - 2).trim()
+    s.to_int() ?? default_val
+
+fn _get_padding_insets(node: WidgetNode, scale_permille: i32) -> EdgeInsets:
+    """Parse `padding` (1, 2, or 4 tokens) plus directional `padding_*` overrides."""
+    var top: i32 = 0
+    var right: i32 = 0
+    var bottom: i32 = 0
+    var left: i32 = 0
+    val raw = node.get_prop("padding").trim()
+    if raw != "":
+        var vals: [i32] = []
+        for tok in raw.split(" "):
+            val t = tok.trim()
+            if t != "":
+                val parsed = _parse_ui_length(t, 0)
+                vals.push(if parsed > 0: parsed else: 0)
+        if vals.len() == 1:
+            top = vals[0]
+            right = vals[0]
+            bottom = vals[0]
+            left = vals[0]
+        elif vals.len() == 2:
+            top = vals[0]
+            bottom = vals[0]
+            right = vals[1]
+            left = vals[1]
+        elif vals.len() >= 4:
+            top = vals[0]
+            right = vals[1]
+            bottom = vals[2]
+            left = vals[3]
+    val pt = node.get_prop("padding_top")
+    if pt != "": top = _parse_ui_length(pt, top)
+    val pr = node.get_prop("padding_right")
+    if pr != "": right = _parse_ui_length(pr, right)
+    val pb = node.get_prop("padding_bottom")
+    if pb != "": bottom = _parse_ui_length(pb, bottom)
+    val pl = node.get_prop("padding_left")
+    if pl != "": left = _parse_ui_length(pl, left)
+    EdgeInsets(
+        top: _apply_scale(if top > 0: top else: 0, scale_permille),
+        right: _apply_scale(if right > 0: right else: 0, scale_permille),
+        bottom: _apply_scale(if bottom > 0: bottom else: 0, scale_permille),
+        left: _apply_scale(if left > 0: left else: 0, scale_permille)
+    )
+
+fn _get_gap_spacing(node: WidgetNode, scale_permille: i32) -> GapSpacing:
+    """Parse container `gap`, `row_gap`, and `column_gap`/`col_gap` props."""
+    val base = _parse_ui_length(node.get_prop("gap"), 0)
+    var rg = base
+    var cg = base
+    val raw_rg = node.get_prop("row_gap")
+    if raw_rg != "":
+        rg = _parse_ui_length(raw_rg, rg)
+    val raw_cg = node.get_prop("column_gap")
+    if raw_cg != "":
+        cg = _parse_ui_length(raw_cg, cg)
+    val raw_col_gap = node.get_prop("col_gap")
+    if raw_col_gap != "":
+        cg = _parse_ui_length(raw_col_gap, cg)
+    GapSpacing(
+        row_gap: _apply_scale(if rg > 0: rg else: 0, scale_permille),
+        col_gap: _apply_scale(if cg > 0: cg else: 0, scale_permille)
+    )
+
+# =========================================================================
+# Layout Computation & Constraint Space Entry Points
+# =========================================================================
+
 # Pixel hosts reserve a title band; terminals retain one-cell borders.
 fn compute_pixel_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000) -> [WidgetRect]:
-    compute_layout(node, x, y, w, h, scale_permille, PIXEL_PANEL_TITLE_HEIGHT)
+    """Compute pixel-unit widget rectangles with DPI scale and panel title band."""
+    val space = ui_constraint_space_pixels(w, h, scale_permille, PIXEL_PANEL_TITLE_HEIGHT)
+    compute_layout_with_space(node, x, y, space)
 
 fn compute_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
-    """Compute layout rectangles for a widget tree.
+    """Compute widget rectangles (cell mode by default, or pixel title height when > 0)."""
+    val space = if panel_title_height > 0:
+        ui_constraint_space_pixels(w, h, scale_permille, panel_title_height)
+    else:
+        ui_constraint_space_cells(w, h, scale_permille)
+    compute_layout_with_space(node, x, y, space)
 
-    `scale_permille` is an integer DPI/UI scale factor in permille (1000 =
-    1.0x, identity default — existing 4-arg callers are unaffected). It scales
-    the requested (x, y, w, h) rect exactly once, here at the entry point, and
-    is then carried down the tree as the factor for authored SIZE PROPS only
-    (width/height/min_*/max_*, the scroll clip): those are written by callers
-    in the same logical units as the x/y/w/h handed to this function, while
-    every coordinate below this point is already in device units.
+# reason: origin (x, y) mirrors compute_layout's integer coordinate entry contract.
+# @allow(primitive_api)
+pub fn compute_layout_with_space(node: WidgetNode, x: i32, y: i32, space: ConstraintSpace) -> [WidgetRect]:
+    """Compute widget rectangles driven explicitly by an immutable ConstraintSpace."""
+    val sx = _apply_scale(x, space.scale_permille)
+    val sy = _apply_scale(y, space.scale_permille)
+    val sw = _apply_scale(space.available_w, space.scale_permille)
+    val sh = _apply_scale(space.available_h, space.scale_permille)
+    _layout_scaled(node, sx, sy, sw, sh, space.scale_permille, space.panel_title_height)
 
-    The recursion therefore runs through `_layout_scaled`, which takes an
-    already-scaled rect, so coordinates are never scaled twice while props are
-    scaled at the one place they are read.
-    """
-    _layout_scaled(
-        node,
-        _apply_scale(x, scale_permille),
-        _apply_scale(y, scale_permille),
-        _apply_scale(w, scale_permille),
-        _apply_scale(h, scale_permille),
-        scale_permille, panel_title_height)
-
-# Layout body. (x, y, w, h) are ALREADY in device units; `scale_permille` is
-# passed down purely to convert authored logical-unit props at their read
-# sites. See compute_layout's docstring for why the two are separated.
 fn _layout_scaled(node: WidgetNode, sx: i32, sy: i32, sw: i32, sh: i32, scale_permille: i32, panel_title_height: i32) -> [WidgetRect]:
     var rects: [WidgetRect] = [WidgetRect(id: node.id, x: sx, y: sy, w: sw, h: sh)]
 
     if not node.is_visible():
         return rects
 
-    # Compute inner area (account for borders on panels)
+    val children = node.children()
+    if children.len() == 0:
+        return rects
+
     var inner_x = sx
     var inner_y = sy
     var inner_w = sw
     var inner_h = sh
 
+    # Panel border stays a fixed 1 unit on every host; only the reserved pixel
+    # title band scales with DPI so titles keep their proportion.
     if node.kind_name() == "panel":
-        # Panel has a 1-char border. Inset the ALREADY-SCALED rect (sx/sy/sw/
-        # sh), never the raw args: `column()`/`row()`/`grid_layout()`/`panel()`
-        # all build a WidgetKind.Panel, so this branch is the common container
-        # path and insetting `x/y/w/h` here silently dropped DPI scaling for
-        # every container subtree.
         inner_x = sx + 1
         inner_y = sy + 1
         inner_w = sw - 2
@@ -91,16 +166,16 @@ fn _layout_scaled(node: WidgetNode, sx: i32, sy: i32, sw: i32, sh: i32, scale_pe
             inner_y = inner_y + title_h
             inner_h = inner_h - title_h
 
-    # Scroll container clips inner height to max_height.
-    #
-    # inner_h is in DEVICE units (it derives from sh). `max_height` is authored
-    # by the caller in LOGICAL units — builder.scroll(id, max_height, ...) takes
-    # a plain i32 from code with no scale knowledge, the same units as the
-    # x/y/w/h handed to compute_layout. Scale it here, at the same place and
-    # exactly once, or the two sides of the comparison below are in different
-    # units and the clip is meaningless at any non-identity scale. Because
-    # scale_permille now reaches every level of the recursion, this holds for
-    # a NESTED scroll container too, not only one sitting at the root.
+    # Apply container padding after panel border/title insets.
+    val pad = _get_padding_insets(node, scale_permille)
+    if pad.horizontal() > 0 or pad.vertical() > 0:
+        val padded = pad.inset_bounds(inner_x, inner_y, inner_w, inner_h)
+        inner_x = padded.x
+        inner_y = padded.y
+        inner_w = padded.w
+        inner_h = padded.h
+
+    # Scroll container clips inner height to scaled max_height.
     if node.kind_name() == "scroll":
         val max_h_str = node.get_prop("max_height")
         if max_h_str != "":
@@ -115,17 +190,19 @@ fn _layout_scaled(node: WidgetNode, sx: i32, sy: i32, sw: i32, sh: i32, scale_pe
     if visible_children.len() == 0:
         return rects
 
-    # Layout children based on layout kind
-    if node.layout_name() == "vbox":
-        val child_rects = layout_vbox(visible_children, inner_x, inner_y, inner_w, inner_h, scale_permille, panel_title_height)
+    val gaps = _get_gap_spacing(node, scale_permille)
+    val justify = node.get_prop("justify").trim()
+    val layout_kind = node.layout_name()
+    if layout_kind == "vbox":
+        val child_rects = _layout_axis_children(visible_children, inner_x, inner_y, inner_w, inner_h, false, gaps.row_gap, justify, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
-    elif node.layout_name() == "hbox":
-        val child_rects = layout_hbox(visible_children, inner_x, inner_y, inner_w, inner_h, scale_permille, panel_title_height)
+    elif layout_kind == "hbox":
+        val child_rects = _layout_axis_children(visible_children, inner_x, inner_y, inner_w, inner_h, true, gaps.col_gap, justify, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
-    elif node.layout_name() == "grid":
-        val child_rects = layout_grid(visible_children, inner_x, inner_y, inner_w, inner_h, get_grid_columns(node), scale_permille, panel_title_height)
+    elif layout_kind == "grid":
+        val child_rects = _layout_grid_with_gaps(visible_children, inner_x, inner_y, inner_w, inner_h, get_grid_columns(node), gaps.col_gap, gaps.row_gap, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
     else:
@@ -144,160 +221,91 @@ fn get_visible_children(node: WidgetNode) -> [WidgetNode]:
     return result
 
 # =========================================================================
-# VBox Layout (vertical stacking)
+# Unified Axis Layout (shared by VBox and HBox via axis_distribute)
 # =========================================================================
 
-# (x, y, w, h) are in DEVICE units; `scale_permille` converts the authored
-# logical-unit height props (height/min_height/max_height) at their read sites.
-# It defaults to identity so a caller that lays out at 1.0x can omit it.
+fn _build_axis_specs(children: [WidgetNode], horizontal: bool, scale_permille: i32) -> [AxisTrackSpec]:
+    """Convert widget child props along the chosen axis into AxisTrackSpec items."""
+    var specs: [AxisTrackSpec] = []
+    for child in children:
+        val fixed_v = _apply_scale(if horizontal: get_fixed_width(child) else: get_fixed_height(child), scale_permille)
+        val min_v = _apply_scale(if horizontal: get_min_width(child) else: get_min_height(child), scale_permille)
+        val max_v = _scaled_max(if horizontal: get_max_width(child) else: get_max_height(child), scale_permille)
+        if fixed_v > 0:
+            specs.push(AxisTrackSpec.fixed_item(fixed_v, min_v, max_v))
+        else:
+            specs.push(AxisTrackSpec.flex_item(get_flex(child), min_v, max_v))
+    specs
+
+fn _layout_axis_children(
+    children: [WidgetNode],
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    horizontal: bool,
+    gap: i32,
+    justify: text,
+    scale_permille: i32,
+    panel_title_height: i32
+) -> [WidgetRect]:
+    """Shared vertical/horizontal stack allocator preserving UI flex remainder & clamping."""
+    var rects: [WidgetRect] = []
+    if children.len() == 0:
+        return rects
+    val avail_main = if horizontal: w else: h
+    val specs = _build_axis_specs(children, horizontal, scale_permille)
+    val dist = axis_distribute(avail_main, gap, justify, specs, true)
+    var i: i32 = 0
+    val count = children.len() as i32
+    while i < count:
+        val slot = dist.slots[i]
+        if slot.size > 0:
+            val cx = if horizontal: x + slot.offset else: x
+            val cy = if horizontal: y else: y + slot.offset
+            val cw = if horizontal: slot.size else: w
+            val ch = if horizontal: h else: slot.size
+            val child_rects = _layout_scaled(children[i], cx, cy, cw, ch, scale_permille, panel_title_height)
+            for cr in child_rects:
+                rects.push(cr)
+        i = i + 1
+    rects
+
+# (x, y, w, h) are in DEVICE units; `scale_permille` converts authored
+# logical-unit height/width props at their read sites.
 fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
-    var rects: [WidgetRect] = []
-    val count = children.len()
-    if count == 0:
-        return rects
+    """Lay out children vertically using the shared axis distributor."""
+    _layout_axis_children(children, x, y, w, h, false, 0, "", scale_permille, panel_title_height)
 
-    # Calculate sizes: fixed-height items first, then distribute remaining
-    # free height in proportion to each child's `flex` weight — the same
-    # policy layout_hbox applies on the other axis, so the two agree on both
-    # weighting and the remainder invariant (awarded once, to the last
-    # space-taking child). get_flex() defaults to 1, so children carrying no
-    # flex prop still split the box equally, exactly as before.
-    var total_fixed: i32 = 0
-    var total_flex: i32 = 0
-
-    for child in children:
-        val fixed_h = _apply_scale(get_fixed_height(child), scale_permille)
-        if fixed_h > 0:
-            total_fixed = total_fixed + fixed_h
-        else:
-            val flex = get_flex(child)
-            total_flex = total_flex + flex
-
-    # Clamp remaining flex space at 0: when fixed children already overflow the
-    # box, flex children get 0 height, never a negative size.
-    var remaining = h - total_fixed
-    if remaining < 0:
-        remaining = 0
-    val flex_unit = if total_flex > 0: remaining / total_flex else: 0
-    val flex_remainder = if total_flex > 0: remaining - flex_unit * total_flex else: 0
-
-    var cur_y = y
-    var flex_idx: i32 = 0
-    for child in children:
-        val child_h = _apply_scale(get_fixed_height(child), scale_permille)
-        var actual_h: i32 = 0
-        if child_h > 0:
-            actual_h = child_h
-        else:
-            val flex = get_flex(child)
-            flex_idx = flex_idx + flex
-            # Remainder guard, identical in form to layout_hbox's — see the
-            # long comment there for why get_flex()'s clamp at 0 makes
-            # flex_idx monotone, and why the `flex > 0` half is load-bearing
-            # for TRAILING flex="0" children (without it they re-arm
-            # `flex_idx >= total_flex` and collect a second copy).
-            if flex > 0 and flex_idx >= total_flex:
-                actual_h = flex * flex_unit + flex_remainder
-            else:
-                actual_h = flex * flex_unit
-
-        actual_h = clamp_dim(
-            actual_h,
-            _apply_scale(get_min_height(child), scale_permille),
-            _scaled_max(get_max_height(child), scale_permille))
-        if actual_h > 0:
-            val child_rects = _layout_scaled(child, x, cur_y, w, actual_h, scale_permille, panel_title_height)
-            for cr in child_rects:
-                rects.push(cr)
-            cur_y = cur_y + actual_h
-
-    return rects
-
-# =========================================================================
-# HBox Layout (horizontal stacking)
-# =========================================================================
-
-# (x, y, w, h) are in DEVICE units; `scale_permille` converts the authored
-# logical-unit width props (width/min_width/max_width) at their read sites.
-# It defaults to identity so a caller that lays out at 1.0x can omit it.
 fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
-    var rects: [WidgetRect] = []
-    val count = children.len()
-    if count == 0:
-        return rects
-
-    # Calculate sizes: fixed-width items first, then distribute remaining
-    var total_fixed: i32 = 0
-    var total_flex: i32 = 0
-
-    for child in children:
-        val fixed_w = _apply_scale(get_fixed_width(child), scale_permille)
-        if fixed_w > 0:
-            total_fixed = total_fixed + fixed_w
-        else:
-            val flex = get_flex(child)
-            total_flex = total_flex + flex
-
-    # Clamp remaining flex space at 0: when fixed children already overflow the
-    # box, flex children get 0 width, never a negative size.
-    var remaining = w - total_fixed
-    if remaining < 0:
-        remaining = 0
-    val flex_unit = if total_flex > 0: remaining / total_flex else: 0
-    val flex_remainder = if total_flex > 0: remaining - flex_unit * total_flex else: 0
-
-    var cur_x = x
-    var flex_idx: i32 = 0
-    for child in children:
-        val fixed_w = _apply_scale(get_fixed_width(child), scale_permille)
-        var actual_w: i32 = 0
-        if fixed_w > 0:
-            actual_w = fixed_w
-        else:
-            val flex = get_flex(child)
-            flex_idx = flex_idx + flex
-            # The integer-division remainder goes to the LAST child that
-            # actually takes space, i.e. the last one with flex > 0. get_flex()
-            # clamps at 0, so flex_idx is MONOTONE non-decreasing and only
-            # positive-flex children advance it; the first child to push it up
-            # to total_flex is therefore exactly the last positive-flex child,
-            # and it is the only one that satisfies both halves of this guard.
-            # That clamp is what makes this argument sound — a negative weight
-            # would break monotonicity and re-admit a second award.
-            #
-            # The `flex > 0` half is load-bearing: adding 0 leaves flex_idx AT
-            # total_flex, so without it every TRAILING flex="0" child re-armed
-            # `flex_idx >= total_flex` and collected a second copy of the
-            # remainder — w=10 with children flex=3 and flex=0 assigned 10+1
-            # = 11px into a 10px box. A child that asked for zero width gets
-            # zero width. layout_vbox applies the identical guard on the
-            # other axis, so both agree on the invariant: remainder awarded
-            # exactly once, to the last space-taking child.
-            if flex > 0 and flex_idx >= total_flex:
-                actual_w = flex * flex_unit + flex_remainder
-            else:
-                actual_w = flex * flex_unit
-
-        actual_w = clamp_dim(
-            actual_w,
-            _apply_scale(get_min_width(child), scale_permille),
-            _scaled_max(get_max_width(child), scale_permille))
-        if actual_w > 0:
-            val child_rects = _layout_scaled(child, cur_x, y, actual_w, h, scale_permille, panel_title_height)
-            for cr in child_rects:
-                rects.push(cr)
-            cur_x = cur_x + actual_w
-
-    return rects
+    """Lay out children horizontally using the shared axis distributor."""
+    _layout_axis_children(children, x, y, w, h, true, 0, "", scale_permille, panel_title_height)
 
 # =========================================================================
-# Grid Layout
+# Grid Layout (backed by shared axis_distribute track slots + gaps)
 # =========================================================================
 
-# Grid tracks are derived from the container rect, and `columns`/`col_span`
-# are counts rather than lengths, so nothing here needs converting — but
-# `scale_permille` still has to reach the children, whose own props do.
-fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: i32 = 0, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
+fn _build_equal_track_specs(track_count: i32) -> [AxisTrackSpec]:
+    var specs: [AxisTrackSpec] = []
+    var i: i32 = 0
+    while i < track_count:
+        specs.push(AxisTrackSpec.flex_item(1, 0, -1))
+        i = i + 1
+    specs
+
+fn _layout_grid_with_gaps(
+    children: [WidgetNode],
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    columns: i32,
+    col_gap: i32,
+    row_gap: i32,
+    scale_permille: i32,
+    panel_title_height: i32
+) -> [WidgetRect]:
+    """Lay out grid children with explicit/auto column tracks, col_span, gaps, and exact track remainder."""
     var rects: [WidgetRect] = []
     val count = children.len()
     if count == 0:
@@ -305,22 +313,16 @@ fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: 
 
     var cols = columns
     if cols <= 0:
-        # No explicit `columns` prop on the grid container — auto-calculate a
-        # square-ish grid the way this function always has.
         cols = 1
         while cols * cols < count:
             cols = cols + 1
 
-    # Placement pass: walk children in order, wrapping to a new row whenever
-    # a child's col_span would overflow the remaining columns in the current
-    # row. Recorded once (row/col/span per child) so the paint pass below
-    # can't drift from this placement with separately-computed indices.
     var place_row: [i32] = []
     var place_col: [i32] = []
     var place_span: [i32] = []
-    var cur_row = 0
-    var cur_col = 0
-    var max_row = 0
+    var cur_row: i32 = 0
+    var cur_col: i32 = 0
+    var max_row: i32 = 0
     for child in children:
         var span = get_col_span(child)
         if span > cols:
@@ -336,54 +338,37 @@ fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: 
         cur_col = cur_col + span
 
     val rows = max_row + 1
-    val cell_w = w / cols
-    val cell_h = h / rows
+    val col_dist = axis_distribute(w, col_gap, "", _build_equal_track_specs(cols), true)
+    val row_dist = axis_distribute(h, row_gap, "", _build_equal_track_specs(rows), true)
 
-    # Integer division truncates, so `cell_w * cols` and `cell_h * rows` fall
-    # short of the container by up to cols-1 / rows-1 pixels. layout_hbox and
-    # layout_vbox both document the invariant that the remainder is awarded
-    # exactly once, to the LAST space-taking child, so children always sum to
-    # the container; grid used to drop it, leaving an unpainted strip on the
-    # right edge and along the bottom of every grid whose size is not an exact
-    # multiple of its track count. Track edges are therefore computed as
-    # absolute boundaries — base multiples for interior tracks, the container's
-    # own far edge for the last one — so the awarded remainder lands in the
-    # final column/row and every cell stays adjacent to its neighbour with no
-    # gap and no overflow. A cell that SPANS to the last column inherits that
-    # edge too, so a span never has to be widened separately. This is the same
-    # policy grid_layout() in src/app/ui.render/layout.spl already applies
-    # ("last column/row absorbs rounding remainder"), so the two grid
-    # implementations in this repo agree.
-    #
-    # Note the invariant is over TRACKS, not children: it is the track grid
-    # that covers the container exactly. hbox/vbox can say "children always
-    # sum to the container" because every child sits on the one axis; a grid
-    # cannot, because a row need not be full. With cols=4 and two children of
-    # col_span=3, each child takes columns 0..2 of its own row and column 3 is
-    # unoccupied in both rows — there is no cell there to paint. Awarding the
-    # remainder to the last CHILD instead (the hbox reading) would make the
-    # trailing child of a short row wider than the same column elsewhere,
-    # breaking column alignment, which is why placement drives this, not
-    # child order.
     var idx = 0
     for child in children:
         val grid_row = place_row[idx]
         val grid_col = place_col[idx]
         val span = place_span[idx]
-        val cell_x = x + (grid_col * cell_w)
-        val cell_y = y + (grid_row * cell_h)
-        val col_end = grid_col + span
-        val cell_right = if col_end >= cols: x + w else: x + (col_end * cell_w)
-        val cell_bottom = if grid_row + 1 >= rows: y + h else: y + ((grid_row + 1) * cell_h)
-        val cell_span_w = cell_right - cell_x
-        val cell_span_h = cell_bottom - cell_y
+        val start_col_slot = col_dist.slots[grid_col]
+        val end_col_idx = if grid_col + span - 1 < cols: grid_col + span - 1 else: cols - 1
+        val end_col_slot = col_dist.slots[end_col_idx]
+        val row_slot = row_dist.slots[grid_row]
+
+        val cell_x = x + start_col_slot.offset
+        val cell_y = y + row_slot.offset
+        val cell_span_w = (end_col_slot.offset + end_col_slot.size) - start_col_slot.offset
+        val cell_span_h = row_slot.size
 
         val child_rects = _layout_scaled(child, cell_x, cell_y, cell_span_w, cell_span_h, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
         idx = idx + 1
 
-    return rects
+    rects
+
+# Grid tracks are derived from the container rect, and `columns`/`col_span`
+# are counts rather than lengths, so nothing here needs converting — but
+# `scale_permille` still has to reach the children, whose own props do.
+fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: i32 = 0, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
+    """Lay out grid children into `columns` tracks (square-ish auto heuristic when <= 0)."""
+    _layout_grid_with_gaps(children, x, y, w, h, columns, 0, 0, scale_permille, panel_title_height)
 
 # Explicit column count for a grid container (the `columns` prop). 0 (unset
 # or non-positive) means "auto" — layout_grid falls back to the sqrt heuristic.
@@ -409,9 +394,6 @@ fn get_col_span(node: WidgetNode) -> i32:
 # Fixed Layout (absolute positioning)
 # =========================================================================
 
-# (x, y, w, h) are in DEVICE units; `scale_permille` converts each child's
-# authored logical-unit width/height props at their read sites. It defaults to
-# identity so a caller that lays out at 1.0x can omit it.
 fn layout_fixed(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
     val child_count = children.len()
     if child_count == 0:
@@ -424,7 +406,6 @@ fn layout_fixed(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_pe
     var rects: [WidgetRect] = _layout_scaled(first, x, y, first_actual_w, first_actual_h, scale_permille, panel_title_height)
     var idx = 1
     while idx < child_count:
-        # Fixed layout uses the full parent area for each child
         val child = children[idx]
         val child_w = _apply_scale(get_fixed_width(child), scale_permille)
         val child_h = _apply_scale(get_fixed_height(child), scale_permille)
@@ -437,7 +418,7 @@ fn layout_fixed(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_pe
     return rects
 
 # =========================================================================
-# Property Helpers
+# Property Helpers & Clamping
 # =========================================================================
 
 fn get_fixed_width(node: WidgetNode) -> i32:
@@ -463,13 +444,6 @@ fn get_fixed_height(node: WidgetNode) -> i32:
             return rows.to_int() ?? 0
     return 0
 
-# A flex weight is a share of the free space, so it is never negative. Clamping
-# here rather than at the call sites keeps `total_flex` and the per-child
-# weights consistent: a negative weight would make layout_hbox's running
-# flex_idx non-monotone, so more than one child could satisfy
-# `flex_idx >= total_flex` and the remainder would be awarded twice again (w=10
-# with weights 5/-2/1 assigned 16px). It would also make flex_unit negative
-# when the weights sum below zero.
 fn get_flex(node: WidgetNode) -> i32:
     val f = node.get_prop("flex")
     if f != "":
@@ -477,17 +451,6 @@ fn get_flex(node: WidgetNode) -> i32:
         return if v > 0: v else: 0
     return 1
 
-# Optional size constraints. min_* default 0 (no lower bound); max_* default -1
-# meaning "unset" (no upper bound). max_height doubles as the scroll clip
-# height, so capping to it is a no-op for scroll containers and a genuine cap
-# elsewhere.
-#
-# These accessors return the value as AUTHORED, i.e. in logical units — the
-# same units as the x/y/w/h handed to compute_layout. layout_vbox/layout_hbox
-# compare them against device-unit sizes, so they convert with _apply_scale /
-# _scaled_max at the read site, exactly as the scroll clip does. Keeping the
-# conversion at the call site rather than in here is what lets the raw
-# authored value stay observable to callers that want it.
 fn get_min_width(node: WidgetNode) -> i32:
     val v = node.get_prop("min_width")
     if v != "":
@@ -515,14 +478,7 @@ fn get_max_height(node: WidgetNode) -> i32:
 # Clamp a computed size into [min_v, max_v], with max_v < 0 meaning uncapped.
 # Never returns a negative size.
 fn clamp_dim(size: i32, min_v: i32, max_v: i32) -> i32:
-    var s = size
-    if max_v >= 0 and s > max_v:
-        s = max_v
-    if s < min_v:
-        s = min_v
-    if s < 0:
-        s = 0
-    s
+    clamp_span(size, min_v, max_v)
 
 # =========================================================================
 # Layout Lookup

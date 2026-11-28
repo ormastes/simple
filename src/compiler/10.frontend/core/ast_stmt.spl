@@ -62,6 +62,18 @@ var stmt_mode_ready: bool = false
 var stmt_env_mirror_cached: bool = false
 var stmt_trace_tags_cached: bool = false
 
+# Bridge-scoped arena read mode (flat_ast_bridge_phase3_snapshot_throughput_
+# 2026-08-31): while a flat_ast_to_module conversion holds this scope, stmt
+# getters read the arena arrays instead of the SIMPLE_BOOTSTRAP_STMT_* env
+# mirror (same lockstep contract as ast_decl_bridge_scope in decl_nodes.spl).
+var stmt_bridge_scope: bool = false
+
+pub fn stmt_bridge_scope_enter():
+    stmt_bridge_scope = true
+
+pub fn stmt_bridge_scope_exit():
+    stmt_bridge_scope = false
+
 # High-water mark of the largest stmt index ever mirrored into the environment
 # since the last stmt_reset(). stmt_count_set(0) inside stmt_reset() would
 # otherwise erase the only record of how far the mirror reaches, so a SMALLER
@@ -122,6 +134,8 @@ fn stmt_i64_list_split(raw: text) -> [i64]:
     result
 
 fn stmt_env_mirror_enabled() -> bool:
+    if stmt_bridge_scope:
+        return false
     if stmt_mode_ready:
         return stmt_env_mirror_cached
     # Interpreter module variables may not persist between calls. Preserve its
@@ -612,9 +626,10 @@ fn stmt_get_tag(idx: i64) -> i64:
             print message
         return -1
     val fallback = stmt_tag[idx]
-    val trace_stmt_tags = env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? ""
-    if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
-        (idx < 8 or fallback <= 0)):
+    # Slot-gated (stmt_mode_slots_refresh per reset), not a raw env read: this
+    # gate is evaluated per statement node, including every flat-AST bridge
+    # conversion node in the interpreted lane.
+    if stmt_trace_tags_enabled() and (idx < 8 or fallback <= 0):
         print "[stmt_get_tag] idx={idx} arena={fallback}"
     fallback
 
@@ -728,6 +743,30 @@ fn stmt_get_body(idx: i64) -> [i64]:
         i = i + 1
     body
 
+pub fn stmt_body_len(idx: i64) -> i64:
+    if not stmt_idx_is_live(idx, stmt_body_counts.len()):
+        stmt_oob_trace("stmt_body_len", idx, stmt_body_counts.len())
+        return 0
+    val offset = stmt_body_offsets[idx]
+    val count = stmt_body_counts[idx]
+    if offset < 0 or count < 0 or offset > stmt_body_flat.len() or count > stmt_body_flat.len() - offset:
+        stmt_oob_trace("stmt_body_len_flat", offset + count, stmt_body_flat.len())
+        return 0
+    count
+
+pub fn stmt_body_at(idx: i64, pos: i64) -> i64:
+    if not stmt_idx_is_live(idx, stmt_body_offsets.len()):
+        stmt_oob_trace("stmt_body_at", idx, stmt_body_offsets.len())
+        return -1
+    val offset = stmt_body_offsets[idx]
+    val count = stmt_body_counts[idx]
+    if offset < 0 or count < 0 or offset > stmt_body_flat.len() or count > stmt_body_flat.len() - offset:
+        stmt_oob_trace("stmt_body_at_flat", offset + count, stmt_body_flat.len())
+        return -1
+    if pos < 0 or pos >= count:
+        return -1
+    stmt_body_flat[offset + pos]
+
 export STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN
 export STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK
 export STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN, STMT_DEFER, STMT_ERRDEFER
@@ -736,12 +775,14 @@ export STMT_LAZY_VAL_DECL, STMT_GPU_LAUNCH
 export STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT
 export STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES
 export stmt_count, stmt_set_expr, stmt_set_tag, stmt_owner_len
+export stmt_body_len, stmt_body_at
 export stmt_parse_i64, stmt_i64_list_join, stmt_i64_list_split
 export stmt_count_env, stmt_count_set, stmt_key
 export stmt_i64_set, stmt_text_set, stmt_list_set
 export stmt_body_store, stmt_body_store_one
 export stmt_reset, stmt_alloc
 export stmt_contract_clause
+export stmt_bridge_scope_enter, stmt_bridge_scope_exit
 
 # --- flat-AST pool codec: flat_stmt ------------------------------
 #

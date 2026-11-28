@@ -542,6 +542,43 @@ fn _html_draw_ir_saturated_i32(value: i64) -> i32:
         value, 0i64 - 2147483647i64 - 1i64, 2147483647i64
     ).to_i32()
 
+fn _html_draw_ir_doc_bottom_y(boxes: LayoutResult, default_clip: ClipRect) -> i32:
+    var max_bottom = default_clip.y1
+    var i: i32 = 0
+    val n = boxes.by.len() as i32
+    # cpu-lane-loop-ok: computes full scrollable layout bottom once per Draw IR frame so below-the-fold nodes are not culled at viewport_h (Bug 0).
+    while i < n:
+        val bottom = boxes.by[i] + boxes.bh[i]
+        if bottom > max_bottom:
+            max_bottom = bottom
+        i = i + 1
+    max_bottom
+
+fn _html_draw_ir_effective_clip(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    clip_cache: PaintClipCache, i: i32, doc_bottom_y: i32
+) -> ClipRect:
+    val def = clip_cache.default_clip
+    if doc_bottom_y <= def.y1:
+        return paint_clip_at(clip_cache, i)
+    var clip = ClipRect(x0: def.x0, y0: def.y0, x1: def.x1, y1: doc_bottom_y)
+    if not clip_cache.has_node_clips:
+        return clip
+    var cur = nodes[i].parent as i32
+    var depth: i32 = 0
+    # cpu-lane-loop-ok: bounded DOM ancestor chain for explicit overflow scrollport clipping on tall scrollable pages.
+    while cur >= 0 and depth < 64:
+        val pst = styles[cur]
+        if (pst.overflow_hidden or pst.overflow_auto_y or pst.overflow_scroll_y or nodes[cur].tag == "textarea") and pst.display != "none":
+            val cx0 = boxes.bx[cur] + pst.border_l
+            val cy0 = boxes.by[cur] + pst.border_t
+            val cx1 = boxes.bx[cur] + boxes.bw[cur] - pst.border_r
+            val cy1 = boxes.by[cur] + boxes.bh[cur] - pst.border_b
+            clip = clip_intersect(clip, cx0, cy0, cx1, cy1)
+        cur = nodes[cur].parent as i32
+        depth = depth + 1
+    clip
+
 fn _html_draw_ir_visible(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     i: i32, clip: ClipRect
@@ -628,37 +665,73 @@ fn _html_draw_ir_visible_nodes(
     clip_cache: PaintClipCache
 ) -> [bool]:
     var visible: [bool] = [false; nodes.len()]
+    val doc_bottom_y = _html_draw_ir_doc_bottom_y(boxes, clip_cache.default_clip)
     var i: i32 = 0
     # cpu-lane-loop-ok: one visibility decision per node into a reusable [bool] mask so downstream Draw IR emission does not recompute visibility; bound is nodes.len()
     while i < nodes.len():
         visible[i] = _html_draw_ir_visible(
-            nodes, styles, boxes, i, paint_clip_at(clip_cache, i)
+            nodes, styles, boxes, i, _html_draw_ir_effective_clip(nodes, styles, boxes, clip_cache, i, doc_bottom_y)
         )
         i = i + 1
     visible
 
-fn _html_draw_ir_append_context_paint_order(
-    styles: [Style], members: [[i32]], child_contexts: [[i32]],
-    context_id: i32, order: [i32]
-) -> [i32]:
-    var result = order
-    # cpu-lane-loop-ok: appends the members of one stacking context in document order; summed over the whole recursion each node is appended exactly once, so the total is O(node_count)
-    for member in members[context_id]:
-        result.push(member)
-    val children = _sort_positive_z_indices(
-        child_contexts[context_id],
-        child_contexts[context_id].len(),
-        styles
-    )
-    # cpu-lane-loop-ok: recurses into the z-sorted child stacking contexts of one context; bound is that context's child count and each context is visited exactly once
-    for child in children:
-        result = _html_draw_ir_append_context_paint_order(
-            styles, members, child_contexts, child + 1, result
-        )
-    result
-
 fn _html_draw_ir_opens_context(st: Style) -> bool:
     (st.position_absolute or st.position_fixed or st.position_relative) and st.z_index >= 0
+
+fn _html_draw_ir_opens_group(st: Style) -> bool:
+    st.opacity_pct < 100 or st.backdrop_filter_raw != ""
+
+fn _html_draw_ir_emit_scope(
+    nodes: [HNode], styles: [Style],
+    scope_self: [i32], scope_blocks: [[i32]], scope_floats: [[i32]], scope_inlines: [[i32]],
+    child_contexts: [[i32]], scope_id: i32, emit_contexts: bool, order: [i32]
+) -> [i32]:
+    var result = order
+    if scope_id >= 0 and scope_id < scope_self.len():
+        val root_node = scope_self[scope_id]
+        if root_node >= 0:
+            result.push(root_node)
+    # CSS 2.2 Appendix E Step 4: non-positioned normal-flow blocks in tree order.
+    # Contiguous opacity/backdrop sub-scopes flush in place at their tree slot.
+    # cpu-lane-loop-ok: appends normal-flow block members of one scope once each
+    for b in scope_blocks[scope_id]:
+        if _html_draw_ir_opens_group(styles[b]):
+            result = _html_draw_ir_emit_scope(
+                nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+                child_contexts, b + 1, false, result
+            )
+        else:
+            result.push(b)
+    # CSS 2.2 Appendix E Step 5: non-positioned floats & their non-positioned subtrees.
+    # cpu-lane-loop-ok: appends each float subtree of one scope once after normal-flow blocks
+    for f in scope_floats[scope_id]:
+        result = _html_draw_ir_emit_scope(
+            nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+            child_contexts, f + 1, false, result
+        )
+    # CSS 2.2 Appendix E Step 7: non-positioned inline boxes & #text runs.
+    # cpu-lane-loop-ok: appends normal-flow inline/#text nodes of one scope once after floats
+    for inl in scope_inlines[scope_id]:
+        if _html_draw_ir_opens_group(styles[inl]):
+            result = _html_draw_ir_emit_scope(
+                nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+                child_contexts, inl + 1, false, result
+            )
+        else:
+            result.push(inl)
+    if emit_contexts:
+        val children = _sort_positive_z_indices(
+            child_contexts[scope_id],
+            child_contexts[scope_id].len(),
+            styles
+        )
+        # cpu-lane-loop-ok: recurses into z-sorted child stacking contexts once per context
+        for child in children:
+            result = _html_draw_ir_emit_scope(
+                nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+                child_contexts, child + 1, true, result
+            )
+    result
 
 # Context id per node, as `_html_draw_ir_node_paint_order` groups them: 0 is
 # the document, a context-opening node i is i + 1.
@@ -735,18 +808,29 @@ fn _html_draw_ir_node_paint_order(
     nodes: [HNode], styles: [Style]
 ) -> [i32]:
     val node_count = nodes.len()
-    # Context zero is the document. Positive positioned nodes use node index + 1
-    # so their ordinary descendants stay grouped while nested positive siblings
-    # are sorted stably inside the nearest supported stacking context.
+    # Context zero is the document. Positive positioned nodes open stacking
+    # contexts (`i + 1`); non-positioned floats (`float_mode != 0`) and
+    # opacity/backdrop groups open local sub-scopes inside their context so
+    # floats paint in CSS 2.2 Appendix E Step 5 (after normal-flow blocks,
+    # before normal-flow inlines/text and positioned boxes) while opacity
+    # groups stay contiguous.
     var node_context: [i32] = [0; node_count]
-    var members: [[i32]] = []
+    var node_scope: [i32] = [0; node_count]
+    var scope_self: [i32] = [-1; node_count + 1]
+    var scope_blocks: [[i32]] = []
+    var scope_floats: [[i32]] = []
+    var scope_inlines: [[i32]] = []
     var child_contexts: [[i32]] = []
     var ctx_init: i32 = 0
-    # cpu-lane-loop-ok: allocate distinct mutable bucket per stacking context
+    # cpu-lane-loop-ok: allocate distinct mutable buckets per context/sub-scope
     while ctx_init <= node_count:
-        var empty_m: [i32] = []
+        var empty_b: [i32] = []
+        var empty_f: [i32] = []
+        var empty_i: [i32] = []
         var empty_c: [i32] = []
-        members.push(empty_m)
+        scope_blocks.push(empty_b)
+        scope_floats.push(empty_f)
+        scope_inlines.push(empty_i)
         child_contexts.push(empty_c)
         ctx_init = ctx_init + 1
     # Generated `::before`/`::after` nodes sit after the parsed arena; members
@@ -755,30 +839,42 @@ fn _html_draw_ir_node_paint_order(
     val tree_order: [i32] = if has_generated: html_tree_order(nodes, build_child_index(nodes)) else: []
     val visit_count = if has_generated: tree_order.len() as i32 else: node_count as i32
     var visit: i32 = 0
-    # cpu-lane-loop-ok: assigns each node to its nearest supported stacking context and registers it as a member; single forward O(node_count) pass, parents precede children
+    # cpu-lane-loop-ok: single forward O(node_count) pass assigning each node to its stacking context and CSS 2.2 Step 4/5/7 scope
     while visit < visit_count:
         val i = if has_generated: tree_order[visit] else: visit
         visit = visit + 1
         val parent = nodes[i].parent
-        val parent_context = if parent >= 0 and (parent < i or has_generated):
-            node_context[parent]
-        else:
-            0
-        # CSS 2.1 Appendix E: positioned boxes with z-index auto/0 paint after
-        # the in-flow blocks and inlines of their context, in tree order, and
-        # positive z-index paints after those (stable z sort keeps 0 first).
-        # ponytail: a z-auto box is grouped like a context, so a positive-z
-        # descendant sorts inside it rather than in the real ancestor context;
-        # upgrade by flattening z-auto members into the parent's child list.
-        if _html_draw_ir_opens_context(styles[i]):
+        val parent_valid = parent >= 0 and (parent < i or has_generated)
+        val parent_context = if parent_valid: node_context[parent] else: 0
+        val parent_scope = if parent_valid: node_scope[parent] else: 0
+        val st = styles[i]
+        if _html_draw_ir_opens_context(st):
             child_contexts[parent_context].push(i)
             node_context[i] = i + 1
-            members[i + 1].push(i)
+            node_scope[i] = i + 1
+            scope_self[i + 1] = i
         else:
             node_context[i] = parent_context
-            members[parent_context].push(i)
-    _html_draw_ir_append_context_paint_order(
-        styles, members, child_contexts, 0, []
+            if st.float_mode != 0:
+                scope_floats[parent_scope].push(i)
+                node_scope[i] = i + 1
+                scope_self[i + 1] = i
+            elif _html_draw_ir_opens_group(st):
+                if nodes[i].tag == "#text" or st.display == "inline":
+                    scope_inlines[parent_scope].push(i)
+                else:
+                    scope_blocks[parent_scope].push(i)
+                node_scope[i] = i + 1
+                scope_self[i + 1] = i
+            else:
+                node_scope[i] = parent_scope
+                if nodes[i].tag == "#text" or st.display == "inline":
+                    scope_inlines[parent_scope].push(i)
+                else:
+                    scope_blocks[parent_scope].push(i)
+    _html_draw_ir_emit_scope(
+        nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+        child_contexts, 0, true, []
     )
 
 fn _html_draw_ir_descendant_bottom(
@@ -864,6 +960,7 @@ fn _html_draw_ir_commands(
     element_scroll_max: i32, widget_mode: bool, widget_chrome_text: bool
 ) -> ([DrawIrCommand], [i32]):
     val boxes = _html_draw_ir_k1_snapped_boxes(nodes, layout_boxes)
+    val doc_bottom_y = _html_draw_ir_doc_bottom_y(boxes, clip_cache.default_clip)
     # One uri -> index map per render. The per-node loop below used to rescan
     # the whole image list for every img, video and background layer.
     val image_index_by_uri = _html_draw_ir_image_index_by_uri(images)
@@ -969,8 +1066,8 @@ fn _html_draw_ir_commands(
                     val track_x = _html_draw_ir_saturated_i32(track_x64)
                     val track_y = _html_draw_ir_saturated_i32(track_y64)
                     val track_h = _html_draw_ir_saturated_i32(track_h64)
-                    val node_clip = paint_clip_at(
-                        clip_cache, scrollbar_index
+                    val node_clip = _html_draw_ir_effective_clip(
+                        nodes, styles, boxes, clip_cache, scrollbar_index, doc_bottom_y
                     )
                     val scrollport_clip = clip_intersect(
                         node_clip,
@@ -1104,7 +1201,9 @@ fn _html_draw_ir_commands(
         # this loop, as the raster `paint` does) replaces its glyphs.
         val widget_replaces_text = widget_mode and nodes[i].tag == "#text"
         if i < visible_nodes.len() and visible_nodes[i] and not widget_replaces_text:
-            val node_clip = paint_clip_at(clip_cache, i)
+            val node_clip = _html_draw_ir_effective_clip(
+                nodes, styles, boxes, clip_cache, i, doc_bottom_y
+            )
             val component_id = _html_draw_ir_component_id(nodes[i], i)
             val parent = nodes[i].parent
             val parent_id = if parent >= 0 and parent < nodes.len():

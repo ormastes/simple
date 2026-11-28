@@ -707,7 +707,9 @@ impl MirLowering:
             var is_concrete_function_type = false
             # Guard above returns in the nil arm; bind concrete via if val
             # (never unwrap — Poll.unwrap mis-dispatch is documented above).
-            val fn_type: HirType = if val t = sym.type_: t else: HirType(kind: HirTypeKind.Error, span: span)
+            var fn_type: HirType = HirType(kind: HirTypeKind.Error, span: span)
+            if val t = sym.type_:
+                fn_type = t
             match fn_type.kind:
                 case HirTypeKind.Function(params, ret, _):
                     if hir_type_has_unresolved_type_param(ret):
@@ -1594,7 +1596,7 @@ impl MirLowering:
         if val base_type = self.find_local_hir_type(base_local.id):
             match base_type.kind:
                 case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
-                    # @workaround bug=stage2_if_val_text_option_transport_tls_end_2026-11-04 reason=frozen stage2 can bind the Option box (not the text payload) for `if val x = dict.get(k)`; result_err_layout_identity then interpolates a garbage text (s4e e0011 _tls_end AV, frame result_err_layout_identity+0x2c). Unwrap with ?? into a bare text first.
+                    # @workaround bug=stage2_if_val_text_option_transport_tls_end_2026-11-04 reason=ROOT-FIXED+STAGE2-GATED: frozen stage2 can bind the Option box (not the text payload) for `if val x = dict.get(k)`; result_err_layout_identity then interpolates a garbage text (s4e e0011 _tls_end AV, frame result_err_layout_identity+0x2c). Unwrap with ?? into a bare text first until Stage 2 is rebuilt.
                     val stable_owner: text = self.array_element_struct_syms.get(base_local.id) ?? ""
                     if stable_owner != "":
                         val stable_identity = result_err_layout_identity(stable_owner)
@@ -3709,11 +3711,10 @@ impl MirLowering:
         var dict_result_type = MirType.i64()
         var resolved_from_local = false
         var resolved_dict_mir_type = MirType.i64()
-        val has_dict_mir_type = if val type_ = self.builder.local_type(base_local):
+        var has_dict_mir_type = false
+        if val type_ = self.builder.local_type(base_local):
             resolved_dict_mir_type = type_
-            true
-        else:
-            false
+            has_dict_mir_type = true
         if has_dict_mir_type:
             if val mir_value_type = self.runtime_dict_value_mir_type(resolved_dict_mir_type):
                 dict_result_type = mir_value_type
@@ -4594,7 +4595,11 @@ impl MirLowering:
                 val o_sym: HirSymbol = o_sym_raw
                 owner_name = o_sym.name
                 val owner_ident = mir_class_identity_raw(self.symbols, owner_sym_id.id)
-                owner_qual = if owner_ident != "": owner_ident elif val omod = o_sym.defining_module: omod.replace("/", ".").replace("\\", ".") + "." + owner_name else: owner_name
+                owner_qual = owner_name
+                if owner_ident != "":
+                    owner_qual = owner_ident
+                elif val omod = o_sym.defining_module:
+                    owner_qual = omod.replace("/", ".").replace("\\", ".") + "." + owner_name
         (owner_qual, owner_name)
 
     fn method_owner_is_erased_dict_class_v1(method_id: SymbolId) -> bool:
@@ -5021,10 +5026,11 @@ impl MirLowering:
                     # native_optional_unwrap_field_index_by_name_collision
                     # _2026-09-12.md.
                     val registered_payload = self.resolved_call_payload_shape(symbol, "Some")
-                    val optional_payload_name = if val registered = registered_payload:
-                        self.declared_struct_layout_key(registered)
+                    var optional_payload_name: text = ""
+                    if val registered = registered_payload:
+                        optional_payload_name = self.declared_struct_layout_key(registered)
                     else:
-                        self.optional_payload_struct_name(optional_inner)
+                        optional_payload_name = self.optional_payload_struct_name(optional_inner)
                     if val registered = registered_payload:
                         val rebound: HirType = self.rebind_record_element_owner(optional_inner, registered)
                         self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Optional(rebound), span: found_type.span), 0, 0)
@@ -5483,16 +5489,15 @@ impl MirLowering:
         var result_type_from_base = false
         var raw_pointer_base = false
         var base_mir_type = MirType.i64()
-        val has_base_mir_type = if val type_ = self.builder.local_type(base_local):
+        var has_base_mir_type = false
+        if val type_ = self.builder.local_type(base_local):
             base_mir_type = type_
             match type_.kind:
                 case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _):
                     raw_pointer_base = true
                 case _:
                     ()
-            true
-        else:
-            false
+            has_base_mir_type = true
         val gpu_raw_pointer = raw_pointer_base and (self.current_gpu_kernel_target == "vulkan" or self.current_gpu_kernel_target == "cuda")
         # Runtime-array bounds are emitted after resolving the element type.
         # A typed `[u8]` read must preserve `rt_bytes_u8_at`'s checked contract
@@ -7790,11 +7795,15 @@ impl MirLowering:
                     val runtime_right_tagged = right_is_any_value or self.is_runtime_value_local(runtime_eq_right.id)
                     if runtime_left_tagged and not runtime_right_tagged:
                         val r_ty = self.local_mir_type_of(runtime_eq_right)
-                        val r_is_u64 = if val rt = r_ty: rt.kind == MirTypeKind.U64 else: false
+                        var r_is_u64 = false
+                        if val rt = r_ty:
+                            r_is_u64 = rt.kind == MirTypeKind.U64
                         runtime_eq_right = if r_is_u64: self.box_u64_runtime_value(runtime_eq_right) else: self.box_runtime_value(runtime_eq_right)
                     elif runtime_right_tagged and not runtime_left_tagged:
                         val l_ty = self.local_mir_type_of(runtime_eq_left)
-                        val l_is_u64 = if val lt = l_ty: lt.kind == MirTypeKind.U64 else: false
+                        var l_is_u64 = false
+                        if val lt = l_ty:
+                            l_is_u64 = lt.kind == MirTypeKind.U64
                         runtime_eq_left = if l_is_u64: self.box_u64_runtime_value(runtime_eq_left) else: self.box_runtime_value(runtime_eq_left)
                     val runtime_eq_func = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_native_eq"),
@@ -10198,7 +10207,9 @@ impl MirLowering:
         val caught_type_tag = b.new_temp(MirType.i64())
         val cleanup_payload = b.new_temp(MirType.i64())
         val cleanup_type_tag = b.new_temp(MirType.i64())
-        val result_type = if val hir_ty = expected_type: self.lower_type(hir_ty) else: MirType.unit()
+        var result_type = MirType.unit()
+        if val hir_ty = expected_type:
+            result_type = self.lower_type(hir_ty)
         val result = b.new_temp(result_type)
         val outer_unwind = b.unwind_target
         val outer_payload = b.unwind_payload
@@ -10528,11 +10539,9 @@ impl MirLowering:
                                 self.enum_variant_is_unit(candidate_owners[0], bname):
                             selected_owner = candidate_owners[0]
                     if selected_owner != "":
-                        val pattern_type: HirType = if val known_type = selected_type:
-                            val concrete_pattern_type: HirType = known_type
-                            concrete_pattern_type
-                        else:
-                            HirType(kind: HirTypeKind.Error, span: arm0.pattern.span)
+                        var pattern_type: HirType = HirType(kind: HirTypeKind.Error, span: arm0.pattern.span)
+                        if val known_type = selected_type:
+                            pattern_type = known_type
                         val enum_pat = HirPattern(
                             kind: HirPatternKind.Enum(
                                 pattern_type,

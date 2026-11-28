@@ -107,10 +107,10 @@ sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision && \
   - `/etc/simple/container`, `/var/lib/simple/container`, and the protected key
     and credential stores under `/srv/simple-fixture`. The key store is left
     empty; `--run-specs` fills it (below).
-  - `/etc/simple/orchestrator-host.env` with all six
-    `SIMPLE_LINUX_PROVISION_ACCEPTANCE_*`, the four `SIMPLE_LINUX_ATTACH_V6_*`,
-    `SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT` and the five
-    `SIMPLE_CARET_SSH_ACCEPTANCE_*` variables.
+  - `/etc/simple-host/host.sdn` (root:root 0644; since 2026-11-28, owner decision: the Host unit carries
+    no `SIMPLE_*` environment) with the six `provision*`, four `attach*`, `serviceInstallFixtureParent`
+    and five `caretSsh*` keys, read by `linux_host_config_v1`. Before that these were `SIMPLE_*`
+    variables in a unit environment file.
 - **Signed fixtures (2026-11-27).** Before the specs, `--run-specs` runs
   `test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl` with the
   given binary. It prints `FIXTURE OK|BLOCKED|ERROR <class>` and ends with

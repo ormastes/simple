@@ -382,6 +382,15 @@ Design: `doc/05_design/compiler/perf/hir_import_replica_residency_v1.md`.
 
 A unit child (`SIMPLE_FILE_WORKER_UNIT=1`) parses only its pick and resolves imports through TLDR summaries. Its root comes from `SIMPLE_FRONTEND_CACHE_DIR`; when that is unset (no `--cache-dir`), it falls back to `SIMPLE_UNIT_TLDR_ROOT`, which `run_unit` sets to `<hir_queue>/frontend`. If the root is empty, the child fails closed with `FILE-UNIT-E-NO-TLDR-ROOT`; it never falls back to the whole closure. Spec: `test/01_unit/compiler/driver/native_file_unit_frontend_root_spec.spl`. Bug: `windows_phase3_baseline_zero_objects_two_pass_forced_2026-11-15`.
 
+## Preclosed alias index (2026-11-28, default ON)
+
+Each per-file unit is a fresh process (`NativeFileUnitProcessInvokerV1.run_unit`), and every one re-ran `driver_preclosed_source_aliases_v1` over the whole frozen selection inside `load_sources`: about 75 s of a 92 s load and more than 10 GiB of growth on the Stage 2 full-CLI build, to append alias rows that are the same for every consumer. The first consumer with a HIR queue now publishes them to `<hir_queue>/preclosed_alias.idx` and later ones rebuild the rows with zero import resolutions (`driver_preclosed_alias_index_v1.spl`). `SIMPLE_PRECLOSED_ALIAS_INDEX=0` rolls back. Look for `[preclosed-alias] index hit|miss` in the build log.
+
+- The stamp binds every row's path, authored path, module name and content hash, plus roots, snapshot root, library mode, cwd and the resolver's env keys. A new hidden resolver input must be added to `_pai_ambient_v1`.
+- To time one unit child alone: capture a live child's `/proc/<pid>/environ` and `cmdline`, drop `SIMPLE_NATIVE_WORKER_CHILD_PARENT_PID`, and re-run it under a memory-capped scope with `SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_PHASE_RSS=1`.
+- `pgrep -f '...--hir-shard'` matches the shell running it; write `[-]-hir-shard`.
+- Still per unit: ~14 s request admission, the ~30 s surface release sweep, and the walk itself for the first consumer. See `doc/08_tracking/bug/unit_child_replays_preclosed_alias_walk_2026-11-28.md`.
+
 ## Per-file unit order index (2026-11-15, default OFF)
 
 Each unit child used to run `worker_admitted_edges_v1` over the whole inventory, one import resolution per source, just to get the deps-first pick order. That order is the same for every unit of a build. With `SIMPLE_UNIT_ORDER_INDEX=1`, the first unit publishes the graph to `<hir_queue>/unit_order.idx` (pid temp file, then atomic rename). Its header records the inventory count and the sha256 of the path list. Later units decode the index, so they do zero resolutions. A missing, stale or garbled index falls back to the full walk. When the switch is off, behaviour is the same as before. Code: `src/compiler/80.driver/driver_unit_order_index_v1.spl`. Cost probe: `worker_admitted_sources_scanned_v1`. Spec: `test/01_unit/compiler/driver/unit_order_index_spec.spl`. Still O(closure), and not addressed yet:

@@ -788,6 +788,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // Error handling
         "rt_function_not_found" => value::rt_function_not_found as *const () as usize,
         "rt_method_not_found" => value::rt_method_not_found as *const () as usize,
+        "rt_value_not_callable" => value::rt_value_not_callable as *const () as usize,
 
         // I/O operations
         "rt_print_str" => value::rt_print_str as *const () as usize,

@@ -118,7 +118,7 @@ high-level `bootstrap-from-scratch.sh` managed phase pipeline is unchanged;
 direct candidate remains unadmitted until its required gates pass. Do not put
 it in `bin/release` or substitute it for an admitted producer.
 
-Selector process contracts: `python3 scripts/build/tests/run-build-test.py`.
+Selector process contracts: `bin/simple test test/01_unit/scripts/run_build_selector_spec.spl`.
 These tests use an argv-reporting process to check routing, precedence, exact
 arguments, PID ownership, failures and rejection. They do not qualify native
 BuildRunner execution. A real direct Cranelift Hello compile/run was also

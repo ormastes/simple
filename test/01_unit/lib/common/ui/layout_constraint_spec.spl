@@ -1,0 +1,188 @@
+"""
+## Purpose and audience
+Purpose: Verify shared ConstraintSpace, MinMaxSizes, EdgeInsets, GapSpacing,
+axis_distribute, BoxModel helpers, and the refactored UI layout engine
+(`common.ui.layout` supporting container padding, gap, unit modes, clamping,
+and remainder invariants).
+Audience: Simple UI and common.layout maintainers.
+"""
+
+# @cover src/lib/common/layout/constraint_space.spl 80%
+# @cover src/lib/common/layout/box_model.spl 80%
+# @cover src/lib/common/ui/layout.spl 80%
+# @req FR-UI-LAYOUT-CONSTRAINT-SPACE
+
+use std.spec.{describe, it, expect}
+use common.layout.box_model.{BoxKind, BoxModel, BlockLayoutBox}
+use common.layout.constraint_space.{
+    LAYOUT_UNIT_CELLS, LAYOUT_UNIT_PIXELS,
+    ConstraintSpace, EdgeInsets, GapSpacing, MinMaxSizes, LayoutBounds,
+    AxisTrackSpec, ui_constraint_space_cells, ui_constraint_space_pixels,
+    clamp_span, axis_distribute
+}
+use common.ui.widget.{WidgetNode, WidgetKind, WidgetRect}
+use common.ui.builder.{panel, button, label}
+use common.ui.layout.{
+    compute_layout, compute_pixel_layout, compute_layout_with_space,
+    layout_vbox, layout_hbox, layout_grid, find_rect, clamp_dim
+}
+
+fn _card_container(id: text, layout_kind: text, kids: [WidgetNode]) -> WidgetNode:
+    var node = WidgetNode.new(id, WidgetKind.Card.to_wire())
+    node = node.set_layout(layout_kind)
+    for k in kids:
+        node = node.add_child(k)
+    node
+
+fn _rect_or_zero(rects: [WidgetRect], id: text) -> WidgetRect:
+    match find_rect(rects, id):
+        case Some(r): r
+        case _: WidgetRect(id: "", x: -1, y: -1, w: 0, h: 0)
+
+describe "common.layout ConstraintSpace & BoxModel primitives":
+
+    it "computes shrink-to-fit inside MinMaxSizes bounds":
+        val mm = MinMaxSizes(min_content: 40, max_content: 160)
+        expect(mm.shrink_to_fit(100)).to_equal(100)
+        expect(mm.shrink_to_fit(240)).to_equal(160)
+        expect(mm.shrink_to_fit(20)).to_equal(40)
+
+    it "enforces min-wins-over-max in clamp_span and non-negative floor":
+        expect(clamp_span(50, 20, 40)).to_equal(40)
+        expect(clamp_span(10, 60, 40)).to_equal(60)
+        expect(clamp_span(-15, 0, -1)).to_equal(0)
+
+    it "computes EdgeInsets bounds and BoxModel inner spans":
+        val inset = EdgeInsets(top: 4, right: 8, bottom: 6, left: 10)
+        val inner = inset.inset_bounds(0, 0, 100, 50)
+        expect(inner.x).to_equal(10)
+        expect(inner.y).to_equal(4)
+        expect(inner.w).to_equal(82)
+        expect(inner.h).to_equal(40)
+        val bm = BoxModel(
+            margin_top: 2.0, margin_right: 2.0, margin_bottom: 2.0, margin_left: 2.0,
+            padding_top: 5.0, padding_right: 10.0, padding_bottom: 5.0, padding_left: 10.0,
+            border_top: 1.0, border_right: 2.0, border_bottom: 1.0, border_left: 2.0
+        )
+        expect(bm.inner_width(100.0)).to_equal(76.0)
+        expect(bm.inner_height(50.0)).to_equal(38.0)
+
+    it "distributes CSS shrink with min-width freeze convergence via axis_distribute":
+        val specs = [
+            AxisTrackSpec.flex_item(0, 180, -1, 200, 1),
+            AxisTrackSpec.flex_item(0, 40, -1, 200, 1)
+        ]
+        val dist = axis_distribute(300, 0, "flex-start", specs, false)
+        expect(dist.slots[0].size).to_equal(180)
+        expect(dist.slots[0].clamped_min).to_equal(true)
+        expect(dist.slots[1].size).to_equal(120)
+        expect(dist.slots[1].offset).to_equal(180)
+        expect(dist.used_span).to_equal(300)
+
+    it "distributes justify space-between and auto margins in axis_distribute":
+        val specs = [
+            AxisTrackSpec.fixed_item(60),
+            AxisTrackSpec.fixed_item(40)
+        ]
+        val sb = axis_distribute(200, 0, "space-between", specs, false)
+        expect(sb.slots[0].offset).to_equal(0)
+        expect(sb.slots[1].offset).to_equal(160)
+
+        val auto_specs = [
+            AxisTrackSpec.fixed_item(60),
+            AxisTrackSpec(
+                fixed_size: 40, flex_grow: 0, flex_shrink: 0,
+                min_size: 0, max_size: -1, intrinsic_max: 0,
+                margin_before: 0, margin_after: 0,
+                margin_before_auto: true, margin_after_auto: false
+            )
+        ]
+        val am = axis_distribute(200, 0, "flex-start", auto_specs, false)
+        expect(am.slots[1].offset).to_equal(160)
+
+describe "common.ui.layout container padding, gap, and unit modes":
+
+    it "applies container padding and gap in hbox while preserving remainder":
+        var a = label("pad_a", "A")
+        var b = label("pad_b", "B")
+        var root = _card_container("pad_hbox", "hbox", [a, b])
+        root = root.set_prop("padding", "10")
+        root = root.set_prop("gap", "8")
+        val rects = compute_layout(root, 0, 0, 100, 40)
+        val ra = _rect_or_zero(rects, "pad_a")
+        val rb = _rect_or_zero(rects, "pad_b")
+        # Inner w = 100 - 20 = 80, gap = 8 => flex avail = 72 => 36 + 36
+        expect(ra.x).to_equal(10)
+        expect(ra.y).to_equal(10)
+        expect(ra.w).to_equal(36)
+        expect(ra.h).to_equal(20)
+        expect(rb.x).to_equal(54)
+        expect(rb.w).to_equal(36)
+        expect(rb.x + rb.w).to_equal(90)
+
+    it "applies container row_gap and directional padding in vbox":
+        var top = label("vb_top", "Top")
+        var bot = label("vb_bot", "Bot")
+        var root = _card_container("pad_vbox", "vbox", [top, bot])
+        root = root.set_prop("padding", "6 10")
+        root = root.set_prop("gap", "5")
+        val rects = compute_layout(root, 0, 0, 100, 60)
+        val r1 = _rect_or_zero(rects, "vb_top")
+        val r2 = _rect_or_zero(rects, "vb_bot")
+        # Inner w = 80, inner h = 48, gap = 5 => flex avail = 43 => 21 + 22
+        expect(r1.x).to_equal(10)
+        expect(r1.y).to_equal(6)
+        expect(r1.w).to_equal(80)
+        expect(r1.h).to_equal(21)
+        expect(r2.y).to_equal(32)
+        expect(r2.h).to_equal(22)
+        expect(r2.y + r2.h).to_equal(54)
+
+    it "applies column_gap and row_gap in layout_grid and fills to far edges":
+        var root = _card_container("gap_grid", "grid", [
+            button("gg0", "0", "a"),
+            button("gg1", "1", "a"),
+            button("gg2", "2", "a"),
+            button("gg3", "3", "a")
+        ])
+        root = root.set_prop("columns", "2")
+        root = root.set_prop("column_gap", "10")
+        root = root.set_prop("row_gap", "6")
+        val rects = compute_layout(root, 0, 0, 101, 57)
+        val r0 = _rect_or_zero(rects, "gg0")
+        val r1 = _rect_or_zero(rects, "gg1")
+        val r2 = _rect_or_zero(rects, "gg2")
+        val r3 = _rect_or_zero(rects, "gg3")
+        # cols: (101 - 10) = 91 => 45, 46; x=0..45, x=55..101
+        # rows: (57 - 6) = 51 => 25, 26; y=0..25, y=31..57
+        expect(r0.w).to_equal(45)
+        expect(r1.x).to_equal(55)
+        expect(r1.x + r1.w).to_equal(101)
+        expect(r2.y).to_equal(31)
+        expect(r3.y + r3.h).to_equal(57)
+
+    it "scales padding and gap cleanly under compute_pixel_layout DPI scale":
+        var a = label("dpi_a", "A")
+        var b = label("dpi_b", "B")
+        var root = _card_container("dpi_hbox", "hbox", [a, b])
+        root = root.set_prop("padding", "5")
+        root = root.set_prop("gap", "10")
+        val rects = compute_pixel_layout(root, 0, 0, 100, 40, 2000)
+        val ra = _rect_or_zero(rects, "dpi_a")
+        val rb = _rect_or_zero(rects, "dpi_b")
+        # Scaled 2x: w=200, pad=10 per side => inner w=180, gap=20 => 80 + 80
+        expect(ra.x).to_equal(10)
+        expect(ra.w).to_equal(80)
+        expect(rb.x).to_equal(110)
+        expect(rb.w).to_equal(80)
+
+    it "separates cell and pixel unit ConstraintSpace via compute_layout_with_space":
+        val titled = panel("mode_panel", "Title", [button("mode_btn", "Go", "go")])
+        val cells_space = ui_constraint_space_cells(160, 80, 1000)
+        val px_space = ui_constraint_space_pixels(160, 80, 1000, 18)
+        expect(cells_space.is_pixel_mode()).to_equal(false)
+        expect(px_space.is_pixel_mode()).to_equal(true)
+        val cell_rects = compute_layout_with_space(titled, 0, 0, cells_space)
+        val px_rects = compute_layout_with_space(titled, 0, 0, px_space)
+        expect(_rect_or_zero(cell_rects, "mode_btn").y).to_equal(1)
+        expect(_rect_or_zero(px_rects, "mode_btn").y).to_equal(19)

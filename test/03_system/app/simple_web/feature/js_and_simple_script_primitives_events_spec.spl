@@ -1,0 +1,444 @@
+# @cover src/lib/nogc_sync_mut/js/engine/parser.spl 80%
+# @cover src/lib/nogc_sync_mut/js/engine/interpreter_types.spl 80%
+# @cover src/lib/nogc_sync_mut/js/engine/interpreter_native.spl 80%
+# @cover src/lib/nogc_sync_mut/js/engine/vm_object_store.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/script/simple_script_vm.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/web_multi_script_engine.spl 80%
+# @cover src/lib/gc_async_mut/web/browser_session_runtime.spl 80%
+# Purpose and audience: executable SPipe specification verifying JavaScript (<script>) and Simple Script (<script type="text/simple">) primitives, events, and rendered pixel parity.
+# @req REQ-WEB-JS-SS-PRIM-EVENTS-001
+
+# @tag: system, rendering, web, script, js, simple_script, events
+# @req REQ-WEB-JS-SS-PRIM-EVENTS-001
+# @evidence-display: links
+
+"""# Web Engine: JS Engine & Simple Script Primitives + Events Parity
+
+Verifies parity between standard JavaScript (`<script>`) and Simple Script
+(`<script type="text/simple">`) across two dimensions:
+
+1. **Language & Builtin Primitives Matrix:**
+   - Int/float arithmetic (`2.6 * 4`, `%`), scientific notation (`1e-3`, `2.5e-2`),
+     compound assignments (`+=`, `-=`, `*=`), `++`/`--` (JS), `Math.round`/`floor`/`ceil`/`clamp`,
+     and `parseFloat('2.5e-2')`.
+   - Strings: concatenation, `trim`, `slice`, `substring`, `indexOf`, `split`,
+     and string/template interpolation.
+   - Booleans & comparisons (`===`, `!==`, `==`, `!=`, `&&`/`and`, `||`/`or`, `!`/`not`).
+   - Arrays/lists: literals, `push`, `length`/`len`, indexing read/write, and `for`/`while` loops.
+   - Objects/maps & closures/callbacks (`function(v)` and `fn(v):` with lexical capture).
+
+2. **Interactive DOM Events & Pixel Rendering Parity:**
+   - Button `click` updating counter text, badge text, and inline style.
+   - Dropdown `<select>` `change` updating selected value readout and badge.
+   - Container `wheel` dispatch with `preventDefault()`, `scrollTop`, and synced element scroll offsets.
+   - Floating window `mousedown` -> `mousemove` -> `mouseup` drag updating position styles and console logs cleanly across repeated GC cycles.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.browser_js_host.{js_runtime_with_default_logger, js_to_string}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, DomNodeRoute}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_by_id, be_dom_get_text_content, be_dom_get_attr
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
+use std.gc_async_mut.gpu.browser_engine.script.simple_script_vm.{SimpleScriptDomVm}
+use std.gc_async_mut.gpu.browser_engine.web_multi_script_engine.{web_multi_script_run_and_render_html}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+
+fn _route_for(session: BrowserSession, id_val: text) -> DomNodeRoute:
+    val gen = session.document_generation()
+    val node = be_dom_find_by_id(session.current_dom, id_val).unwrap()
+    DomNodeRoute(generation: gen, node_id: node.node_id)
+
+fn _text_of(session: BrowserSession, id_val: text) -> text:
+    be_dom_get_text_content(be_dom_find_by_id(session.current_dom, id_val).unwrap())
+
+fn _style_of(session: BrowserSession, id_val: text) -> text:
+    be_dom_get_attr(be_dom_find_by_id(session.current_dom, id_val).unwrap(), "style")
+
+fn _dom_text(root: BeDomNode, id_val: text) -> text:
+    be_dom_get_text_content(be_dom_find_by_id(root, id_val).unwrap())
+
+fn _count_pixel_diffs(a: [u32], b: [u32]) -> i64:
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var diffs: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        if a[i] != b[i]:
+            diffs = diffs + 1
+        i = i + 1
+    diffs
+
+fn _eval_js_text(code: text) -> text:
+    var rt = js_runtime_with_default_logger("prim-events-spec")
+    match rt.eval(code):
+        Ok(v): js_to_string(v)
+        Err(e): "ERR:" + e.message
+
+fn _build_primitives_html(use_simple_script: bool) -> text:
+    val style_block =
+        "<style>" +
+        "* { box-sizing: border-box; }" +
+        "body { margin: 0; padding: 12px; background: #0f172a; color: #f8fafc; font-size: 13px; }" +
+        ".card { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 8px; margin-bottom: 8px; }" +
+        ".badge { padding: 3px 8px; border-radius: 4px; background: #334155; color: #fff; }" +
+        ".ok { background: #16a34a; }" +
+        "</style>"
+    val body_html =
+        "<div class='card'><span>Primitives</span> <span id='status-badge' class='badge'>WAIT</span></div>" +
+        "<div class='card' id='num-out'>-</div>" +
+        "<div class='card' id='str-out'>-</div>" +
+        "<div class='card' id='bool-out'>-</div>" +
+        "<div class='card' id='arr-out'>-</div>" +
+        "<div class='card' id='obj-out'>-</div>"
+    val script_block = if use_simple_script:
+        "<script type='text/simple'>\n" +
+        "var acc = 10\n" +
+        "acc += 5\n" +
+        "acc -= 2\n" +
+        "acc *= 3\n" +
+        "val num_str = \"{{2.6 * 4}} | {{1e-3}} | {{2.5e-2}} | rem={{17 % 5}} | acc={{acc}} | {{Math.round(2.6)}},{{Math.floor(2.9)}},{{Math.ceil(2.1)}},{{Math.clamp(120, 0, 100)}}\"\n" +
+        "val raw = \"  hello,world,web  \".trim()\n" +
+        "val str_out = \"{{raw.slice(0, 5)}}:{{raw.substring(6, 11)}}:{{raw.indexOf('world')}}:{{raw.split(',').join('|')}}\"\n" +
+        "val c1 = (2.6 * 4 == 10.4) and (1 != 2) and (not false)\n" +
+        "val c2 = (1 === 1) && !false && (false || (3 === 3))\n" +
+        "val bool_out = \"cmp1={{c1}} | cmp2={{c2}}\"\n" +
+        "var arr = [10, 20]\n" +
+        "arr.push(30)\n" +
+        "arr[1] = 25\n" +
+        "var tot = 0\n" +
+        "for x in arr:\n" +
+        "    tot += x\n" +
+        "var wi = 0\n" +
+        "while wi < 2:\n" +
+        "    tot += 5\n" +
+        "    wi += 1\n" +
+        "val arr_out = \"len={{arr.len()}} | items={{arr.join(',')}} | tot={{tot}}\"\n" +
+        "val obj = {{label: \"box\", n: 7}}\n" +
+        "obj.n += 3\n" +
+        "fn apply_cb(x, cb):\n" +
+        "    return cb(x) + obj.n\n" +
+        "val cbv = apply_cb(4, fn(w): w * 5)\n" +
+        "val obj_out = \"tag={{obj.label}} | n={{obj.n}} | cb={{cbv}}\"\n" +
+        "document.getElementById(\"num-out\").textContent = num_str\n" +
+        "document.getElementById(\"str-out\").textContent = str_out\n" +
+        "document.getElementById(\"bool-out\").textContent = bool_out\n" +
+        "document.getElementById(\"arr-out\").textContent = arr_out\n" +
+        "document.getElementById(\"obj-out\").textContent = obj_out\n" +
+        "val badge = document.getElementById(\"status-badge\")\n" +
+        "badge.textContent = \"PASS\"\n" +
+        "badge.className = \"badge ok\"\n" +
+        "console.log(\"num:\" + num_str)\n" +
+        "console.log(\"obj:\" + obj_out)\n" +
+        "</script>"
+    else:
+        "<script>" +
+        "var acc = 10; acc += 5; acc -= 2; acc *= 3;" +
+        "var nums = [Math.round(2.6), Math.floor(2.9), Math.ceil(2.1), Math.clamp(120, 0, 100)];" +
+        "var num_str = (2.6 * 4) + ' | ' + 1e-3 + ' | ' + 2.5e-2 + ' | rem=' + (17 % 5) + ' | acc=' + acc + ' | ' + nums.join(',');" +
+        "var raw = '  hello,world,web  '.trim();" +
+        "var str_out = raw.slice(0, 5) + ':' + raw.substring(6, 11) + ':' + raw.indexOf('world') + ':' + raw.split(',').join('|');" +
+        "var c1 = (2.6 * 4 === 10.4) && (1 !== 2) && !false;" +
+        "var c2 = false || (3 === 3);" +
+        "var bool_out = 'cmp1=' + c1 + ' | cmp2=' + c2;" +
+        "var arr = [10, 20]; arr.push(30); arr[1] = 25;" +
+        "var tot = 0; for (var i = 0; i < arr.length; i++) { tot += arr[i]; }" +
+        "var wi = 0; while (wi < 2) { tot += 5; wi++; }" +
+        "var arr_out = 'len=' + arr.length + ' | items=' + arr.join(',') + ' | tot=' + tot;" +
+        "var obj = { label: 'box', n: 7 }; obj.n += 3;" +
+        "function apply_cb(x, cb) { return cb(x) + obj.n; }" +
+        "var cbv = apply_cb(4, function(w) { return w * 5; });" +
+        "var obj_out = 'tag=' + obj.label + ' | n=' + obj.n + ' | cb=' + cbv;" +
+        "document.getElementById('num-out').textContent = num_str;" +
+        "document.getElementById('str-out').textContent = str_out;" +
+        "document.getElementById('bool-out').textContent = bool_out;" +
+        "document.getElementById('arr-out').textContent = arr_out;" +
+        "document.getElementById('obj-out').textContent = obj_out;" +
+        "var badge = document.getElementById('status-badge');" +
+        "badge.textContent = 'PASS';" +
+        "badge.className = 'badge ok';" +
+        "</script>"
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>" + style_block + "</head><body>" + body_html + script_block + "</body></html>"
+
+fn _build_dual_events_html() -> text:
+    val style_block =
+        "<style>" +
+        "* { box-sizing: border-box; }" +
+        "body { margin: 0; width: 240px; height: 180px; background: #0f172a; color: #f8fafc; font-size: 11px; }" +
+        ".bar { padding: 4px 6px; background: #1e293b; border-bottom: 1px solid #334155; display: flex; gap: 4px; align-items: center; }" +
+        ".pill { padding: 2px 5px; border-radius: 3px; background: #334155; color: #e2e8f0; }" +
+        ".scroll-box { width: 100px; height: 48px; overflow-y: auto; border: 1px solid #475569; background: #1e293b; }" +
+        ".srow { height: 24px; line-height: 24px; padding: 0 4px; color: #f8fafc; }" +
+        ".r1 { background: #1e293b; } .r2 { background: #0369a1; } .r3 { background: #0f766e; } .r4 { background: #7c3aed; }" +
+        "#js-float-win { position: absolute; left: 10px; top: 118px; width: 96px; height: 48px; background: #1e293b; border: 2px solid #38bdf8; }" +
+        "#ss-float-win { position: absolute; left: 130px; top: 118px; width: 96px; height: 48px; background: #1e293b; border: 2px solid #22c55e; }" +
+        ".fbar { height: 18px; background: #0284c7; color: #fff; padding: 1px 4px; }" +
+        "</style>"
+    val dom_block =
+        "<div class='bar'>" +
+        "<button id='js-btn'>JS</button><span id='js-btn-out' class='pill'>0</span>" +
+        "<select id='js-sel'><option value='alpha' selected>alpha</option><option value='beta'>beta</option></select>" +
+        "<span id='js-sel-out' class='pill'>alpha</span>" +
+        "<span id='js-badge' class='pill'>alpha:0</span>" +
+        "</div>" +
+        "<div class='bar'>" +
+        "<button id='ss-btn'>SS</button><span id='ss-btn-out' class='pill'>0</span>" +
+        "<select id='ss-sel'><option value='alpha' selected>alpha</option><option value='beta'>beta</option></select>" +
+        "<span id='ss-sel-out' class='pill'>alpha</span>" +
+        "<span id='ss-badge' class='pill'>alpha:0</span>" +
+        "</div>" +
+        "<div style='display:flex;gap:8px;padding:4px 6px;'>" +
+        "<div><div id='js-scroll' class='scroll-box'><div class='srow r1'>JR1</div><div class='srow r2'>JR2</div><div class='srow r3'>JR3</div><div class='srow r4'>JR4</div></div><span id='js-scroll-out'>0</span></div>" +
+        "<div><div id='ss-scroll' class='scroll-box'><div class='srow r1'>SR1</div><div class='srow r2'>SR2</div><div class='srow r3'>SR3</div><div class='srow r4'>SR4</div></div><span id='ss-scroll-out'>0</span></div>" +
+        "</div>" +
+        "<div id='js-float-win'><div id='js-float-bar' class='fbar'>JS Win</div><div id='js-win-pos'>10,118</div></div>" +
+        "<div id='ss-float-win'><div id='ss-float-bar' class='fbar'>SS Win</div><div id='ss-win-pos'>130,118</div></div>"
+    val js_block =
+        "<script>" +
+        "var jn = 0; var jselVal = 'alpha'; var jbadge = document.getElementById('js-badge');" +
+        "document.getElementById('js-btn').addEventListener('click', function() { jn++; document.getElementById('js-btn-out').textContent = String(jn); jbadge.textContent = jselVal + ':' + jn; jbadge.style.backgroundColor = '#16a34a'; console.log('js:click:' + jn); });" +
+        "var jsel = document.getElementById('js-sel'); jsel.addEventListener('change', function() { jselVal = jsel.value; document.getElementById('js-sel-out').textContent = jselVal; jbadge.textContent = jselVal + ':' + jn; console.log('js:change:' + jselVal); });" +
+        "var jsb = document.getElementById('js-scroll'); jsb.addEventListener('wheel', function(e) { e.preventDefault(); jsb.scrollTop = jsb.scrollTop + e.deltaY; document.getElementById('js-scroll-out').textContent = String(jsb.scrollTop); console.log('js:wheel:' + jsb.scrollTop); });" +
+        "var jfw = document.getElementById('js-float-win'); var jbar = document.getElementById('js-float-bar'); var jdrag = false; var jsx = 0; var jsy = 0; var jbx = 10; var jby = 118;" +
+        "jbar.addEventListener('mousedown', function(e) { jdrag = true; jsx = e.clientX; jsy = e.clientY; console.log('js:down:' + jsx + ',' + jsy); });" +
+        "document.addEventListener('mousemove', function(e) { if (jdrag) { var nx = jbx + (e.clientX - jsx); var ny = jby + (e.clientY - jsy); jfw.style.left = nx + 'px'; jfw.style.top = ny + 'px'; document.getElementById('js-win-pos').textContent = nx + ',' + ny; } });" +
+        "document.addEventListener('mouseup', function(e) { if (jdrag) { jdrag = false; jbx = jbx + (e.clientX - jsx); jby = jby + (e.clientY - jsy); console.log('js:up:' + jbx + ',' + jby); } });" +
+        "</script>"
+    val ss_block =
+        "<script type='text/simple'>\n" +
+        "var sn = 0\n" +
+        "var ssel_val = \"alpha\"\n" +
+        "val sbadge = document.getElementById(\"ss-badge\")\n" +
+        "document.getElementById(\"ss-btn\").addEventListener(\"click\", fn(ev):\n" +
+        "    sn += 1\n" +
+        "    document.getElementById(\"ss-btn-out\").textContent = \"{{sn}}\"\n" +
+        "    sbadge.textContent = \"{{ssel_val}}:{{sn}}\"\n" +
+        "    sbadge.style.backgroundColor = \"#16a34a\"\n" +
+        "    console.log(\"ss:click:{{sn}}\")\n" +
+        ")\n" +
+        "val ssel = document.getElementById(\"ss-sel\")\n" +
+        "ssel.addEventListener(\"change\", fn(ev):\n" +
+        "    ssel_val = ssel.value\n" +
+        "    document.getElementById(\"ss-sel-out\").textContent = ssel_val\n" +
+        "    sbadge.textContent = \"{{ssel_val}}:{{sn}}\"\n" +
+        "    console.log(\"ss:change:{{ssel_val}}\")\n" +
+        ")\n" +
+        "val ssb = document.getElementById(\"ss-scroll\")\n" +
+        "ssb.addEventListener(\"wheel\", fn(ev):\n" +
+        "    ev.preventDefault()\n" +
+        "    ssb.scrollTop = ssb.scrollTop + ev.deltaY\n" +
+        "    document.getElementById(\"ss-scroll-out\").textContent = \"{{ssb.scrollTop}}\"\n" +
+        "    console.log(\"ss:wheel:{{ssb.scrollTop}}\")\n" +
+        ")\n" +
+        "val sfw = document.getElementById(\"ss-float-win\")\n" +
+        "val sbar = document.getElementById(\"ss-float-bar\")\n" +
+        "var sdrag = false\n" +
+        "var ssx = 0\n" +
+        "var ssy = 0\n" +
+        "var sbx = 130\n" +
+        "var sby = 118\n" +
+        "sbar.addEventListener(\"mousedown\", fn(ev):\n" +
+        "    sdrag = true\n" +
+        "    ssx = ev.clientX\n" +
+        "    ssy = ev.clientY\n" +
+        "    console.log(\"ss:down:{{ssx}},{{ssy}}\")\n" +
+        ")\n" +
+        "document.addEventListener(\"mousemove\", fn(ev):\n" +
+        "    if sdrag:\n" +
+        "        val nx = sbx + (ev.clientX - ssx)\n" +
+        "        val ny = sby + (ev.clientY - ssy)\n" +
+        "        sfw.style.left = \"{{nx}}px\"\n" +
+        "        sfw.style.top = \"{{ny}}px\"\n" +
+        "        document.getElementById(\"ss-win-pos\").textContent = \"{{nx}},{{ny}}\"\n" +
+        ")\n" +
+        "document.addEventListener(\"mouseup\", fn(ev):\n" +
+        "    if sdrag:\n" +
+        "        sdrag = false\n" +
+        "        sbx = sbx + (ev.clientX - ssx)\n" +
+        "        sby = sby + (ev.clientY - ssy)\n" +
+        "        console.log(\"ss:up:{{sbx}},{{sby}}\")\n" +
+        ")\n" +
+        "</script>"
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>" + style_block + "</head><body>" + dom_block + js_block + ss_block + "</body></html>"
+
+describe "JS Engine & Simple Script Primitives + Events Parity":
+    # @manual scenario show
+    it "verifies JS and Simple Script primitive numbers, strings, booleans, arrays, objects, and closures":
+        # @req REQ-WEB-JS-SS-PRIM-EVENTS-001
+        step("Evaluate full JS primitives matrix via JsRuntime")
+        val interp_open = "$" + "{"
+        val js_code =
+            "var a = 2.6 * 4; var b = 1e-3; var c = 2.5e-2; var m = 17 % 5;" +
+            "var acc = 10; acc += 5; acc -= 2; acc *= 3;" +
+            "var cnt = 0; cnt++; ++cnt;" +
+            "var nums = [Math.round(2.6), Math.floor(2.9), Math.ceil(2.1), Math.clamp(120, 0, 100)];" +
+            "var pf = parseFloat('2.5e-2');" +
+            "var s = '  hello,world,js  '.trim();" +
+            "var label = `v=" + interp_open + "a}|pf=" + interp_open + "pf}`;" +
+            "var b1 = (2.6 * 4 === 10.4) && (1 !== 2) && !false;" +
+            "var b2 = false || (3 === 3);" +
+            "var arr = [10, 20]; arr.push(30); arr[1] = 25;" +
+            "var tot = 0; for (var k = 0; k < arr.length; k++) { tot += arr[k]; }" +
+            "var wi = 0; while (wi < 2) { tot += 5; wi++; }" +
+            "var obj = { label: 'box', n: 7 }; obj.n += 3;" +
+            "function apply_cb(x, cb) { return cb(x) + obj.n; }" +
+            "var res_cb = apply_cb(4, function(v) { return v * 5; });" +
+            "function make_mul(k) { return function(z) { return z * k; }; }" +
+            "var times3 = make_mul(3); var res_clos = times3(7);" +
+            "[a, b, c, m, acc, cnt, nums.join(','), pf, s.slice(0, 5), s.substring(6, 11), s.indexOf('world'), s.split(',').join('|'), label, b1, b2, arr.length, tot, res_cb, res_clos].join(' ; ');"
+        val js_out = _eval_js_text(js_code)
+        expect(js_out).to_equal("10.4 ; 0.001 ; 0.025 ; 2 ; 39 ; 2 ; 3,2,3,100 ; 0.025 ; hello ; world ; 6 ; hello|world|js ; v=10.4|pf=0.025 ; true ; true ; 3 ; 75 ; 30 ; 21")
+
+        step("Evaluate matching Simple Script primitives matrix via SimpleScriptDomVm")
+        var vm = SimpleScriptDomVm.new(ConsoleBuffer.new())
+        vm.install_document(BeDomNode.element("body"), true)
+        val ss_code =
+            "var a = 2.6 * 4\n" +
+            "var b = 1e-3\n" +
+            "var c = 2.5e-2\n" +
+            "var m = 17 % 5\n" +
+            "var acc = 10\n" +
+            "acc += 5\n" +
+            "acc -= 2\n" +
+            "acc *= 3\n" +
+            "val nums = [Math.round(2.6), Math.floor(2.9), Math.ceil(2.1), Math.clamp(120, 0, 100)]\n" +
+            "val pf = parseFloat(\"2.5e-2\")\n" +
+            "val s = \"  hello,world,ss  \".trim()\n" +
+            "val sl = s.slice(0, 5)\n" +
+            "val sub = s.substring(6, 11)\n" +
+            "val idx = s.indexOf(\"world\")\n" +
+            "val parts = s.split(\",\")\n" +
+            "val label = \"v={{a}}|pf={{pf}}\"\n" +
+            "val b1 = (2.6 * 4 == 10.4) and (1 != 2) and (not false)\n" +
+            "val b2 = (1 === 1) && !false && (false || (3 === 3))\n" +
+            "var arr = [10, 20]\n" +
+            "arr.push(30)\n" +
+            "arr[1] = 25\n" +
+            "var tot = 0\n" +
+            "for x in arr:\n" +
+            "    tot += x\n" +
+            "var wi = 0\n" +
+            "while wi < 2:\n" +
+            "    tot += 5\n" +
+            "    wi += 1\n" +
+            "val obj = {{label: \"box\", n: 7}}\n" +
+            "obj.n += 3\n" +
+            "fn apply_cb(x, cb):\n" +
+            "    return cb(x) + obj.n\n" +
+            "val res_cb = apply_cb(4, fn(w): w * 5)\n" +
+            "var make_mul = fn(k):\n" +
+            "    return fn(z): z * k\n" +
+            "val times3 = make_mul(3)\n" +
+            "val res_clos = times3(7)\n" +
+            "console.log(\"{{a}} ; {{b}} ; {{c}} ; {{m}} ; {{acc}} ; {{nums.join(',')}} ; {{pf}} ; {{sl}} ; {{sub}} ; {{idx}} ; {{parts.join('|')}} ; {{label}} ; {{b1}} ; {{b2}} ; {{arr.len()}} ; {{tot}} ; {{res_cb}} ; {{res_clos}}\")\n"
+        val ss_ok = vm.execute(ss_code)
+        expect(ss_ok).to_equal(true)
+        expect(vm.error).to_equal("")
+        expect(vm.logs.len()).to_equal(1)
+        expect(vm.logs[0]).to_equal("10.4 ; 0.001 ; 0.025 ; 2 ; 39 ; 3,2,3,100 ; 0.025 ; hello ; world ; 6 ; hello|world|ss ; v=10.4|pf=0.025 ; true ; true ; 3 ; 75 ; 30 ; 21")
+
+    # @manual scenario show
+    it "renders JS and Simple Script primitive pages to identical DOM state and pixels via web_multi_script_run_and_render_html":
+        # @req REQ-WEB-JS-SS-PRIM-EVENTS-001
+        step("Run web_multi_script_run_and_render_html for JS and Simple Script primitive specimen HTML")
+        val js_res = web_multi_script_run_and_render_html(_build_primitives_html(false), 160, 120, [])
+        val ss_res = web_multi_script_run_and_render_html(_build_primitives_html(true), 160, 120, [])
+        expect(js_res.ok).to_equal(true)
+        expect(ss_res.ok).to_equal(true)
+        expect(js_res.js_scripts_run).to_equal(1)
+        expect(ss_res.simple_scripts_run).to_equal(1)
+
+        step("Verify identical mutated DOM text and badge across JS and Simple Script")
+        val js_dom = html_tree_builder_build(js_res.mutated_html)
+        val ss_dom = html_tree_builder_build(ss_res.mutated_html)
+        expect(_dom_text(js_dom, "status-badge")).to_equal("PASS")
+        expect(_dom_text(ss_dom, "status-badge")).to_equal("PASS")
+        expect(_dom_text(js_dom, "num-out")).to_equal("10.4 | 0.001 | 0.025 | rem=2 | acc=39 | 3,2,3,100")
+        expect(_dom_text(ss_dom, "num-out")).to_equal(_dom_text(js_dom, "num-out"))
+        expect(_dom_text(js_dom, "str-out")).to_equal("hello:world:6:hello|world|web")
+        expect(_dom_text(ss_dom, "str-out")).to_equal(_dom_text(js_dom, "str-out"))
+        expect(_dom_text(js_dom, "bool-out")).to_equal("cmp1=true | cmp2=true")
+        expect(_dom_text(ss_dom, "bool-out")).to_equal(_dom_text(js_dom, "bool-out"))
+        expect(_dom_text(js_dom, "arr-out")).to_equal("len=3 | items=10,25,30 | tot=75")
+        expect(_dom_text(ss_dom, "arr-out")).to_equal(_dom_text(js_dom, "arr-out"))
+        expect(_dom_text(js_dom, "obj-out")).to_equal("tag=box | n=10 | cb=30")
+        expect(_dom_text(ss_dom, "obj-out")).to_equal(_dom_text(js_dom, "obj-out"))
+        expect(ss_res.logs).to_contain("num:10.4 | 0.001 | 0.025 | rem=2 | acc=39 | 3,2,3,100")
+
+        step("Verify identical rasterized 160x120 pixel buffers between JS and Simple Script")
+        expect(js_res.pixels.len()).to_equal(160 * 120)
+        expect(ss_res.pixels.len()).to_equal(160 * 120)
+        expect(_count_pixel_diffs(js_res.pixels, ss_res.pixels)).to_equal(0)
+
+    # @manual scenario show
+    it "dispatches click, select change, wheel scroll, and floating window drag in BrowserSession with pixel updates":
+        # @req REQ-WEB-JS-SS-PRIM-EVENTS-001
+        step("Open interactive dual JS + Simple Script page in BrowserSession and capture baseline pixels")
+        val dual_html = _build_dual_events_html()
+        var session = BrowserSession.new()
+        expect(session.open_html("https://example.com/dual_events.html", dual_html).is_ok()).to_equal(true)
+        val before = session.render_to_pixels(160, 120)
+        expect(before.pixel_data.len()).to_equal(160 * 120)
+
+        step("Dispatch click, select change, wheel scroll, and window drag on JS widgets")
+        val _ = session.dispatch_dom_event_route(_route_for(session, "js-btn"), "click", true, true)
+        val _ = session.dispatch_dom_event_route(_route_for(session, "js-btn"), "click", true, true)
+        val _ = session.set_dom_select_value_route(_route_for(session, "js-sel"), "beta")
+        val _ = session.dispatch_dom_wheel_event_at(_route_for(session, "js-scroll"), 30, 80, 15, 15, 0.0, 48.0)
+        val jbar = _route_for(session, "js-float-bar")
+        val _ = session.dispatch_dom_primary_pointer_down_at(jbar, 30, 126, 20, 8)
+        val _ = session.dispatch_dom_pointer_move_at(jbar, 50, 146, 40, 28, 1)
+        val _ = session.dispatch_dom_primary_pointer_up_at(jbar, 50, 146, 40, 28, false, false)
+
+        step("Dispatch identical click, select change, wheel scroll, and window drag on Simple Script widgets")
+        val _ = session.dispatch_dom_event_route(_route_for(session, "ss-btn"), "click", true, true)
+        val _ = session.dispatch_dom_event_route(_route_for(session, "ss-btn"), "click", true, true)
+        val _ = session.set_dom_select_value_route(_route_for(session, "ss-sel"), "beta")
+        val _ = session.dispatch_dom_wheel_event_at(_route_for(session, "ss-scroll"), 140, 80, 15, 15, 0.0, 48.0)
+        val sbar = _route_for(session, "ss-float-bar")
+        val _ = session.dispatch_dom_primary_pointer_down_at(sbar, 150, 126, 20, 8)
+        val _ = session.dispatch_dom_pointer_move_at(sbar, 170, 146, 40, 28, 1)
+        val _ = session.dispatch_dom_primary_pointer_up_at(sbar, 170, 146, 40, 28, false, false)
+
+        step("Verify matching JS and Simple Script post-event DOM state, scroll offsets, and clean console logs")
+        expect(_text_of(session, "js-btn-out")).to_equal("2")
+        expect(_text_of(session, "ss-btn-out")).to_equal("2")
+        expect(_text_of(session, "js-sel-out")).to_equal("beta")
+        expect(_text_of(session, "ss-sel-out")).to_equal("beta")
+        expect(_text_of(session, "js-badge")).to_equal("beta:2")
+        expect(_text_of(session, "ss-badge")).to_equal("beta:2")
+        expect(_style_of(session, "js-badge")).to_contain("#16a34a")
+        expect(_style_of(session, "ss-badge")).to_contain("#16a34a")
+        expect(_text_of(session, "js-scroll-out")).to_equal("48")
+        expect(_text_of(session, "ss-scroll-out")).to_equal("48")
+        expect(_text_of(session, "js-win-pos")).to_equal("30,138")
+        expect(_text_of(session, "ss-win-pos")).to_equal("150,138")
+        expect(_style_of(session, "js-float-win")).to_contain("left:30px")
+        expect(_style_of(session, "js-float-win")).to_contain("top:138px")
+        expect(_style_of(session, "ss-float-win")).to_contain("left:150px")
+        expect(_style_of(session, "ss-float-win")).to_contain("top:138px")
+        expect(session.element_scroll_ids).to_contain("js-scroll")
+        expect(session.element_scroll_ids).to_contain("ss-scroll")
+
+        val logs = session.console_logs()
+        expect(logs).to_contain("js:click:1")
+        expect(logs).to_contain("js:click:2")
+        expect(logs).to_contain("js:change:beta")
+        expect(logs).to_contain("js:wheel:48")
+        expect(logs).to_contain("js:down:30,126")
+        expect(logs).to_contain("js:up:30,138")
+        expect(logs).to_contain("ss:click:1")
+        expect(logs).to_contain("ss:click:2")
+        expect(logs).to_contain("ss:change:beta")
+        expect(logs).to_contain("ss:wheel:48")
+        expect(logs).to_contain("ss:down:150,126")
+        expect(logs).to_contain("ss:up:150,138")
+
+        step("Verify post-event pixel render reflects scrolled rows and dragged floating windows")
+        val after = session.render_to_pixels(160, 120)
+        expect(after.pixel_data.len()).to_equal(160 * 120)
+        expect(_count_pixel_diffs(before.pixel_data, after.pixel_data)).to_be_greater_than(200)

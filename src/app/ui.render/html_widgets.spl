@@ -89,7 +89,7 @@ fn render_html_widget(node: WidgetNode, state: UIState) -> text:
         "input" =>
             return render_html_input(node, focus_class)
         "tabs" =>
-            return render_html_tabs(node, focus_class)
+            return render_html_tabs(node, state, focus_class)
         "button" =>
             return render_html_button(node, focus_class)
         "checkbox" =>
@@ -178,7 +178,7 @@ fn render_html_tree_node(node: WidgetNode, state: UIState) -> text:
     var toggle_html = ""
     if has_children:
         val toggle_marker = if expanded == "true": "\u{25bc}" else: "\u{25b6}"
-        toggle_html = "<span class=\"tree-toggle\" data-action=\"toggle_{node.id}\">{toggle_marker}</span>"
+        toggle_html = "<span class=\"tree-toggle\" id=\"ui_action_toggle_{node.id}\" data-action=\"toggle_{node.id}\">{toggle_marker}</span>"
 
     var children_html = ""
     if has_children and expanded == "true":
@@ -194,11 +194,13 @@ fn render_html_vbox(node: WidgetNode, state: UIState, focus_class: text) -> text
     for child in node.children():
         children_html = "{children_html}{render_html_widget(child, state)}"
     val flex_prop = node.get_prop("flex")
-    var style = "display: flex; flex-direction: column;"
+    var style = "display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0;"
+    if node.id == "root":
+        style = "{style} overflow: hidden;"
     if flex_prop != "":
         style = "{style} flex: {flex_prop};"
     else:
-        style = "{style} flex: 1; min-height: 0;"
+        style = "{style} flex: 1;"
     return "<div class=\"layout-vbox{focus_class}\" id=\"{node.id}\" style=\"{style}\">{children_html}</div>"
 
 fn render_html_hbox(node: WidgetNode, state: UIState, focus_class: text) -> text:
@@ -206,11 +208,13 @@ fn render_html_hbox(node: WidgetNode, state: UIState, focus_class: text) -> text
     for child in node.children():
         children_html = "{children_html}{render_html_widget(child, state)}"
     val flex_prop = node.get_prop("flex")
-    var style = "display: flex; flex-direction: row;"
+    var style = "display: flex; flex-direction: row; gap: 12px; min-width: 0; min-height: 0;"
+    if flex_prop != "" or node.id == "main_hbox":
+        style = "{style} overflow: hidden;"
     if flex_prop != "":
         style = "{style} flex: {flex_prop};"
     else:
-        style = "{style} flex: 1; min-height: 0;"
+        style = "{style} flex: 1;"
     return "<div class=\"layout-hbox{focus_class}\" id=\"{node.id}\" style=\"{style}\">{children_html}</div>"
 
 fn render_html_panel(node: WidgetNode, state: UIState, focus_class: text) -> text:
@@ -226,13 +230,22 @@ fn render_html_panel(node: WidgetNode, state: UIState, focus_class: text) -> tex
     if flex_prop != "":
         style = "flex: {flex_prop};"
     elif width_prop != "":
-        style = "width: {width_prop}px; flex: none;"
+        val w = html_int_or(width_prop, 0)
+        if w > 0 and w <= 80:
+            val w_px = w * 8
+            val min_w_px = w * 7
+            style = "width: {w_px}px; min-width: {min_w_px}px; flex: none;"
+        else:
+            style = "width: {width_prop}px; flex: none;"
     else:
         style = "flex: 1;"
     if height_prop != "":
         style = "{style} height: {height_prop}em;"
 
-    val layout_class = if node.layout_name() == "hbox": "layout-hbox" elif node.layout_name() == "grid": "layout-grid" else: "layout-vbox"
+    val layout_name = node.layout_name()
+    val layout_class = if layout_name == "hbox": "layout-hbox" elif layout_name == "grid": "layout-grid" else: "layout-vbox"
+    if layout_name != "grid":
+        style = "gap: 12px; min-width: 0; min-height: 0; {style}"
 
     # Omit empty title header for layout-only containers
     val title_html = if title != "": "<div class=\"panel-title\">{title}</div>" else: ""
@@ -257,7 +270,7 @@ fn render_html_list(node: WidgetNode, state: UIState, focus_class: text) -> text
         val item_class = if idx == sel_idx: "list-item selected" else: "list-item"
         # Include prefix indicator matching TUI's "> " for selected items
         val prefix = if idx == sel_idx: "\u{25b8} " else: ""
-        items_html = "{items_html}<li class=\"{item_class}\" data-index=\"{idx}\">{prefix}{label}</li>"
+        items_html = "{items_html}<li class=\"{item_class}\" id=\"ui_action_select_{node.id}_{idx}\" data-index=\"{idx}\" data-action=\"select_{node.id}_{idx}\">{prefix}{label}</li>"
         idx = idx + 1
     return "<ul class=\"widget-list{focus_class}\" id=\"{node.id}\">{items_html}</ul>"
 
@@ -281,7 +294,7 @@ fn render_html_table(node: WidgetNode, state: UIState, focus_class: text) -> tex
                 if sort_dir == "desc": " \u{25bc}" else: " \u{25b2}"
             else:
                 ""
-            th_html = "{th_html}<th data-action=\"sort_col_{hi}\">{hdr}{indicator}</th>"
+            th_html = "{th_html}<th id=\"ui_action_sort_col_{hi}\" data-action=\"sort_col_{hi}\">{hdr}{indicator}</th>"
             hi = hi + 1
         thead_html = "<thead><tr>{th_html}</tr></thead>"
 
@@ -337,6 +350,11 @@ fn render_html_statusbar(node: WidgetNode, state: UIState) -> text:
     val right_text = expand_template(node.get_prop("right"), state)
     return "<div class=\"widget-statusbar\" id=\"{node.id}\"><span class=\"status-left\">{left_text}</span><span class=\"status-right\">{right_text}</span></div>"
 
+fn html_input_focus_attrs(node_id: text, focus_class: text) -> text:
+    if focus_class != "":
+        return " data-target-id=\"{node_id}\" data-focused=\"true\" style=\"border: 2px solid #38bdf8; outline: none;\""
+    return " data-target-id=\"{node_id}\""
+
 fn render_html_input(node: WidgetNode, focus_class: text) -> text:
     val placeholder = node.get_prop("placeholder")
     val value = node.get_prop("value")
@@ -346,19 +364,31 @@ fn render_html_input(node: WidgetNode, focus_class: text) -> text:
     val error_class = if is_error: " error" else: ""
     val readonly_attr = if is_readonly: " readonly" else: ""
     val disabled_attr = if is_disabled: " disabled" else: ""
-    return "<input class=\"widget-input{focus_class}{error_class}\" id=\"{node.id}\" value=\"{value}\" placeholder=\"{placeholder}\"{readonly_attr}{disabled_attr} />"
+    val focus_attrs = html_input_focus_attrs(node.id, focus_class)
+    return "<input class=\"widget-input{focus_class}{error_class}\" id=\"{node.id}\" value=\"{value}\" placeholder=\"{placeholder}\"{focus_attrs}{readonly_attr}{disabled_attr} />"
 
-fn render_html_tabs(node: WidgetNode, focus_class: text) -> text:
+fn render_html_tabs(node: WidgetNode, state: UIState, focus_class: text) -> text:
     val active_idx_str = node.get_prop("active_index")
     val active_idx = html_int_or(active_idx_str, 0)
     var tabs_html = ""
+    var active_panel_html = ""
     var idx = 0
     for child in node.children():
         val label = child.get_prop("label")
         val active_class = if idx == active_idx: " active" else: ""
-        tabs_html = "{tabs_html}<span class=\"tab-item{active_class}\" data-index=\"{idx}\" data-action=\"tab_{node.id}_{idx}\">{label}</span>"
+        tabs_html = "{tabs_html}<span class=\"tab-item{active_class}\" id=\"ui_action_tab_{node.id}_{idx}\" data-index=\"{idx}\" data-action=\"tab_{node.id}_{idx}\">{label}</span>"
+        if idx == active_idx:
+            if child.child_count() > 0 or child.get_prop("content") != "":
+                var panel_body = ""
+                if child.child_count() > 0:
+                    for sub in child.children():
+                        panel_body = "{panel_body}{render_html_widget(sub, state)}"
+                else:
+                    val content = child.get_prop("content")
+                    panel_body = "<div class=\"widget-text\">{content}</div>"
+                active_panel_html = "<div class=\"tab-panel\" id=\"{node.id}_panel\" style=\"padding: 8px 12px;\">{panel_body}</div>"
         idx = idx + 1
-    return "<div class=\"widget-tabs{focus_class}\" id=\"{node.id}\">{tabs_html}</div>"
+    return "<div class=\"widget-tabs{focus_class}\" id=\"{node.id}\">{tabs_html}</div>{active_panel_html}"
 
 # =========================================================================
 # New HTML Widget Renderers
@@ -369,7 +399,12 @@ fn render_html_button(node: WidgetNode, focus_class: text) -> text:
     val action = node.get_prop("action")
     val icon_id = node.get_prop("icon-id")
     val disabled = node.get_prop("disabled") == "true"
+    val pressed = node.get_prop("ui_pressed") == "true"
+    val click_count = node.get_prop("click_count")
     val disabled_attr = if disabled: " disabled" else: ""
+    val active_class = if pressed: " active" else: ""
+    val count_attr = if click_count != "": " data-click-count=\"{click_count}\"" else: ""
+    val pressed_style = if pressed: " style=\"background: #0284c7; color: #ffffff; border-color: #7dd3fc;\"" else: ""
 
     var icon_html = ""
     var with_icon_class = ""
@@ -377,7 +412,7 @@ fn render_html_button(node: WidgetNode, focus_class: text) -> text:
         icon_html = "<span class=\"icon icon-{icon_id}\" data-icon=\"{icon_id}\"></span> "
         with_icon_class = " with-icon"
 
-    return "<button type=\"button\" class=\"widget-button{focus_class}{with_icon_class}\" id=\"{node.id}\" data-action=\"{action}\"{disabled_attr}>{icon_html}{label}</button>"
+    return "<button type=\"button\" class=\"widget-button{focus_class}{with_icon_class}{active_class}\" id=\"{node.id}\" data-action=\"{action}\"{count_attr}{pressed_style}{disabled_attr}>{icon_html}{label}</button>"
 
 fn render_html_checkbox(node: WidgetNode, focus_class: text) -> text:
     val label = node.get_prop("label")
@@ -419,16 +454,31 @@ fn render_html_radio(node: WidgetNode, focus_class: text) -> text:
 fn render_html_dropdown(node: WidgetNode, focus_class: text) -> text:
     val is_disabled = node.get_prop("disabled") == "true"
     val disabled_attr = if is_disabled: " disabled" else: ""
+    val is_open = node.get_prop("open") == "true"
     val sel_str = node.get_prop("selected_index")
     var sel_idx = html_int_or(sel_str, 0)
+    val hov_str = node.get_prop("hovered_index")
+    val hov_idx = html_int_or(hov_str, -1)
+    val val_prop = node.get_prop("value")
     var options_html = ""
+    var popup_items_html = ""
     var idx = 0
     for child in node.children():
         val label = child.get_prop("label")
-        val selected_attr = if idx == sel_idx: " selected" else: ""
+        val selected = if val_prop != "" and sel_str == "": label == val_prop else: idx == sel_idx
+        val selected_attr = if selected: " selected" else: ""
         options_html = "{options_html}<option{selected_attr}>{label}</option>"
+        if is_open:
+            val item_active = selected or idx == hov_idx
+            val item_cls = if item_active: "widget-dropdown-item selected" else: "widget-dropdown-item"
+            val item_bg = if idx == hov_idx: "background: #0284c7; color: #ffffff;" elif selected: "background: #1e3a5f; color: #7dd3fc;" else: "background: transparent; color: #e2e8f0;"
+            popup_items_html = "{popup_items_html}<div class=\"{item_cls}\" id=\"{child.id}\" data-index=\"{idx}\" style=\"padding: 4px 8px; border-radius: 4px; font-size: 12px; {item_bg}\">{label}</div>"
         idx = idx + 1
-    return "<select class=\"widget-dropdown{focus_class}\" id=\"{node.id}\"{disabled_attr}>{options_html}</select>"
+    val open_attr = if is_open: " data-open=\"true\"" else: ""
+    val select_html = "<select class=\"widget-dropdown{focus_class}\" id=\"{node.id}\"{open_attr}{disabled_attr}>{options_html}</select>"
+    if is_open:
+        return "<div class=\"widget-dropdown-wrap\" id=\"{node.id}_wrap\" style=\"position: relative; display: inline-block;\">{select_html}<div class=\"widget-dropdown-popup\" id=\"{node.id}_popup\" style=\"position: absolute; left: 0; top: 100%; min-width: 140px; background: #0f172a; border: 1px solid #38bdf8; border-radius: 8px; padding: 4px; z-index: 200;\">{popup_items_html}</div></div>"
+    return select_html
 
 fn render_html_textfield(node: WidgetNode, focus_class: text) -> text:
     val value = node.get_prop("value")
@@ -439,7 +489,8 @@ fn render_html_textfield(node: WidgetNode, focus_class: text) -> text:
     val readonly_attr = if is_readonly: " readonly" else: ""
     val disabled_attr = if is_disabled: " disabled" else: ""
     val error_class = if is_error: " error" else: ""
-    return "<input type=\"text\" class=\"widget-textfield{focus_class}{error_class}\" id=\"{node.id}\" value=\"{value}\" placeholder=\"{placeholder}\"{readonly_attr}{disabled_attr} />"
+    val focus_attrs = html_input_focus_attrs(node.id, focus_class)
+    return "<input type=\"text\" class=\"widget-textfield{focus_class}{error_class}\" id=\"{node.id}\" value=\"{value}\" placeholder=\"{placeholder}\"{focus_attrs}{readonly_attr}{disabled_attr} />"
 
 fn render_html_image(node: WidgetNode, focus_class: text) -> text:
     val src = node.get_prop("src")
@@ -454,6 +505,13 @@ fn render_html_dialog(node: WidgetNode, state: UIState, focus_class: text) -> te
     var children_html = ""
     for child in node.children():
         children_html = "{children_html}{render_html_widget(child, state)}"
+    if node.get_prop("internal_window") == "true":
+        val wx = html_int_or(node.get_prop("x"), 40)
+        val wy = html_int_or(node.get_prop("y"), 40)
+        val ww = html_int_or(node.get_prop("width"), 240)
+        val wh = html_int_or(node.get_prop("height"), 140)
+        val wz = html_int_or(node.get_prop("z_order"), 10)
+        return "<div class=\"widget-dialog widget-internal-window{focus_class}\" id=\"{node.id}\" data-internal-window=\"true\" style=\"position: fixed; left: {wx}px; top: {wy}px; width: {ww}px; height: {wh}px; z-index: {wz}; margin: 0; background: #162033; border: 1px solid #38bdf8; border-radius: 10px; overflow: hidden;\"><div class=\"dialog-title\" id=\"{node.id}_titlebar\" style=\"padding: 5px 10px; background: #1e3a5f; color: #f8fafc; font-weight: bold;\">{title}</div><div class=\"dialog-content\" style=\"padding: 8px 10px;\">{children_html}</div></div>"
     return "<div class=\"widget-dialog-overlay\"><div class=\"widget-dialog{focus_class}\" id=\"{node.id}\"><div class=\"dialog-title\">{title}</div><div class=\"dialog-content\">{children_html}</div></div></div>"
 
 fn render_html_tooltip(node: WidgetNode, focus_class: text) -> text:
@@ -462,13 +520,22 @@ fn render_html_tooltip(node: WidgetNode, focus_class: text) -> text:
     return "<div class=\"widget-tooltip{focus_class}\" id=\"{node.id}\" data-target=\"{target}\"><span class=\"tooltip-trigger\">[?]</span><span class=\"tooltip-content\">{content}</span></div>"
 
 fn render_html_scroll(node: WidgetNode, state: UIState, focus_class: text) -> text:
-    """Render a scrollable container as a div with overflow:auto."""
-    val max_h = node.get_prop("max_height")
-    val style_attr = if max_h != "": "max-height:{max_h}px; overflow-y: auto;" else: "overflow-y: auto;"
+    """Render a scrollable container as a clipped div shifted by scroll_offset."""
+    val max_h_str = node.get_prop("max_height")
+    val h_str = node.get_prop("height")
+    val raw_h_str = if max_h_str != "": max_h_str else: h_str
+    val max_h_raw = html_int_or(raw_h_str, 0)
+    val scroll_offset = html_int_or(node.get_prop("scroll_offset"), 0)
+    var style_attr = "overflow: hidden; overflow-y: auto; flex-shrink: 0;"
+    if raw_h_str != "" and max_h_raw > 0:
+        val max_h_px = if max_h_str != "" and max_h_raw <= 40: max_h_raw * 22 else: max_h_raw
+        style_attr = "max-height:{max_h_px}px; height:{max_h_px}px; overflow: hidden; overflow-y: auto; flex-shrink: 0;"
     var children_html = ""
     for child in node.children():
         children_html = "{children_html}{render_html_widget(child, state)}"
-    return "<div class=\"widget-scroll{focus_class}\" id=\"{node.id}\" style=\"{style_attr}\">{children_html}</div>"
+    if scroll_offset > 0:
+        children_html = "<div class=\"widget-scroll-inner\" style=\"margin-top: -{scroll_offset}px;\">{children_html}</div>"
+    return "<div class=\"widget-scroll{focus_class}\" id=\"{node.id}\" data-scroll-offset=\"{scroll_offset}\" style=\"{style_attr}\">{children_html}</div>"
 
 fn render_html_textarea(node: WidgetNode, focus_class: text) -> text:
     """Render a multi-line textarea."""
@@ -482,7 +549,8 @@ fn render_html_textarea(node: WidgetNode, focus_class: text) -> text:
     val readonly_attr = if is_readonly: " readonly" else: ""
     val disabled_attr = if is_disabled: " disabled" else: ""
     val error_class = if is_error: " error" else: ""
-    return "<textarea class=\"widget-textarea{focus_class}{error_class}\" id=\"{node.id}\" placeholder=\"{placeholder}\"{rows_attr}{readonly_attr}{disabled_attr}>{value}</textarea>"
+    val focus_attrs = html_input_focus_attrs(node.id, focus_class)
+    return "<textarea class=\"widget-textarea{focus_class}{error_class}\" id=\"{node.id}\" placeholder=\"{placeholder}\"{focus_attrs}{rows_attr}{readonly_attr}{disabled_attr}>{value}</textarea>"
 
 fn render_html_heading(node: WidgetNode, focus_class: text) -> text:
     """Render a heading element."""

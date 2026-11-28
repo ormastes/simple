@@ -353,7 +353,7 @@ pub use sffi::{
     rt_ptr_write_i32, rt_ptr_write_i64, rt_ptr_write_u8, rt_value_as_bool, rt_value_as_float, rt_value_as_int,
     rt_value_as_u64, rt_value_u64, rt_value_bool, rt_value_compare, rt_value_eq, rt_value_float, rt_value_int,
     rt_value_is_bool, rt_value_is_float, rt_value_is_heap, rt_value_is_int, rt_value_is_nil, rt_value_nil,
-    rt_value_to_ptr, rt_value_truthy, rt_value_unbox_int,
+    rt_value_not_callable, rt_value_to_ptr, rt_value_truthy, rt_value_unbox_int,
 };
 
 // Re-export interpreter bridge handler setters (for compiler crate)

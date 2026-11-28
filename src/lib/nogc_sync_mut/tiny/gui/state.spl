@@ -34,6 +34,21 @@ class TinyGuiNode:
     text_value: text
     value: i32
 
+fn _tiny_nodes_layout_hash(nodes: [TinyGuiNode]) -> i64:
+    var h: i64 = 5381
+    for node in nodes:
+        h = ((h * 33) + node.id.index.to_i64()) & 2147483647
+        h = ((h * 33) + node.id.generation.to_i64()) & 2147483647
+        h = ((h * 33) + node.parent.index.to_i64()) & 2147483647
+        h = ((h * 33) + node.parent.generation.to_i64()) & 2147483647
+        h = ((h * 33) + node.class_id.to_i64()) & 2147483647
+        h = ((h * 33) + node.bounds.x.to_i64()) & 2147483647
+        h = ((h * 33) + node.bounds.y.to_i64()) & 2147483647
+        h = ((h * 33) + node.bounds.width.to_i64()) & 2147483647
+        h = ((h * 33) + node.bounds.height.to_i64()) & 2147483647
+        h = ((h * 33) + node.value.to_i64()) & 2147483647
+    h
+
 class TinyGuiState:
     nodes: [TinyGuiNode]
     max_nodes: i32
@@ -56,6 +71,7 @@ class TinyGuiState:
     flow_x: [i32]
     flow_y: [i32]
     metadata_nodes: i32
+    metadata_hash: i64
 
     static fn bounded(max_nodes: i32) -> TinyGuiState:
         val capacity = if max_nodes > 0: max_nodes else: 0
@@ -63,18 +79,21 @@ class TinyGuiState:
             nodes: [], max_nodes: max_nodes, focused_index: -1, next_generation: 1,
             child_count: [0; capacity], child_extent_y: [0; capacity], child_ordinal: [0; capacity],
             flow_x: [0; capacity], flow_y: [0; capacity], metadata_nodes: 0,
+            metadata_hash: _tiny_nodes_layout_hash([]),
         )
 
     fn metadata_valid() -> bool:
         """True when the per-parent metadata still describes `nodes`.
 
-        `add` is the only sanctioned mutation boundary. A direct push into the
-        public `nodes` array leaves `metadata_nodes` behind the node count, and
-        every metadata reader then falls back to the historical full scan.
+        `add` is the only sanctioned mutation boundary. Direct mutations to the
+        public `nodes` array (appending or editing `parent`/`bounds`/`value` in
+        place) invalidate either `metadata_nodes` or `metadata_hash`, and every
+        metadata reader then falls back to the historical full scan.
         """
         if self.metadata_nodes < 0: return false
         if self.metadata_nodes != self.nodes.len(): return false
-        self.nodes.len() <= self.child_count.len()
+        if self.nodes.len() > self.child_count.len(): return false
+        self.metadata_hash == _tiny_nodes_layout_hash(self.nodes)
 
     fn child_ordinal_of(index: i32) -> i32:
         """Zero-based position of `index` among its parent's direct children.
@@ -101,6 +120,7 @@ class TinyGuiState:
         self.next_generation = self.next_generation + 1
         self.nodes.push(TinyGuiNode(id: id, parent: parent, class_id: class_id, bounds: bounds, flags: 0, text_value: text_value, value: 0))
         self.metadata_nodes = -1
+        self.metadata_hash = 0
         TinyStatus.ok()
 
     fn handle_at(index: i32) -> TinyHandle:
@@ -240,8 +260,10 @@ class TinyGuiState:
             node_index = node_index + 1
         if indexed:
             self.metadata_nodes = count
+            self.metadata_hash = _tiny_nodes_layout_hash(self.nodes)
         else:
             self.metadata_nodes = -1
+            self.metadata_hash = 0
         panes
 
     me focus_next() -> TinyStatus:

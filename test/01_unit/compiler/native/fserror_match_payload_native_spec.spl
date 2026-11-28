@@ -1,0 +1,196 @@
+"""
+## Purpose and audience
+Purpose: Pin the freestanding/native enum-match payload contract for
+`Result<_, FsError>`: an `Err(FsError)` payload must survive `unwrap_err()`
+and select the correct arm of a total 15-variant `match` under native
+codegen. A zero/default classification means no arm was selected and is the
+documented guest symptom of the constructor/match enum-identity divergence.
+Audience: compiler engineers maintaining enum identity lowering
+(`qualify_enum_runtime_names` / `requalify_enum_check_variant_ids`),
+the freestanding runtime enum ops, and the NVFS boot lane.
+## Operator workflow
+Run with the native lane to exercise native enum lowering:
+  SIMPLE_LIB=src bin/simple test test/01_unit/compiler/native/fserror_match_payload_native_spec.spl --mode=native
+Also runnable under `--mode=interpreter` (the interpreter is correct by
+construction; the native lane is the regression-sensitive one).
+Every scenario must be green. A red "classifies ..." scenario means an
+`Err(FsError)` payload again reads as a zero/default value.
+## Compatibility and limitations
+Pins the behavior at HEAD for the hosted native lane and, via the
+re-verification recipe below, the freestanding x86_64 cranelift kernel lane.
+Fixture data is local to this spec.
+Troubleshooting: check `rt_enum_check_variant` / `rt_enum_new` identity
+agreement (enum runtime id + declared discriminant) before editing oracles.
+
+## Re-verification recipe (freestanding lane, from the bug doc)
+1. Hosted AOT control (any host with the Rust seed; ~2 min). Save this probe
+   as `probe_fserror_match.spl` (enum mirrors std.fs_driver.error.FsError;
+   codes 1..15, NotFound=6; zero is not producible by any arm):
+     enum FsError:
+         Unsupported
+         Transient(code: i32)
+         Corrupt
+         NoSpace
+         Permission
+         NotFound
+         AlreadyExists
+         Busy
+         IoError(code: u32)
+         Interrupted
+         TooLarge
+         ReadOnly
+         InvalidArg
+         StaleHandle
+         PathTraversal
+     fn classify(err: FsError) -> i64:
+         match err:
+             case Unsupported: 1
+             case Transient(_): 2
+             case Corrupt: 3
+             case NoSpace: 4
+             case Permission: 5
+             case NotFound: 6
+             case AlreadyExists: 7
+             case Busy: 8
+             case IoError(_): 9
+             case Interrupted: 10
+             case TooLarge: 11
+             case ReadOnly: 12
+             case InvalidArg: 13
+             case StaleHandle: 14
+             case PathTraversal: 15
+     fn main() -> i64:
+         val local: FsError = FsError.NotFound
+         print "D1={classify(local)}"
+         val r: Result<i64, FsError> = Err(FsError.NotFound)
+         print "D2={r.is_err()} D3={classify(r.unwrap_err())}"
+         0
+   Then:
+     SIMPLE_LIB=src "$SEED" native-build --source . \
+       --entry probe_fserror_match.spl -o /tmp/probe.exe \
+       --entry-closure --runtime-bundle auto --backend cranelift
+     /tmp/probe.exe
+   Expected: D1=6 D2=true D3=6. Any 0 is the defect.
+2. Freestanding kernel identity audit (build-only; the gate's exact flags):
+     SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=src SIMPLE_OS_LOG_MODE=off \
+     SIMPLE_ALLOW_FREESTANDING_STUBS=1 "$SEED" native-build \
+       --source build/os/nvfsrt/generated --source src/os --source src/lib \
+       --source examples/09_embedded/simple_os --backend cranelift \
+       --cpu x86-64-v1 --opt-level=aggressive --log off --entry-closure \
+       --entry examples/09_embedded/simple_os/arch/x86_64/nvfs_server_roundtrip_entry.spl \
+       --target x86_64-unknown-none -o /tmp/kernel.elf \
+       --linker-script examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld
+   Then audit: (a) no `enum-discriminant-owner-unresolved` warning may name
+   an FsError variant; (b) `rt_enum_id`, `rt_enum_discriminant`,
+   `rt_enum_payload`, `rt_enum_new`, `rt_enum_check_variant` must NOT appear
+   in the FABRICATED list (only `rt_enum_new_none` / `rt_enum_register_name`
+   are tolerable); (c) every baked `rt_enum_check_variant` enum-id operand in
+   the disassembly must equal FNV-1a-derived `enum_runtime_type_id` of the
+   enum's qualified name and match the `rt_enum_new` sites' stamped id.
+3. In-guest discriminator (needs the Linux OVMF lane per the bug doc):
+   construct `FsError.NotFound` in the round-trip entry, classify it through
+   the 15-arm match, print the code: 6 = payload/identity OK; 0 = LIVE.
+4. Full gate (Linux + OVMF, authoritative):
+     sh scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs
+   All rungs L1..L10 must be present in the serial log.
+# @manual: primary
+REQ-COMPILER-NATIVE-ENUM-MATCH-FSERROR-001
+doc/08_tracking/bug/freestanding_match_over_fserror_yields_default_2026-09-01.md
+"""
+
+use std.spec.step
+
+use std.spec
+
+use std.fs_driver.error.{FsError}
+
+# Total classifier over all 15 FsError variants: codes 1..15.
+# Zero is not a value any arm can produce — a 0 result means no arm selected,
+# exactly the symptom in the linked bug doc.
+fn classify_fserror(err: FsError) -> i64:
+    match err:
+        case Unsupported:      1
+        case Transient(_):     2
+        case Corrupt:          3
+        case NoSpace:          4
+        case Permission:       5
+        case NotFound:         6
+        case AlreadyExists:    7
+        case Busy:             8
+        case IoError(_):       9
+        case Interrupted:      10
+        case TooLarge:         11
+        case ReadOnly:         12
+        case InvalidArg:       13
+        case StaleHandle:      14
+        case PathTraversal:    15
+
+# Payload-carrying arms must bind the transferred payload, not a zero.
+fn classify_fserror_payload(err: FsError) -> i64:
+    match err:
+        case Transient(code):  1000 + code.to_i64()
+        case IoError(code):    2000 + code.to_i64()
+        case _:                0
+
+describe "Err(FsError) payload selects the correct arm of a total match (native)":
+    # Regression for doc/08_tracking/bug/
+    # freestanding_match_over_fserror_yields_default_2026-09-01.md.
+    it "classifies a locally constructed FsError.NotFound as 6, never 0":
+        # @req: REQ-COMPILER-NATIVE-ENUM-MATCH-FSERROR-001
+        step("Verify: local FsError.NotFound classifies as 6 (doc discriminator)")
+        val local: FsError = FsError.NotFound
+        expect(classify_fserror(local)).to_equal(6)
+
+    it "keeps the Err tag detectable through the Result wrapper":
+        # @req: REQ-COMPILER-NATIVE-ENUM-MATCH-FSERROR-001
+        step("Verify: is_err is true on Err(FsError.NotFound)")
+        val r: Result<i64, FsError> = Err(FsError.NotFound)
+        expect(r.is_err()).to_equal(true)
+
+    it "classifies FsError.NotFound through the unwrap_err round-trip as 6":
+        # @req: REQ-COMPILER-NATIVE-ENUM-MATCH-FSERROR-001
+        step("Verify: unwrap_err payload classifies as 6, not the zero default")
+        val r: Result<i64, FsError> = Err(FsError.NotFound)
+        expect(classify_fserror(r.unwrap_err())).to_equal(6)
+
+    it "classifies a locally constructed payload-carrying variant":
+        # @req: REQ-COMPILER-NATIVE-ENUM-MATCH-FSERROR-001
+        step("Verify: local FsError.Transient(42) classifies as 2")
+        val t: FsError = FsError.Transient(code: 42)
+        expect(classify_fserror(t)).to_equal(2)
+
+    it "binds the payload through a match arm, not a zero":
+        # @req: REQ-COMPILER-NATIVE-ENUM-MATCH-FSERROR-001
+        step("Verify: Transient payload binds as 1042")
+        val t: FsError = FsError.Transient(code: 42)
+        expect(classify_fserror_payload(t)).to_equal(1042)
+
+    it "binds the payload through the unwrap_err round-trip":
+        # @req: REQ-COMPILER-NATIVE-ENUM-MATCH-FSERROR-001
+        step("Verify: IoError payload survives the Result round-trip as 2007")
+        val r: Result<i64, FsError> = Err(FsError.IoError(code: 7u32))
+        expect(classify_fserror_payload(r.unwrap_err())).to_equal(2007)
+
+describe "total match exhaustion invariant over FsError":
+    it "every one of the 15 variants classifies to a non-zero code":
+        # @req: REQ-COMPILER-NATIVE-ENUM-MATCH-FSERROR-001
+        step("Verify: no FsError variant falls through to the zero default")
+        val variants: [FsError] = [
+            FsError.Unsupported,
+            FsError.Transient(code: 0),
+            FsError.Corrupt,
+            FsError.NoSpace,
+            FsError.Permission,
+            FsError.NotFound,
+            FsError.AlreadyExists,
+            FsError.Busy,
+            FsError.IoError(code: 0u32),
+            FsError.Interrupted,
+            FsError.TooLarge,
+            FsError.ReadOnly,
+            FsError.InvalidArg,
+            FsError.StaleHandle,
+            FsError.PathTraversal,
+        ]
+        for v in variants:
+            expect(classify_fserror(v)).to_be_greater_than(0)

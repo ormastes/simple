@@ -329,6 +329,7 @@ fn canonical_runtime_symbol_declaration(
 fn rust_abi_type(ty: &str) -> &'static str {
     match ty {
         "I8" => "i8",
+        "I16" => "i16",
         "I32" => "i32",
         "I64" => "i64",
         "F64" => "f64",

@@ -1,0 +1,359 @@
+# Unit parity spec: Skia vs Pure-Simple 2D (FontRenderer / Engine2D) font layout,
+# kerning, fractional sizing, quarter-pixel subpixel phase, baseline alignment,
+# bold/italic synthesis, TTC collection loading, SkMaskGamma, and 5x7 fallback parity.
+# @req REQ-SSPEC-UNIT
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_exists}
+use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.sfnt_glyf.{sfnt_subpixel_pen_split_milli, sfnt_font_cache_key_milli_px}
+use std.skia.entity.font.{
+    sk_default_vector_font_path, sk_load_cached_font_bytes,
+    sk_font_default, sk_font_measure_codepoints_advances,
+    sk_font_measure_codepoints_advances_kerned
+}
+use std.skia.feature.glyph.outline.{stub_box_outline}
+use std.skia.feature.glyph.rasterize.{GlyphBitmap, rasterize_outline}
+use std.skia.feature.glyph.subpixel.{SubpixelOffset, apply_subpixel}
+use std.skia.feature.text.text_render_parity.{
+    skia_sfnt_text_bounds_and_advance,
+    skia_sfnt_text_bounds_and_advance_kerned,
+    skia_sfnt_layout_glyph_boxes,
+    skia_sfnt_layout_glyph_boxes_kerned,
+    skia_sfnt_rasterize_run_argb,
+    skia_sfnt_rasterize_run_kerned_argb,
+    skia_sfnt_blend_run_argb,
+    skia_sfnt_blend_run_kerned_argb,
+    skia_sfnt_blend_run_styled_argb,
+    skia_sfnt_measure_advance_styled,
+    skia_bitmap_5x7_metrics,
+    skia_bitmap_5x7_blend_run_argb
+}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{CachedGlyph, blit_glyph}
+use std.gc_async_mut.gpu.engine2d.font_owner.{
+    Engine2DFontOwner, engine2d_font_owner_store,
+    engine2d_font_owner_measure_width_size_milli,
+    engine2d_font_owner_render_text_baseline_styled
+}
+use std.gc_async_mut.gpu.engine2d.glyph.{render_text_spaced_to_buffer, glyph_spaced_advance}
+
+fn _abs_f64(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+fn _pad4(mut b: [u8]) -> [u8]:
+    while b.len() % 4 != 0:
+        b.push(0u8)
+    b
+
+fn _push_u16(mut b: [u8], v: i64):
+    b.push(((v >> 8) & 255) as u8)
+    b.push((v & 255) as u8)
+
+fn _push_i16(mut b: [u8], v: i64):
+    val enc = if v < 0: v + 65536 else: v
+    _push_u16(b, enc)
+
+fn _push_u32(mut b: [u8], v: i64):
+    b.push(((v >> 24) & 255) as u8)
+    b.push(((v >> 16) & 255) as u8)
+    b.push(((v >> 8) & 255) as u8)
+    b.push((v & 255) as u8)
+
+fn _push_tag(mut b: [u8], a: i64, b2: i64, c: i64, d: i64):
+    b.push(a as u8)
+    b.push(b2 as u8)
+    b.push(c as u8)
+    b.push(d as u8)
+
+fn _encode_simple_rect_glyph(x0: i64, y0: i64, x1: i64, y1: i64) -> [u8]:
+    var g: [u8] = []
+    _push_i16(g, 1)
+    _push_i16(g, x0)
+    _push_i16(g, y0)
+    _push_i16(g, x1)
+    _push_i16(g, y1)
+    _push_u16(g, 3)
+    _push_u16(g, 0)
+    g.push(1u8)
+    g.push(1u8)
+    g.push(1u8)
+    g.push(1u8)
+    val xs: [i64] = [x0, x1, x1, x0]
+    val ys: [i64] = [y0, y0, y1, y1]
+    var prev_x: i64 = 0
+    var i: i64 = 0
+    while i < 4:
+        _push_i16(g, xs[i] - prev_x)
+        prev_x = xs[i]
+        i = i + 1
+    var prev_y: i64 = 0
+    i = 0
+    while i < 4:
+        _push_i16(g, ys[i] - prev_y)
+        prev_y = ys[i]
+        i = i + 1
+    g
+
+# Minimal valid SFNT TTF (UPEM=1000) with glyphs 'A' (gid 1), 'V' (gid 2), 'a' (gid 3), '.' (gid 4)
+# and MS format-0 kern pair ("AV" = -150 units).
+fn _build_specimen_test_ttf() -> [u8]:
+    var head: [u8] = [0u8; 54]
+    head[1] = 1u8
+    head[12] = 0x5Fu8; head[13] = 0x0Fu8; head[14] = 0x3Cu8; head[15] = 0xF5u8
+    head[18] = 3u8; head[19] = 232u8
+    head[36] = 0u8; head[37] = 0u8
+    head[40] = 3u8; head[41] = 232u8
+    head[42] = 3u8; head[43] = 232u8
+    head[51] = 1u8
+    head = _pad4(head)
+
+    var hhea: [u8] = [0u8; 36]
+    hhea[1] = 1u8
+    hhea[4] = 3u8; hhea[5] = 32u8
+    hhea[6] = 0xFFu8; hhea[7] = 0x38u8
+    hhea[35] = 5u8
+    hhea = _pad4(hhea)
+
+    var maxp: [u8] = [0u8; 32]
+    maxp[1] = 1u8
+    maxp[5] = 5u8
+    maxp = _pad4(maxp)
+
+    # cmap: format 4 mapping 46('.'->4), 65('A'->1), 86('V'->2), 97('a'->3)
+    var cmap: [u8] = []
+    _push_u16(cmap, 0)
+    _push_u16(cmap, 1)
+    _push_u16(cmap, 3)
+    _push_u16(cmap, 1)
+    _push_u32(cmap, 12)
+    val starts: [i64] = [46, 65, 86, 97, 65535]
+    val ends: [i64] = [46, 65, 86, 97, 65535]
+    val deltas: [i64] = [4 - 46, 1 - 65, 2 - 86, 3 - 97, 1]
+    val seg_count: i64 = 5
+    _push_u16(cmap, 4)
+    _push_u16(cmap, 16 + seg_count * 8)
+    _push_u16(cmap, 0)
+    _push_u16(cmap, seg_count * 2)
+    _push_u16(cmap, 8)
+    _push_u16(cmap, 2)
+    _push_u16(cmap, seg_count * 2 - 8)
+    for e in ends: _push_u16(cmap, e)
+    _push_u16(cmap, 0)
+    for s in starts: _push_u16(cmap, s)
+    for d in deltas: _push_i16(cmap, d)
+    var ri: i64 = 0
+    while ri < seg_count:
+        _push_u16(cmap, 0)
+        ri = ri + 1
+    cmap = _pad4(cmap)
+
+    val g0: [u8] = []
+    val g1 = _encode_simple_rect_glyph(40, 0, 660, 720)
+    val g2 = _encode_simple_rect_glyph(40, 0, 660, 720)
+    val g3 = _encode_simple_rect_glyph(50, 0, 520, 520)
+    val g4 = _encode_simple_rect_glyph(100, 0, 220, 120)
+    val glyphs: [[u8]] = [g0, g1, g2, g3, g4]
+    var glyf: [u8] = []
+    var loca: [u8] = []
+    for gl in glyphs:
+        _push_u32(loca, glyf.len())
+        var padded_g = gl
+        while padded_g.len() % 4 != 0:
+            padded_g.push(0u8)
+        for b in padded_g: glyf.push(b)
+    _push_u32(loca, glyf.len())
+    glyf = _pad4(glyf)
+    loca = _pad4(loca)
+
+    var hmtx: [u8] = []
+    val advs: [i64] = [500, 700, 700, 560, 280]
+    val lsbs: [i64] = [0, 40, 40, 50, 100]
+    var hi: i64 = 0
+    while hi < 5:
+        _push_u16(hmtx, advs[hi])
+        _push_i16(hmtx, lsbs[hi])
+        hi = hi + 1
+    hmtx = _pad4(hmtx)
+
+    var kern: [u8] = []
+    _push_u16(kern, 0)
+    _push_u16(kern, 1)
+    _push_u16(kern, 0)
+    _push_u16(kern, 6 + 8 + 6)
+    _push_u16(kern, 1)
+    _push_u16(kern, 1)
+    _push_u16(kern, 6)
+    _push_u16(kern, 0)
+    _push_u16(kern, 0)
+    _push_u16(kern, 1)
+    _push_u16(kern, 2)
+    _push_i16(kern, -150)
+    kern = _pad4(kern)
+
+    val hdr: i64 = 12 + 8 * 16
+    var off = hdr
+    val o_cmap = off; off = off + cmap.len()
+    val o_glyf = off; off = off + glyf.len()
+    val o_head = off; off = off + head.len()
+    val o_hhea = off; off = off + hhea.len()
+    val o_hmtx = off; off = off + hmtx.len()
+    val o_kern = off; off = off + kern.len()
+    val o_loca = off; off = off + loca.len()
+    val o_maxp = off
+    var blob: [u8] = []
+    _push_u32(blob, 65536)
+    _push_u16(blob, 8)
+    _push_u16(blob, 128)
+    _push_u16(blob, 3)
+    _push_u16(blob, 0)
+    val a: [i64] = [99, 103, 104, 104, 104, 107, 108, 109]
+    val b2: [i64] = [109, 108, 101, 104, 109, 101, 111, 97]
+    val c: [i64] = [97, 121, 97, 101, 116, 114, 99, 120]
+    val d: [i64] = [112, 102, 100, 97, 120, 110, 97, 112]
+    val offs: [i64] = [o_cmap, o_glyf, o_head, o_hhea, o_hmtx, o_kern, o_loca, o_maxp]
+    val lens: [i64] = [cmap.len(), glyf.len(), head.len(), hhea.len(), hmtx.len(), kern.len(), loca.len(), maxp.len()]
+    var ti: i64 = 0
+    while ti < 8:
+        _push_tag(blob, a[ti], b2[ti], c[ti], d[ti])
+        _push_u32(blob, 0)
+        _push_u32(blob, offs[ti])
+        _push_u32(blob, lens[ti])
+        ti = ti + 1
+    for x in cmap: blob.push(x)
+    for x in glyf: blob.push(x)
+    for x in head: blob.push(x)
+    for x in hhea: blob.push(x)
+    for x in hmtx: blob.push(x)
+    for x in kern: blob.push(x)
+    for x in loca: blob.push(x)
+    for x in maxp: blob.push(x)
+    blob
+
+fn _ink_y_range(buf: [u32], w: i64, h: i64, x0: i64, x1: i64, bg: u32) -> (i64, i64, i64):
+    var min_y = h
+    var max_y = -1
+    var count: i64 = 0
+    var y: i64 = 0
+    while y < h:
+        var x = x0
+        while x < x1:
+            if buf[y * w + x] != bg:
+                count = count + 1
+                if y < min_y: min_y = y
+                if y > max_y: max_y = y
+            x = x + 1
+        y = y + 1
+    (min_y, max_y, count)
+
+fn _ink_count_in(buf: [u32], bg: u32) -> i64:
+    var count: i64 = 0
+    for px in buf:
+        if px != bg:
+            count = count + 1
+    count
+
+describe "Skia vs Pure-Simple 2D font specimen parity":
+    it "applies SFNT pair kerning in skia_sfnt_*_kerned while keeping unkerned pinned":
+        step("Verify kerned Skia SFNT layout narrows AV vs unkerned and preserves unkerned contract")
+        val blob = _build_specimen_test_ttf()
+        val unkerned_m = skia_sfnt_text_bounds_and_advance(blob, "AV", 20.0)
+        val kerned_m = skia_sfnt_text_bounds_and_advance_kerned(blob, "AV", 20.0)
+        expect(_abs_f64(unkerned_m.advance_px - 28.0) < 0.01).to_equal(true)
+        # -150 units * 20 / 1000 = -3.0 px => 25.0 px
+        expect(_abs_f64(kerned_m.advance_px - 25.0) < 0.01).to_equal(true)
+
+        val u_boxes = skia_sfnt_layout_glyph_boxes(blob, "AV", 0.0, 20.0, 20.0, true)
+        val k_boxes = skia_sfnt_layout_glyph_boxes_kerned(blob, "AV", 0.0, 20.0, 20.0, true)
+        expect(u_boxes.len()).to_equal(2)
+        expect(k_boxes.len()).to_equal(2)
+        expect(_abs_f64(k_boxes[1].pen_x - (u_boxes[1].pen_x - 3.0)) < 0.01).to_equal(true)
+
+        val kerned_buf = skia_sfnt_rasterize_run_kerned_argb(blob, "AV", 20.0, 0xFFF8FAFCu32, 0xFF181825u32)
+        val unkerned_buf = skia_sfnt_rasterize_run_argb(blob, "AV", 20.0, 0xFFF8FAFCu32, 0xFF181825u32)
+        expect(kerned_buf.width > 0i32 and kerned_buf.width < unkerned_buf.width).to_equal(true)
+
+    it "extracts TrueType Collection faces cleanly in sk_load_cached_font_bytes when present":
+        if not file_exists("/System/Library/Fonts/Helvetica.ttc"):
+            return
+        step("Load Helvetica.ttc default, #0 regular, and #1 bold via sk_load_cached_font_bytes")
+        val b_default = sk_load_cached_font_bytes("/System/Library/Fonts/Helvetica.ttc")
+        val b_face0 = sk_load_cached_font_bytes("/System/Library/Fonts/Helvetica.ttc#0")
+        val b_face1 = sk_load_cached_font_bytes("/System/Library/Fonts/Helvetica.ttc#1")
+        expect(b_default.len() > 1000).to_equal(true)
+        expect(b_face0.len()).to_equal(b_default.len())
+        expect(b_face1.len() > 1000).to_equal(true)
+
+        val sample = "AV Wa To Ta Yo LT P. V, ff fi fl"
+        val m_u = skia_sfnt_text_bounds_and_advance(b_face0, sample, 16.0)
+        val m_k = skia_sfnt_text_bounds_and_advance_kerned(b_face0, sample, 16.0)
+        expect(m_k.advance_px < m_u.advance_px - 10.0).to_equal(true)
+
+        var fr = FontRenderer.new()
+        expect(fr.try_load_runtime_ttf("/System/Library/Fonts/Helvetica.ttc#0")).to_equal(true)
+        var owner = engine2d_font_owner_store(Engine2DFontOwner.new(), fr)
+        val e2d_milli = engine2d_font_owner_measure_width_size_milli(owner, sample, 16000, false)
+        expect(_abs_f64(m_k.advance_px - (e2d_milli as f64) / 1000.0) < 0.25).to_equal(true)
+
+        step("Verify fractional 13.5px advance parity on Module floated")
+        val frac_text = "13.5px: Fractional size Module floated HTML/CSS Parity"
+        val sk_135 = skia_sfnt_measure_advance_styled(b_face0, frac_text, 13.5, true, false, false)
+        val e2d_135_milli = engine2d_font_owner_measure_width_size_milli(owner, frac_text, 13500, false)
+        expect(_abs_f64(sk_135 - (e2d_135_milli as f64) / 1000.0) < 0.25).to_equal(true)
+
+    it "renders 4x4 outline AA, subpixel RGB shifts, bold/italic widening, and gamma blend":
+        step("Verify 4x4 outline coverage and subpixel OneThird/TwoThird shifts")
+        val outline = stub_box_outline(65u32, 10.0, 12.0)
+        val bmp = rasterize_outline(outline, 16.0)
+        expect(bmp.width > 0 and bmp.height > 0).to_equal(true)
+        val r0 = apply_subpixel(bmp, SubpixelOffset.Zero)
+        val r1 = apply_subpixel(bmp, SubpixelOffset.OneThird)
+        val r2 = apply_subpixel(bmp, SubpixelOffset.TwoThird)
+        expect(r1.width).to_equal(r0.width)
+        expect(r2.width).to_equal(r0.width)
+        expect(r1.pixels == r0.pixels).to_equal(false)
+        expect(r2.pixels == r1.pixels).to_equal(false)
+
+        step("Verify synthetic Bold and Italic render wider and emit distinct ink in Skia & Simple2D")
+        val blob = _build_specimen_test_ttf()
+        val w_norm = skia_sfnt_measure_advance_styled(blob, "AVa.", 16.0, true, false, false)
+        val w_bold = skia_sfnt_measure_advance_styled(blob, "AVa.", 16.0, true, true, false)
+        expect(w_bold > w_norm).to_equal(true)
+        var dark_n: [u32] = [0xFF181825u32; 120 * 40]
+        var dark_b: [u32] = [0xFF181825u32; 120 * 40]
+        var light_g: [u32] = [0xFFF8FAFCu32; 120 * 40]
+        dark_n = skia_sfnt_blend_run_styled_argb(dark_n, 120i32, 40i32, 8.0, 30.0, true, blob, "AVa", 16.0, 0xFFF8FAFCu32, true, false, false, false)
+        dark_b = skia_sfnt_blend_run_styled_argb(dark_b, 120i32, 40i32, 8.0, 30.0, true, blob, "AVa", 16.0, 0xFFF8FAFCu32, true, true, true, true)
+        light_g = skia_sfnt_blend_run_styled_argb(light_g, 120i32, 40i32, 8.0, 30.0, true, blob, "AVa", 16.0, 0xFF0F172Au32, true, false, false, true)
+        expect(_ink_count_in(dark_b, 0xFF181825u32) > _ink_count_in(dark_n, 0xFF181825u32)).to_equal(true)
+        expect(_ink_count_in(light_g, 0xFFF8FAFCu32) > 0).to_equal(true)
+
+    it "baseline-aligns FontRenderer.render_text and matches 5x7 fallback pixels with Skia":
+        step("Verify FontRenderer.render_text does not top-align short glyphs with capitals")
+        val test_font = if file_exists("/System/Library/Fonts/Helvetica.ttc"): "/System/Library/Fonts/Helvetica.ttc#0" else: sk_default_vector_font_path()
+        if test_font != "":
+            var fr = FontRenderer.new()
+            expect(fr.try_load_runtime_ttf(test_font)).to_equal(true)
+            var fb: [u32] = [0xFF181825u32; 96 * 40]
+            fb = fr.render_text(fb, 96i32, 40i32, 4i32, 4i32, "A.", 0xFFF8FAFCu32, 20i32)
+            val bb_A = _ink_y_range(fb, 96, 40, 4, 24, 0xFF181825u32)
+            val bb_dot = _ink_y_range(fb, 96, 40, 14, 36, 0xFF181825u32)
+            expect(bb_A.2 > 0 and bb_dot.2 > 0).to_equal(true)
+            # Period '.' must sit near baseline (bottom of 'A'), never hung near 'A' top row
+            expect(bb_dot.0 > bb_A.0 + 4).to_equal(true)
+            expect(bb_dot.1 >= bb_A.1 - 1 and bb_dot.1 <= bb_A.1 + 1).to_equal(true)
+
+        step("Verify blit_glyph blends exact straight-alpha output even when runtime mask kernel is unavailable")
+        var blit_buf: [u32] = [0xFF181825u32; 8 * 8]
+        val cg = CachedGlyph(codepoint: 65, face_id: 0, face_generation: 0, glyph_index: -1, font_size: 16, width: 2, height: 1, advance: 3, bearing_x: 0, bearing_y: 0, pixels: [0u8, 255u8])
+        blit_buf = blit_glyph(blit_buf, 8i32, 8i32, 1i32, 1i32, cg, 0xFFF8FAFCu32)
+        expect(blit_buf[8 + 1]).to_equal(0xFF181825u32)
+        expect(blit_buf[8 + 2]).to_equal(0xFFF8FAFCu32)
+
+        step("Verify 5x7 spaced fallback parity between Skia and Engine2D")
+        val text57 = "5x7 Parity"
+        var sk_57: [u32] = [0xFF181825u32; 160 * 32]
+        var e2d_57: [u32] = [0xFF181825u32; 160 * 32]
+        sk_57 = skia_bitmap_5x7_blend_run_argb(sk_57, 160i32, 32i32, 8, 22, true, text57, 16.0, 0xFFF8FAFCu32)
+        e2d_57 = render_text_spaced_to_buffer(e2d_57, 160i32, 32i32, 8i32, 22i32 - 14i32, text57, 0xFFF8FAFCu32, 16i32)
+        expect(sk_57 == e2d_57).to_equal(true)

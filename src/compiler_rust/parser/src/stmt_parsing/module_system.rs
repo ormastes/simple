@@ -14,6 +14,36 @@ use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
 impl<'a> Parser<'a> {
+    /// Push one module path segment (or multiple when a leading numeric segment
+    /// absorbed a following `.digits*` into a `Float` / `TypedFloat` token such
+    /// as `03.04_system`) onto `segments`.
+    fn push_module_path_segment(&mut self, segments: &mut Vec<String>) -> Result<(), ParseError> {
+        if matches!(self.current.kind, TokenKind::Float(_) | TokenKind::TypedFloat(..))
+            && self.current.lexeme.contains('.')
+        {
+            let parts: Vec<&str> = self.current.lexeme.split('.').collect();
+            if parts.len() >= 2 && parts.iter().all(|p| Self::is_digit_led_path_segment_lexeme(p)) {
+                let mut last_end = self.current.span.end;
+                for part in parts {
+                    segments.push(part.to_string());
+                }
+                self.advance();
+                while self.current.span.start == last_end
+                    && Self::is_adjacent_path_segment_continuation(&self.current.lexeme)
+                {
+                    if let Some(last) = segments.last_mut() {
+                        last.push_str(&self.current.lexeme);
+                    }
+                    last_end = self.current.span.end;
+                    self.advance();
+                }
+                return Ok(());
+            }
+        }
+        segments.push(self.expect_path_segment()?);
+        Ok(())
+    }
+
     /// Parse a module path: crate.sys.http.router
     /// Returns the segments as a vector
     pub(crate) fn parse_module_path(&mut self) -> Result<ModulePath, ParseError> {
@@ -32,7 +62,7 @@ impl<'a> Parser<'a> {
             segments.push(".".to_string());
             // The next segment should be the module name
             if !self.check(&TokenKind::Newline) && !self.is_at_end() && !self.check(&TokenKind::As) {
-                segments.push(self.expect_path_segment()?);
+                self.push_module_path_segment(&mut segments)?;
                 // Continue with remaining path segments
                 while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
                     if self.check(&TokenKind::DoubleColon) {
@@ -57,7 +87,7 @@ impl<'a> Parser<'a> {
                         break; // Stop, let caller handle {}
                     }
 
-                    segments.push(self.expect_path_segment()?);
+                    self.push_module_path_segment(&mut segments)?;
                 }
             }
             return Ok(ModulePath::new(segments));
@@ -106,12 +136,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 segments.push("crate".to_string());
             } else {
-                // Use expect_path_segment to allow keywords like 'unit', 'test', etc.
-                segments.push(self.expect_path_segment()?);
+                // Use push_module_path_segment to allow keywords and numeric-led segments like '03_system'
+                self.push_module_path_segment(&mut segments)?;
             }
         } else {
             // We already have DoubleDots, now get the first real segment
-            segments.push(self.expect_path_segment()?);
+            self.push_module_path_segment(&mut segments)?;
         }
 
         // Parse dot-separated segments (also accept :: and / with deprecation warning)
@@ -130,7 +160,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
 
-                segments.push(self.expect_path_segment()?);
+                self.push_module_path_segment(&mut segments)?;
                 continue;
             }
             // Emit deprecation warning for '::' syntax
@@ -156,8 +186,8 @@ impl<'a> Parser<'a> {
                 break; // Stop, let caller handle {}
             }
 
-            // Use expect_path_segment to allow keywords as path segments
-            segments.push(self.expect_path_segment()?);
+            // Use push_module_path_segment to allow keywords and numeric-led segments as path segments
+            self.push_module_path_segment(&mut segments)?;
         }
 
         Ok(ModulePath::new(segments))

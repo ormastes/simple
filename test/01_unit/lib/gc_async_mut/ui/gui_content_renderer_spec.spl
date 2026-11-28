@@ -13,7 +13,13 @@ use common.ui.builder.{build_tree, column, label}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.render_opt.damage_tiles.{DirtyTilePyramid}
 use common.ui.render_opt.damage_plan.{
-    DamagePlanPolicy, build_damage_plan, DAMAGE_PLAN_NONE
+    DamagePlan, DamagePlanPolicy, build_damage_plan,
+    DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL
+}
+use common.ui.draw_ir.{
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
+    draw_ir_rect, draw_ir_box_with_style, draw_ir_style_prop,
+    draw_ir_rect_bounds, draw_ir_no_rect
 }
 use std.gc_async_mut.ui.gui_content_renderer.{
     GuiRetainedRenderSession, gui_content_frame_clear_color,
@@ -123,3 +129,49 @@ describe "GUI content renderer theme seed":
         expect(result.fallback_reason).to_contain(
             "fresh-device-command-preflight-required")
         engine.shutdown()
+
+    it "replays DAMAGE_PLAN_FULL and parent-sampling DAMAGE_PLAN_LOCAL cleanly":
+        # @req REQ-SGUI-007
+        step("Build a backdrop + window-surface-glass composition")
+        val bg_emb = draw_ir_embedding_config("", "bg_batch", 0, 0, 64, 64, 0, 1000, false)
+        val bg_cmd = draw_ir_rect("bg_rect", 0, 0, 64, 64, 0xFF102030u32)
+        val bg_batch = draw_ir_batch("bg_batch", "cpu", bg_emb, [bg_cmd])
+
+        val glass_emb = draw_ir_embedding_config("", "glass_batch", 16, 16, 32, 32, 0, 1000, false)
+        val g_bounds = draw_ir_rect_bounds(0, 0, 32, 32)
+        val glass_cmd = draw_ir_box_with_style(
+            "glass_panel", 0, 0, 32, 32, 0x33FFFFFFu32,
+            g_bounds, g_bounds, g_bounds, draw_ir_no_rect(), [
+            draw_ir_style_prop("background-color", "#33FFFFFF"),
+            draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+            draw_ir_style_prop("backdrop-filter-capability", "engine2d-cpu-composited-material-v1"),
+            draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "4"),
+        ], "")
+        val glass_batch = draw_ir_batch("glass_batch", "cpu", glass_emb, [glass_cmd])
+        val comp = draw_ir_composition("glass_comp", "glass_scene", "cpu", [bg_batch, glass_batch])
+
+        val tree = build_tree(column("root", [label("seed_lbl", "ok")]))
+        var session = UISession.new(tree)
+        var retained = GuiRetainedRenderSession.create(64, 64, "cpu")
+        expect(retained.seed(session)).to_equal(true)
+
+        step("Verify DAMAGE_PLAN_LOCAL overlapping the glass surface succeeds")
+        val local_plan = DamagePlan(
+            rects: [20, 20, 16, 16], mode: DAMAGE_PLAN_LOCAL,
+            source_tile_count: 1, output_rect_count: 1, merged_tile_count: 0,
+            dirty_pixels: 256, planned_pixels: 256, full_fallback_count: 0,
+            fallback_reason: 0, tiles_examined: 1)
+        val local_out = retained.render_composition_damage(comp, local_plan, true)
+        expect(local_out.unsupported_kinds).to_equal("none")
+        expect(local_out.readback.pixels.len()).to_equal(64 * 64)
+
+        step("Verify DAMAGE_PLAN_FULL succeeds through full ordered replay")
+        val full_plan = DamagePlan(
+            rects: [0, 0, 64, 64], mode: DAMAGE_PLAN_FULL,
+            source_tile_count: 1, output_rect_count: 1, merged_tile_count: 0,
+            dirty_pixels: 4096, planned_pixels: 4096, full_fallback_count: 1,
+            fallback_reason: 1, tiles_examined: 1)
+        val full_out = retained.render_composition_damage(comp, full_plan, true)
+        expect(full_out.unsupported_kinds).to_equal("none")
+        expect(full_out.readback.pixels.len()).to_equal(64 * 64)
+        retained.shutdown()

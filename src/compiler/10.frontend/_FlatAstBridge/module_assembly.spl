@@ -178,13 +178,13 @@ fn flat_decl_field_text(idx: i64, field: text) -> text:
     flat_module_env_get("SIMPLE_BOOTSTRAP_DECL_" + int_to_str(idx) + "_" + field)
 
 fn flat_bootstrap_enabled() -> bool:
-    flat_module_env_get("SIMPLE_BOOTSTRAP") == "1"
+    flat_bridge_bootstrap_enabled()
 
 fn flat_bridge_trace_enabled() -> bool:
     frontend_compiler_trace_enabled()
 
 fn flat_module_trace_function(stage: text, fn_: ParserFunction):
-    if flat_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+    if flat_bridge_focused_diag_enabled():
         val return_name = parser_type_kind_named_name(fn_.return_type.kind)
         eprint("[flat-function-roundtrip] phase={stage} name={fn_.name} return={return_name}")
 
@@ -316,12 +316,69 @@ fn flat_parser_field_from_nodes(
 
 use compiler.frontend.core.representation_declarations_v1.{representation_parser_metadata_v1, representation_parser_has_metadata_v1, representation_parser_refuse_restored_metadata_v1}
 
-fn flat_ast_to_module(path: text) -> ParserModule:
+# ===== Bridge-scoped arena read mode =========================================
+#
+# flat_ast_bridge_phase3_snapshot_throughput_2026-08-31: in the legacy
+# interpreted lane (SIMPLE_BOOTSTRAP=1, no SIMPLE_NATIVE_ARENA_DECLS=1) every
+# flat-AST getter crosses into the process environment mirror
+# (SIMPLE_BOOTSTRAP_{DECL,STMT,EXPR,MODULE_DECL}_*), and each crossing costs an
+# interpreter/SFFI round trip per field per node. While this scope is active,
+# the decl/stmt/expr/module-decl getters read the arena arrays instead, and the
+# per-declaration control flags are frozen at their scope-entry values, so a
+# conversion performs zero environment reads. This is safe because:
+#   - the arena arrays and the env mirror are written in lockstep by the
+#     constructors/mode setters, so both hold the same values at conversion
+#     time (the env-first legacy getters agree with the arrays);
+#   - the frontend-cache HIT path (build_module_from_flat_pool_blob) already
+#     converts whole modules from restored arrays alone in this lane — the
+#     mirror is empty there and every getter falls back to the arrays.
+# The scope engages only for the legacy env-mirror lane; arena-preferred lanes
+# (compiled stage4, SIMPLE_NATIVE_ARENA_DECLS=1) already read the arrays, and
+# entering it there would add overhead for no benefit.
+#
+# Deviation from the doc's candidate, measured and deliberate: the candidate's
+# per-file canonical dump/restore admission (flat_pools_dump_all +
+# flat_pools_restore_all) costs ~0.6-0.8 s at 1600 declarations in the
+# interpreted lane — 2-5x the entire legacy conversion it guards — so it is
+# NOT part of this scope. The codec itself is untouched; the dump/restore
+# gates (check-flat-ast-codec-complete.shs, check-flat-ast-roundtrip.shs)
+# still pass unchanged.
+var _fab_bridge_scope_depth: i64 = 0
+
+fn flat_ast_to_module_scoped(path: text) -> ParserModule:
+    if _fab_bridge_scope_depth > 0:
+        return flat_ast_to_module_body(path)
+    if ast_decl_prefer_arena():
+        # Arena-preferred lane: getters already read the arena; no scope needed
+        # and none admitted (behaviour and cost unchanged).
+        return flat_ast_to_module_body(path)
+    # Operator/test escape hatch: SIMPLE_FLAT_BRIDGE_ARENA_SCOPE=0 keeps the
+    # legacy env-mirror conversion. Read per call (one control-plane crossing)
+    # so parity specs can toggle it mid-process. This is the doc's preserved
+    # fallback path, not a field-by-field silent fallback.
+    if (_sffi_env_get("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE") ?? "") == "0":
+        return flat_ast_to_module_body(path)
+    _fab_bridge_scope_depth = 1
+    ast_decl_bridge_scope_enter()
+    stmt_bridge_scope_enter()
+    expr_bridge_scope_enter()
+    ast_module_decl_bridge_scope_enter()
+    flat_bridge_scope_control_enter()
+    val built = flat_ast_to_module_body(path)
+    flat_bridge_scope_control_exit()
+    ast_module_decl_bridge_scope_exit()
+    expr_bridge_scope_exit()
+    stmt_bridge_scope_exit()
+    ast_decl_bridge_scope_exit()
+    _fab_bridge_scope_depth = 0
+    built
+
+pub fn flat_ast_to_module(path: text) -> ParserModule:
     # The unit suffix scope is process-global and shared with the core
     # interpreter, which checks it at eval time: an interpreted script calling
     # parse_and_build_module must get its own `use unit` scope back.
     val saved_unit_scope = unit_scope_save()
-    val built = flat_ast_to_module_body(path)
+    val built = flat_ast_to_module_scoped(path)
     unit_scope_restore(saved_unit_scope)
     built
 

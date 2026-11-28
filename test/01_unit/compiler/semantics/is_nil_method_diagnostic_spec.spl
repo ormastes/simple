@@ -1,0 +1,149 @@
+"""
+## Purpose and audience
+Purpose: Verify compile-time MethodResolver diagnostics for `.is_nil()` on ordinary receivers while preserving user-defined `Value.is_nil()` methods.
+Audience: Compiler semantics engineers maintaining nil-check diagnostics and method resolution.
+Bug: doc/08_tracking/bug/is_nil_is_not_a_language_builtin_2026-07-27.md
+"""
+# @cover src/compiler/35.semantics/resolve_strategies.spl
+# @cover src/compiler/70.backend/backend_types.spl
+# @req REQ-SSPEC-COMPILER
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_types.{HirType, HirTypeKind, MethodResolution, SymbolKind, SymbolTable}
+use compiler.semantics.resolve.{MethodResolver}
+use compiler.semantics.resolve_strategies.{
+    unresolved_method_diagnostic_v1,
+    unresolved_method_unknown_receiver_diagnostic_v1
+}
+
+describe "is_nil unresolved method diagnostic":
+    it "points callers at == nil / .? with source-level type spellings on primitive, text, array, and optional receivers":
+        step("Resolve .is_nil() on i64, text, [i64], and i64? receivers")
+        val i64_ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val text_ty = HirType(kind: HirTypeKind.Str, span: Span.empty())
+        val arr_ty = HirType(kind: HirTypeKind.Array(i64_ty, nil), span: Span.empty())
+        val opt_ty = HirType(kind: HirTypeKind.Optional(i64_ty), span: Span.empty())
+        val cases = [
+            (i64_ty, "i64"),
+            (text_ty, "text"),
+            (arr_ty, "[i64]"),
+            (opt_ty, "i64?")
+        ]
+        for entry in cases:
+            val (ty, expected_type_name) = entry
+            var resolver = MethodResolver.new(SymbolTable.new())
+            val recv = HirExpr(
+                kind: HirExprKind.IntLit(0, nil),
+                has_type_: true,
+                type_: ty,
+                span: Span.empty()
+            )
+            val empty_args: [HirCallArg] = []
+            val res = resolver.resolve_method(recv, "is_nil", empty_args)
+            match res:
+                case MethodResolution.Unresolved:
+                    expect(resolver.get_errors().len()).to_equal(1)
+                    val msg = resolver.get_errors()[0].message
+                    expect(msg).to_contain("for type '{expected_type_name}'")
+                    expect(msg).to_contain("'is_nil' is not a language builtin; use '== nil' or '.?' instead")
+                    expect(msg.contains("for type 'str'")).to_equal(false)
+                    expect(msg.contains("for type 'Array'")).to_equal(false)
+                case _:
+                    expect("unexpected resolution").to_equal("Unresolved")
+
+    it "includes the is_nil guidance when the receiver type is unknown":
+        step("Format unknown-receiver diagnostic for is_nil vs ordinary method")
+        val is_nil_msg = unresolved_method_unknown_receiver_diagnostic_v1("is_nil")
+        expect(is_nil_msg).to_contain("'is_nil' is not a language builtin; use '== nil' or '.?' instead")
+        val other_msg = unresolved_method_unknown_receiver_diagnostic_v1("missing_fn")
+        expect(other_msg).to_contain("cannot resolve method 'missing_fn'")
+        expect(other_msg.contains("is_nil")).to_equal(false)
+
+    it "does not attach the is_nil hint to unrelated missing methods":
+        step("Format diagnostic for an ordinary unresolved method")
+        val msg = unresolved_method_diagnostic_v1("no_such_method", "i64", [])
+        expect(msg).to_contain("no method 'no_such_method' found for type 'i64'")
+        expect(msg.contains("not a language builtin")).to_equal(false)
+
+    it "preserves user-defined Value.is_nil() without error while rejecting .is_nil() on a struct without it":
+        step("Register MyValue with Method MyValue::is_nil and Pt without is_nil in SymbolTable")
+        var symbols = SymbolTable.new()
+        val val_sym = symbols.define(
+            "MyValue",
+            SymbolKind.Enum,
+            None,
+            Span.empty(),
+            Visibility.Public,
+            false,
+            nil
+        )
+        val bool_ty = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+        val val_ty = HirType(kind: HirTypeKind.Named(val_sym, []), span: Span.empty())
+        val method_ty = HirType(
+            kind: HirTypeKind.Function([val_ty], bool_ty, []),
+            span: Span.empty()
+        )
+        val val_method_name = symbols.method_symbol_name_raw(val_sym.id, "is_nil")
+        val val_is_nil_sym = symbols.define(
+            val_method_name,
+            SymbolKind.Method,
+            Some(method_ty),
+            Span.empty(),
+            Visibility.Public,
+            false,
+            nil
+        )
+        val pt_sym = symbols.define(
+            "Pt",
+            SymbolKind.Struct,
+            None,
+            Span.empty(),
+            Visibility.Public,
+            false,
+            nil
+        )
+        val pt_ty = HirType(kind: HirTypeKind.Named(pt_sym, []), span: Span.empty())
+
+        var ok_resolver = MethodResolver.new(symbols)
+        val ok_recv = HirExpr(
+            kind: HirExprKind.IntLit(0, nil),
+            has_type_: true,
+            type_: val_ty,
+            span: Span.empty()
+        )
+        val empty_args: [HirCallArg] = []
+        val ok_res = ok_resolver.resolve_method(ok_recv, "is_nil", empty_args)
+        expect(ok_resolver.get_errors().len()).to_equal(0)
+        match ok_res:
+            case MethodResolution.InstanceMethod(owner_id, method_id):
+                expect(owner_id.id).to_equal(val_sym.id)
+                expect(method_id.id).to_equal(val_is_nil_sym.id)
+            case _:
+                expect("unexpected resolution").to_equal("InstanceMethod")
+
+        var bad_resolver = MethodResolver.new(symbols)
+        val bad_recv = HirExpr(
+            kind: HirExprKind.IntLit(0, nil),
+            has_type_: true,
+            type_: pt_ty,
+            span: Span.empty()
+        )
+        val bad_res = bad_resolver.resolve_method(bad_recv, "is_nil", empty_args)
+        match bad_res:
+            case MethodResolution.Unresolved:
+                expect(bad_resolver.get_errors().len()).to_equal(1)
+                val msg = bad_resolver.get_errors()[0].message
+                expect(msg).to_contain("for type 'Pt'")
+                expect(msg).to_contain("'is_nil' is not a language builtin; use '== nil' or '.?' instead")
+            case _:
+                expect("unexpected resolution").to_equal("Unresolved")
+
+    it "confirms src/compiler/70.backend/backend_types.spl has no broken .is_nil() calls":
+        step("Audit backend_types.spl for bare .is_nil() calls")
+        val src = file_read_text("src/compiler/70.backend/backend_types.spl")
+        expect(src.len()).to_be_greater_than(0)
+        expect(src.contains(".is_nil(")).to_equal(false)

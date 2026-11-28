@@ -1,0 +1,52 @@
+"""
+## Purpose and audience
+Purpose: Prevent regressions in W-MC-RES-001 (unwrapped_foreign_resource) visibility and optional primitive return-type filtering.
+Audience: Compiler semantics and lint engineers maintaining REQ-MC-023.
+Bug: doc/08_tracking/bug/w_mc_res_001_overfires_verb_only_heuristic_2026-08-07.md
+"""
+# @cover src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl
+# @cover src/compiler/35.semantics/resource_families.spl
+# @req REQ-SSPEC-COMPILER
+
+use std.spec.{describe, it, expect, step}
+use compiler.semantics.resource_families.{acquire_verbs, release_verbs, retain_verbs, validity_verbs}
+use compiler.semantics.lint.unwrapped_foreign_resource.{check_unwrapped_foreign_resource}
+
+describe "W-MC-RES-001 prevention: visibility and optional return types":
+    it "exports resource_families verb catalogs publicly for lint consumers":
+        step("Call public verb catalog functions from compiler.semantics.resource_families")
+        expect(acquire_verbs()).to_contain("open")
+        expect(acquire_verbs()).to_contain("create")
+        expect(acquire_verbs()).to_contain("new")
+        expect(acquire_verbs()).to_contain("alloc")
+        expect(release_verbs()).to_contain("close")
+        expect(retain_verbs()).to_contain("retain")
+        expect(validity_verbs()).to_contain("is_valid")
+
+    it "stays silent on optional primitive return types (text?, bool?, i64?, Option<text>, nested Option<text?> / Option<Option<text>>)":
+        step("Run W-MC-RES-001 against externs returning optional and nested optional primitive values")
+        val source = "extern fn rt_string_clone(s: text) -> text?  # optional string\n" +
+            "extern fn rt_dir_create(p: text) -> bool?\n" +
+            "extern fn rt_atomic_int_load(a: i64) -> i64?\n" +
+            "extern fn rt_env_load(k: text) -> Option<text>\n" +
+            "extern fn rt_cfg_load(k: text) -> Option<text?>\n" +
+            "extern fn rt_nested_load(k: text) -> Option<Option<text>>\n\n" +
+            "fn f1(s: text) -> text?:\n    return rt_string_clone(s)\n\n" +
+            "fn f2(p: text) -> bool?:\n    return rt_dir_create(p)\n\n" +
+            "fn f3(a: i64) -> i64?:\n    return rt_atomic_int_load(a)\n\n" +
+            "fn f4(k: text) -> Option<text>:\n    return rt_env_load(k)\n\n" +
+            "fn f5(k: text) -> Option<text?>:\n    return rt_cfg_load(k)\n\n" +
+            "fn f6(k: text) -> Option<Option<text>>:\n    return rt_nested_load(k)\n"
+        val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+        expect(findings.len()).to_equal(0)
+
+    it "still flags optional named handle types and known-family optional i64 handles":
+        step("Run W-MC-RES-001 against optional handle returns")
+        val source = "extern fn rt_widget_new() -> WidgetHandle?\n" +
+            "extern fn rt_file_open(p: text) -> i64?  # raw fd\n\n" +
+            "fn mk_widget() -> WidgetHandle?:\n    return rt_widget_new()\n\n" +
+            "fn open_fd(p: text) -> i64?:\n    return rt_file_open(p)\n"
+        val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+        expect(findings.len()).to_equal(2)
+        expect(findings[0].code).to_equal("W-MC-RES-001")
+        expect(findings[1].code).to_equal("W-MC-RES-001")

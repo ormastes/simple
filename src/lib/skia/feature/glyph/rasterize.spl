@@ -182,26 +182,25 @@ fn winding_at(edges: [Edge], sample_y: f64, test_x: f64) -> i32:
     winding
 
 fn compute_coverage(edges: [Edge], pixel_x: f64, pixel_y: f64) -> f64:
-    # 4 subsample rows per pixel (at y + 1/8, 3/8, 5/8, 7/8)
+    # 4x4 grid-center supersampling (x/y offsets at 1/8, 3/8, 5/8, 7/8) for balanced horizontal & vertical AA.
     var hits: f64 = 0.0
-    val center_x = pixel_x + 0.5
-    val s0y = pixel_y + 0.125
-    val s1y = pixel_y + 0.375
-    val s2y = pixel_y + 0.625
-    val s3y = pixel_y + 0.875
-    val w0 = winding_at(edges, s0y, center_x)
-    val w1 = winding_at(edges, s1y, center_x)
-    val w2 = winding_at(edges, s2y, center_x)
-    val w3 = winding_at(edges, s3y, center_x)
-    if w0 != 0:
-        hits = hits + 1.0
-    if w1 != 0:
-        hits = hits + 1.0
-    if w2 != 0:
-        hits = hits + 1.0
-    if w3 != 0:
-        hits = hits + 1.0
-    hits / 4.0
+    val ox0 = pixel_x + 0.125
+    val ox1 = pixel_x + 0.375
+    val ox2 = pixel_x + 0.625
+    val ox3 = pixel_x + 0.875
+    var row: i64 = 0
+    while row < 4:
+        val sy = pixel_y + (row as f64) * 0.25 + 0.125
+        if winding_at(edges, sy, ox0) != 0: hits = hits + 1.0
+        if winding_at(edges, sy, ox1) != 0: hits = hits + 1.0
+        if winding_at(edges, sy, ox2) != 0: hits = hits + 1.0
+        if winding_at(edges, sy, ox3) != 0: hits = hits + 1.0
+        row = row + 1
+    hits / 16.0
+
+fn _floor_f64_to_i64(v: f64) -> i64:
+    val whole = v as i64
+    if (whole as f64) > v: whole - 1 else: whole
 
 fn _ceil_positive_dimension(value: f64) -> i64:
     if value < 1.0:
@@ -210,11 +209,19 @@ fn _ceil_positive_dimension(value: f64) -> i64:
     if value > whole as f64: whole + 1 else: whole
 
 fn rasterize_outline(outline: GlyphOutline, size_px: f64) -> GlyphBitmap:
-    # 1. Compute scale from em-size hint via bounds extent; fall back to 1.0.
+    rasterize_outline_with_upem(outline, size_px, 0)
+
+# Rasterize `outline` at `size_px`. When `units_per_em > 0` (SFNT-backed outlines),
+# scale directly by `size_px / units_per_em` instead of estimating em size from the
+# glyph's own bounding box (which over-scales punctuation and short lowercase glyphs).
+fn rasterize_outline_with_upem(outline: GlyphOutline, size_px: f64, units_per_em: i64) -> GlyphBitmap:
     val bounds = outline.metrics.bounds
     val em_w = bounds.right - bounds.left
     val em_h = bounds.bottom - bounds.top
-    val em_size = if em_h > em_w: em_h else: em_w
+    val em_size = if units_per_em > 0:
+        units_per_em as f64
+    else:
+        if em_h > em_w: em_h else: em_w
     val scale = if em_size > 0.0: size_px / em_size else: 1.0
 
     # 2. Compute scaled bitmap dimensions
@@ -238,7 +245,7 @@ fn rasterize_outline(outline: GlyphOutline, size_px: f64) -> GlyphBitmap:
         var px: i64 = 0
         while px < w:
             val coverage = compute_coverage(edges, px as f64, py as f64)
-            val alpha = (coverage * 255.0) as u8
+            val alpha = (coverage * 255.0 + 0.5) as u8
             pixels.append(alpha)
             px = px + 1
         py = py + 1
@@ -247,7 +254,7 @@ fn rasterize_outline(outline: GlyphOutline, size_px: f64) -> GlyphBitmap:
     GlyphBitmap(
         width: w,
         height: h,
-        left: ox as i64,
-        top: oy as i64,
+        left: _floor_f64_to_i64(ox),
+        top: _floor_f64_to_i64(oy),
         pixels: pixels
     )

@@ -30,6 +30,7 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_find_by_tag,
+    be_dom_find_by_node_id,
     be_dom_get_attr, be_dom_get_text_content,
     be_dom_has_attr,
     be_dom_serialize_children, be_dom_serialize_html_for_render,
@@ -561,7 +562,11 @@ fn _browser_session_is_pointer_or_mouse_event(event_type: text) -> bool:
         normalized == "pointerdown" or normalized == "pointerup" or
         normalized == "pointermove" or normalized == "pointerenter" or
         normalized == "pointerleave" or normalized == "pointerover" or
-        normalized == "pointerout"
+        normalized == "pointerout" or normalized == "dragstart" or
+        normalized == "drag" or normalized == "dragenter" or
+        normalized == "dragover" or normalized == "dragleave" or
+        normalized == "drop" or normalized == "dragend" or
+        normalized == "wheel"
     )
 
 fn _browser_session_default_listener_control(
@@ -624,6 +629,14 @@ class BrowserDomEventExecutor:
     offset_y: i32
     button: i32
     buttons: i32
+    delta_x: f64
+    delta_y: f64
+    delta_mode: i32
+    data_transfer_keys: [text]
+    data_transfer_vals: [text]
+    data_transfer_map_id: i64
+    wheel_delta_x: f64
+    wheel_delta_y: f64
     error: text
 
     fn route_for_object_id(object_id: i64) -> DomNodeRoute?:
@@ -732,6 +745,26 @@ class BrowserDomEventExecutor:
     me finish_event():
         if self.event_object_id < 0:
             return
+        if self.data_transfer_map_id >= 0:
+            val map_obj = self.runtime.get_host_object(self.data_transfer_map_id)
+            var next_keys: [text] = []
+            var next_vals: [text] = []
+            for prop in map_obj.properties:
+                if not prop.key.starts_with("__"):
+                    match prop.value:
+                        JsValue.String(s):
+                            next_keys.push(prop.key)
+                            next_vals.push(s)
+                        JsValue.Number(n):
+                            next_keys.push(prop.key)
+                            next_vals.push("{n}")
+                        JsValue.Boolean(b):
+                            next_keys.push(prop.key)
+                            next_vals.push(if b: "true" else: "false")
+                        _:
+                            pass_dn
+            self.data_transfer_keys = next_keys
+            self.data_transfer_vals = next_vals
         self.runtime.set_host_property(
             self.event_object_id, "currentTarget", JsValue.Null
         )
@@ -851,6 +884,21 @@ class BrowserDomEventExecutor:
             self.runtime.set_host_property(
                 event_id, "buttons", JsValue.Number(v: btns.to_f64())
             )
+        if event.event_type == "wheel":
+            val dx = if self.delta_x != 0.0: self.delta_x else: self.wheel_delta_x
+            val dy = if self.delta_y != 0.0: self.delta_y else: self.wheel_delta_y
+            self.runtime.set_host_property(
+                event_id, "deltaX", JsValue.Number(v: dx)
+            )
+            self.runtime.set_host_property(
+                event_id, "deltaY", JsValue.Number(v: dy)
+            )
+            self.runtime.set_host_property(
+                event_id, "deltaZ", JsValue.Number(v: 0.0)
+            )
+            self.runtime.set_host_property(
+                event_id, "deltaMode", JsValue.Number(v: self.delta_mode.to_f64())
+            )
         self.runtime.set_host_property(
             event_id, "defaultPrevented",
             JsValue.Boolean(v: event.default_prevented)
@@ -874,11 +922,26 @@ class BrowserDomEventExecutor:
             event_id, "stopImmediatePropagation",
             JsValue.Function(id: self.event_stop_immediate_propagation_fn_id)
         )
+        val dt_id = self.runtime.create_host_object()
+        val dt_map_id = self.runtime.create_host_object()
+        var dti: i64 = 0
+        while dti < self.data_transfer_keys.len() and dti < self.data_transfer_vals.len():
+            self.runtime.set_host_property(
+                dt_map_id, self.data_transfer_keys[dti],
+                JsValue.String(v: self.data_transfer_vals[dti])
+            )
+            dti = dti + 1
+        self.runtime.set_host_property(dt_id, "__map", JsValue.Object(id: dt_map_id))
+        self.runtime.set_host_property(dt_id, "dropEffect", JsValue.String(v: "move"))
+        self.runtime.set_host_property(dt_id, "effectAllowed", JsValue.String(v: "all"))
+        self.runtime.set_host_property(event_id, "dataTransfer", JsValue.Object(id: dt_id))
+        self.data_transfer_map_id = dt_map_id
         var interpreter = self.runtime.interpreter
         interpreter.define_global_value(
             "event", JsValue.Object(id: event_id)
         )
         self.runtime.interpreter = interpreter
+        val _ = self.runtime.eval("if (typeof window.__simple_bind_dt === 'function' && typeof event !== 'undefined' && event.dataTransfer) { window.__simple_bind_dt(event.dataTransfer); }")
         self.event_object_id = event_id
 
     me execute(
@@ -1999,6 +2062,118 @@ impl BrowserSession:
         )?
         Ok(true)
 
+    # @allow(primitive_api)
+    me dispatch_dom_select_index(
+        route: DomNodeRoute, selected_idx: i64
+    ) -> Result<bool, text>:
+        """Select option at `selected_idx` on a <select> route and dispatch input/change."""
+        val index = self._live_dom_index_for_route(route)?
+        val target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            None: return Err("stale_target")
+        if target.tag_name != "select":
+            return Err("DOM target is not a <select> element")
+        var opt_i: i64 = 0
+        var chosen_val = ""
+        var new_children: [BeDomNode] = []
+        var found = false
+        for c in target.children:
+            var child = c
+            if child.tag_name == "option":
+                if opt_i == selected_idx and not be_dom_has_attr(child, "disabled"):
+                    child.set_attr("selected", "selected")
+                    chosen_val = if be_dom_has_attr(child, "value"): be_dom_get_attr(child, "value") else: be_dom_get_text_content(child)
+                    found = true
+                else:
+                    child.remove_attr("selected")
+                opt_i = opt_i + 1
+            new_children.push(child)
+        if not found:
+            return Ok(false)
+        var next_target = target
+        next_target.children = new_children
+        next_target.set_attr("value", chosen_val)
+        val path = be_dom_path_for_route(self.current_dom, index, route)
+        if path.len() == 0:
+            return Err("stale_target")
+        self.current_dom = _browser_session_replace_dom_path(path, next_target)
+        self._sync_runtime_body_from_dom()
+        val _ = self.dispatch_dom_event_route(route, "input", true, false)?
+        val _ = self.dispatch_dom_event_route(route, "change", true, false)?
+        Ok(true)
+
+    # @allow(primitive_api)
+    me dispatch_dom_wheel_at(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        delta_x: i32, delta_y: i32, max_scroll_top: i32 = -1
+    ) -> Result<i32, text>:
+        """Dispatch wheel at (client_x, client_y), clamp scrollTop to [0, max], and fire scroll."""
+        self.wheel_delta_x = delta_x.to_f64()
+        self.wheel_delta_y = delta_y.to_f64()
+        self.pending_wheel_delta_x = self.wheel_delta_x
+        self.pending_wheel_delta_y = self.wheel_delta_y
+        self.pending_wheel_delta_mode = 0
+        val wheel_res = self.dispatch_dom_event_route_with_pointer(
+            route, "wheel", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, client_x, client_y, 0, 0, false
+        )
+        self.wheel_delta_x = 0.0
+        self.wheel_delta_y = 0.0
+        self.pending_wheel_delta_x = 0.0
+        self.pending_wheel_delta_y = 0.0
+        self.pending_wheel_delta_mode = 0
+        val dispatched = wheel_res?
+        val index = self._live_dom_index_for_route(route)?
+        var target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            None: return Err("stale_target")
+        val cur_top = (be_dom_get_attr(target, "data-scroll-top").trim().parse_i64() ?? 0).to_i32()
+        if dispatched.event.default_prevented:
+            return Ok(cur_top)
+        var next_top = cur_top + delta_y
+        if next_top < 0:
+            next_top = 0
+        var bound = max_scroll_top
+        if bound < 0:
+            val sh = (be_dom_get_attr(target, "data-scroll-height").trim().parse_i64() ?? -1).to_i32()
+            val ch = (be_dom_get_attr(target, "data-client-height").trim().parse_i64() ?? -1).to_i32()
+            if sh >= 0 and ch >= 0:
+                bound = if sh > ch: sh - ch else: 0
+        if bound >= 0 and next_top > bound:
+            next_top = bound
+        target.set_attr("data-scroll-top", "{next_top}")
+        val target_id = be_dom_get_attr(target, "id")
+        if target_id != "":
+            self._set_element_scroll_top_by_id(target_id, next_top)
+        val path = be_dom_path_for_route(self.current_dom, index, route)
+        if path.len() == 0:
+            return Err("stale_target")
+        self.current_dom = _browser_session_replace_dom_path(path, target)
+        self._sync_runtime_body_from_dom()
+        val _ = self.dispatch_dom_event_route(route, "scroll", false, false)?
+        Ok(next_top)
+
+    # reason: matches pointer event dispatch scalar parameters plus float wheel deltas
+    # @allow(primitive_api)
+    me dispatch_dom_wheel_event_at(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        offset_x: i32, offset_y: i32, delta_x: f64, delta_y: f64
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        """Dispatch a wheel event with explicit client/offset coordinates and wheel deltas."""
+        self.pending_wheel_delta_x = delta_x
+        self.pending_wheel_delta_y = delta_y
+        self.pending_wheel_delta_mode = 0
+        val res = self.dispatch_dom_event_route_with_pointer(
+            route, "wheel", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0, false
+        )
+        self.pending_wheel_delta_x = 0.0
+        self.pending_wheel_delta_y = 0.0
+        self.pending_wheel_delta_mode = 0
+        res
+
     me dispatch_dom_context_menu_at(
         route: DomNodeRoute, client_x: i32, client_y: i32,
         offset_x: i32, offset_y: i32
@@ -2009,6 +2184,91 @@ impl BrowserSession:
             client_x, client_y, client_x, client_y,
             client_x, client_y, offset_x, offset_y, 2, 2, true
         )
+
+    me dispatch_dom_hover_route(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        offset_x: i32, offset_y: i32
+    ) -> Result<bool, text>:
+        """Dispatch pointerover/mouseover/mouseenter hover events on route."""
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            route, "pointerover", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            route, "mouseover", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            route, "mouseenter", false, false,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0, false
+        )?
+        Ok(true)
+
+    me dispatch_dom_drag_and_drop_route(
+        source_route: DomNodeRoute, target_route: DomNodeRoute,
+        source_x: i32, source_y: i32, target_x: i32, target_y: i32
+    ) -> Result<bool, text>:
+        """Dispatch HTML5 dragstart -> dragenter -> dragover -> drop -> dragend carrying DataTransfer."""
+        self.drag_data_transfer_keys = []
+        self.drag_data_transfer_vals = []
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            source_route, "mousedown", true, true,
+            source_x, source_y, source_x, source_y,
+            source_x, source_y, 12, 12, 0, 1, true
+        )?
+        val drag_start = self.dispatch_dom_event_route_with_pointer(
+            source_route, "dragstart", true, true,
+            source_x, source_y, source_x, source_y,
+            source_x, source_y, 12, 12, 0, 1, false
+        )?
+        if drag_start.event.default_prevented:
+            return Ok(false)
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            target_route, "dragenter", true, true,
+            target_x, target_y, target_x, target_y,
+            target_x, target_y, 16, 16, 0, 1, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            target_route, "dragover", true, true,
+            target_x, target_y, target_x, target_y,
+            target_x, target_y, 16, 16, 0, 1, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            target_route, "drop", true, true,
+            target_x, target_y, target_x, target_y,
+            target_x, target_y, 16, 16, 0, 0, false
+        )?
+        val _ = self.dispatch_dom_event_route_with_pointer(
+            source_route, "dragend", true, false,
+            target_x, target_y, target_x, target_y,
+            target_x, target_y, 16, 16, 0, 0, false
+        )?
+        Ok(true)
+
+    me console_logs() -> [text]:
+        """Return captured console.log/warn/error entries from both SimpleScript and JS."""
+        var out: [text] = []
+        for l in self.simple_script_executor.dom_vm.logs:
+            out.push(l)
+        if val Some(state) = self.runtime_state:
+            var rt = state.runtime
+            val res = rt.eval("typeof window !== 'undefined' && window.__simple_console_logs ? window.__simple_console_logs.join('\\n') : ''")
+            match res:
+                Ok(v):
+                    match v:
+                        JsValue.String(s):
+                            if s != "":
+                                for line in s.split("\n"):
+                                    if line != "":
+                                        out.push(line)
+                        _:
+                            pass_dn
+                _:
+                    pass_dn
+        out
 
     me _dispatch_dom_input_event_route(
         route: DomNodeRoute, event_type: text, bubbles: bool,
@@ -2257,6 +2517,14 @@ impl BrowserSession:
                 offset_y: offset_y,
                 button: button,
                 buttons: buttons,
+                delta_x: self.pending_wheel_delta_x,
+                delta_y: self.pending_wheel_delta_y,
+                delta_mode: self.pending_wheel_delta_mode,
+                data_transfer_keys: self.drag_data_transfer_keys,
+                data_transfer_vals: self.drag_data_transfer_vals,
+                data_transfer_map_id: -1,
+                wheel_delta_x: self.wheel_delta_x,
+                wheel_delta_y: self.wheel_delta_y,
                 error: ""
             )
             dispatch = if input_type != "":
@@ -2289,6 +2557,8 @@ impl BrowserSession:
                 client_x, client_y, screen_x, screen_y, button, buttons
             )
             executor.finish_event()
+            self.drag_data_transfer_keys = executor.data_transfer_keys
+            self.drag_data_transfer_vals = executor.data_transfer_vals
             state.runtime = executor.runtime
             state.dom_callable_listeners = executor.listeners
             state.dom_listener_indices_by_target_event = (
@@ -2306,6 +2576,55 @@ impl BrowserSession:
                     executor.error == "DOM event dispatch budget exceeded"
                 )
             self._flush_runtime_side_effects_and_pump_history()?
+            if self.dom_generation.value != dispatch_generation.value:
+                return Ok(dispatch)
+
+        if self.simple_script_executor.dom_vm.listeners.len() > 0:
+            var path_ids: [i64] = []
+            for pnode in dispatch_path:
+                path_ids.push(pnode.node_id)
+            var vm = self.simple_script_executor.dom_vm
+            vm.install_document(self.current_dom, false)
+            vm.data_transfer_keys = self.drag_data_transfer_keys
+            vm.data_transfer_vals = self.drag_data_transfer_vals
+            vm.current_delta_x = if self.pending_wheel_delta_x != 0.0: self.pending_wheel_delta_x else: self.wheel_delta_x
+            vm.current_delta_y = if self.pending_wheel_delta_y != 0.0: self.pending_wheel_delta_y else: self.wheel_delta_y
+            vm.current_delta_mode = self.pending_wheel_delta_mode.to_i64()
+            val vm_ev_res = vm.dispatch_event(
+                normalized_event_type,
+                target.node_id,
+                path_ids,
+                bubbles,
+                if has_pointer_payload: client_x else: dispatch.event.client_x,
+                if has_pointer_payload: client_y else: dispatch.event.client_y,
+                if has_pointer_payload: offset_x else: 0,
+                if has_pointer_payload: offset_y else: 0,
+                key,
+                code,
+                input_data ?? "",
+                dispatch.event.default_prevented,
+                dispatch.event.propagation_stopped
+            )
+            if vm_ev_res.0:
+                dispatch.event.prevent_default()
+                dispatch.default_action_allowed = false
+            if vm_ev_res.1:
+                dispatch.event.stop_propagation()
+            self.drag_data_transfer_keys = vm.data_transfer_keys
+            self.drag_data_transfer_vals = vm.data_transfer_vals
+            if vm.title_dirty:
+                self.current_title = vm.title
+                vm.title_dirty = false
+            if vm.dom_dirty:
+                val next_vm_dom = vm.dom
+                val vm_structural = vm.structural_dirty
+                vm.dom_dirty = false
+                vm.structural_dirty = false
+                self.simple_script_executor.dom_vm = vm
+                val _ = self._publish_runtime_body_candidate(next_vm_dom, vm_structural)
+            else:
+                self.simple_script_executor.dom_vm = vm
+            self._sync_simple_script_scroll_tops()
             if self.dom_generation.value != dispatch_generation.value:
                 return Ok(dispatch)
 
@@ -2999,15 +3318,71 @@ impl BrowserSession:
         result.node_count = _browser_session_dom_node_count(self.current_dom)
         result
 
+    me _set_element_scroll_top_by_id(id_attr: text, scroll_top: i32):
+        if id_attr == "":
+            return
+        val clamped = if scroll_top < 0: 0 else: scroll_top
+        var i: i64 = 0
+        while i < self.element_scroll_ids.len():
+            if self.element_scroll_ids[i] == id_attr:
+                self.element_scroll_tops[i] = clamped
+                return
+            i = i + 1
+        self.element_scroll_ids.push(id_attr)
+        self.element_scroll_tops.push(clamped)
+
+    me _sync_simple_script_scroll_tops():
+        val vm = self.simple_script_executor.dom_vm
+        var i: i64 = 0
+        while i < vm.scroll_node_ids.len() and i < vm.scroll_tops.len():
+            val nid = vm.scroll_node_ids[i]
+            val stop = vm.scroll_tops[i]
+            if val Some(node) = be_dom_find_by_node_id(self.current_dom, nid):
+                val id_attr = be_dom_get_attr(node, "id")
+                if id_attr != "":
+                    self._set_element_scroll_top_by_id(id_attr, stop)
+            i = i + 1
+
+    me _sync_element_scroll_tops_from_js():
+        if val Some(state) = self.runtime_state:
+            var idx: i64 = 0
+            while idx < state.dom_element_ids.len():
+                val id_snap = if idx < state.dom_id_snapshots.len(): state.dom_id_snapshots[idx] else: ""
+                if id_snap != "":
+                    val st_prop = state.runtime.get_host_property(state.dom_element_ids[idx], "scrollTop")
+                    match st_prop:
+                        JsValue.Number(n):
+                            val st_i32 = n.to_i32()
+                            if st_i32 != 0:
+                                self._set_element_scroll_top_by_id(id_snap, st_i32)
+                        _:
+                            pass_dn
+                idx = idx + 1
+
     me render_to_pixels(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
         val html = self.render_html_document()
         self.prepare_css_animation_instances_with_html(width, html)
         val animation_time_ms = self.monotonic_time_ms - self.animation_start_time_ms
-        var result = renderer.render_html_to_pixels_at_time_with_animations_with_images(
-            html, animation_time_ms, self.css_animation_instances,
-            self.image_resources
-        )
+        var active_scroll_id = ""
+        var active_scroll_top: i32 = 0
+        var si: i64 = 0
+        while si < self.element_scroll_ids.len() and si < self.element_scroll_tops.len():
+            if self.element_scroll_tops[si] > 0:
+                active_scroll_id = self.element_scroll_ids[si]
+                active_scroll_top = self.element_scroll_tops[si]
+                break
+            si = si + 1
+        var result = if active_scroll_id != "":
+            renderer.render_html_to_pixels_at_time_with_animations_with_images_with_element_scroll(
+                html, animation_time_ms, self.css_animation_instances,
+                self.image_resources, active_scroll_id, active_scroll_top
+            )
+        else:
+            renderer.render_html_to_pixels_at_time_with_animations_with_images(
+                html, animation_time_ms, self.css_animation_instances,
+                self.image_resources
+            )
         result.node_count = _browser_session_dom_node_count(self.current_dom)
         result
 
@@ -3673,14 +4048,14 @@ impl BrowserSession:
                 )?
                 if state.adopt_host_body_bridge(candidate_dom, adopted_generation):
                     sync_index = Some(adopted_index)
-        # Attribute mutations (id/class/value/style) must publish even in the
-        # same task as a structural body.innerHTML/textContent write; the
-        # structural path only replaces body children, so sync_dom still has
-        # to apply per-element attribute diffs onto the candidate.
-        if dom_mutation_changed:
-            if val Some(index) = sync_index:
-                dom_sync = state.sync_dom(candidate_dom, index)
-                candidate_dom = dom_sync.root
+        # Attribute/property/child mutations (id/class/value/style/textContent/
+        # checked/disabled/selectedIndex/attrs/innerHTML) must always be checked
+        # after runtime script or event execution, even for properties not
+        # tracked by interpreter host_dom_mutation_dirty.
+        if val Some(index) = sync_index:
+            dom_sync = state.sync_dom(candidate_dom, index)
+            candidate_dom = dom_sync.root
+            if dom_mutation_changed:
                 var mutation_cleared = state.runtime.interpreter
                 mutation_cleared.host_dom_mutation_dirty = false
                 state.runtime.interpreter = mutation_cleared
@@ -3831,6 +4206,7 @@ impl BrowserSession:
                 self._reconcile_dynamic_image_sources(nil)
         else:
             self.runtime_state = Some(state)
+        self._sync_element_scroll_tops_from_js()
         Ok(true)
 
     me _push_runtime_history_entry():

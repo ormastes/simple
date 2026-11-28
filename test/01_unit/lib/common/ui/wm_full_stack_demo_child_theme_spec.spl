@@ -4,6 +4,7 @@ use app.io.mod.{file_read}
 use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
 use common.ui.layout.{compute_layout, find_rect}
 use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
+use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
 use common.ui.wm_chrome_theme.{
     active_wm_theme_id,
     apply_theme_render_snapshot_to_wm_chrome,
@@ -85,3 +86,30 @@ describe "wm_full_stack_demo child frame theme resolution":
         expect(spec_src).to_contain("active_wm_theme_id()")
         expect(spec_src).to_contain("_resolved_child_theme_id()")
         expect(spec_src.contains("default_theme_id(), \"Embedded Web\"")).to_be(false)
+
+    it "rejects mismatched child frame theme_id in HostCompositor.set_external_child_frame":
+        # @req REQ-SGUI-003
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        apply_theme_render_snapshot_to_wm_chrome(snapshot)
+        var compositor = HostCompositor.new(800, 600)
+        compositor.create_window("Parent", 40, 40, 640, 480, 1)
+        var cache = web_render_pixel_artifact_cache(64, 48, "software")
+        val mismatch_web = simple_web_child_content_frame_cached(
+            cache, "demo-web-mismatch", "1", 0, 0,
+            1, 1, default_theme_id(), "Embedded Web",
+            "<p>Mismatch web panel</p>", 64, 48, 0
+        )
+        expect(compositor.set_external_child_frame(mismatch_web)).to_be(false)
+        val mismatch_gui = wm_gui_content_frame_from_pixels(
+            "demo-gui-mismatch", "1", 0, 0,
+            64, 48, [0xFF102030u32; 64 * 48], 1, 1,
+            default_theme_id()
+        )
+        expect(compositor.set_external_child_frame(mismatch_gui)).to_be(false)
+        val matching_gui = wm_gui_content_frame_from_pixels(
+            "demo-gui-match", "1", 0, 0,
+            64, 48, [0xFF102030u32; 64 * 48], 1, 1,
+            snapshot.id
+        )
+        expect(compositor.set_external_child_frame(matching_gui)).to_be(true)
+        reset_wm_chrome_theme()

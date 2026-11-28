@@ -4,7 +4,7 @@ use simple_parser::ast::ReferenceCapability;
 use crate::hir::lifetime::{ReferenceOrigin, ScopeKind};
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
-use crate::hir::lower::lowerer::Lowerer;
+use crate::hir::lower::lowerer::{Lowerer, WordArraySlot};
 use crate::hir::types::{
     ConcurrencyMode, FunctionLayoutHint, HirContract, HirExpr, HirExprKind, HirFunction, HirStmt, HirType,
     LayoutAnchor, LayoutPhase, LocalVar, PointerKind, TypeId,
@@ -509,91 +509,189 @@ impl Lowerer {
     }
 
     /// A `[u8]` array bound to a slot of another numeric element type (`[i64]`,
-    /// `[u32]`, ...). A `[u8]` is byte-packed, so a word-typed callee does not
+    /// `[u32]`, ...). A `[u8]` is byte-packed, so a word-typed slot does not
     /// hold its elements: reads used to return 0 for a 255 byte on the JIT,
     /// and word writes into it are refused. The language has no array element
     /// coercion. Only the byte-packed source is rejected: a word array into a
     /// `[u8]` slot narrows like scalar `i64` -> `u8`, which is accepted today
     /// (separate owner question). An array literal is exempt: its elements take
-    /// the slot's type. doc: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
-    fn reject_array_element_mismatch(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
-        // Same type, a scalar, or a literal: nothing to reject. Checked before
-        // any registry lookup, since this runs on every typed argument.
-        if expected == value.ty || !self.is_u8_array_value(value) {
+    /// the slot's type. An optional slot (`[i64]?`) and an optional value
+    /// (`[u8]?`, either spelling) are checked as their payloads, and a nested
+    /// one (`[[i64]]`) by its leaf element. A parameter spelled `Option<[T]>`
+    /// rows like `[T]?`; a builtin `push`/`append` element and a trait method
+    /// on a field receiver (`self.store.put(b)`) are checked like any other
+    /// word-array slot. An untyped `list` relay still erases the element type
+    /// and is NOT covered (u8_array_into_word_array_residual_shapes_2026-11-28,
+    /// residual (5)).
+    /// doc: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27,
+    /// u8_array_into_word_array_unchecked_slots_2026-11-28
+    pub(crate) fn reject_array_element_mismatch(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
+        // Same type, a scalar, or a flat literal: nothing to reject. Checked
+        // before any other lookup, since this runs on every typed slot. A
+        // literal is looked into even when it took the slot's type, since
+        // its rows may be `[u8]` values.
+        let literal = matches!(value.kind, HirExprKind::Array(_));
+        if (expected == value.ty && !literal) || !self.is_u8_array_value(value) {
             return Ok(());
         }
-        match self.module.types.get(expected) {
-            Some(HirType::Array { element, .. }) => self.reject_u8_array_into(*element, value, slot),
-            _ => Ok(()),
+        let expected = self.option_payload(expected).unwrap_or(expected);
+        let (depth, leaf) = self.array_shape(expected);
+        self.reject_u8_array_into(&WordArraySlot { name: String::new(), depth, leaf }, value, slot)
+    }
+
+    /// `reject_array_element_mismatch` for a statement slot: the diagnostic
+    /// names the defining module and the statement's line.
+    pub(crate) fn reject_array_element_mismatch_at(
+        &self,
+        expected: TypeId,
+        value: &HirExpr,
+        slot: &str,
+        line: usize,
+    ) -> LowerResult<()> {
+        self.reject_array_element_mismatch(expected, value, slot).map_err(|error| match error {
+            LowerError::Unsupported(message) => {
+                LowerError::Unsupported(format!("{message} ({}, line {line})", self.body_diagnostic_file()))
+            }
+            other => other,
+        })
+    }
+
+    /// Array nesting depth and leaf element type: `[[u8]]` is `(2, u8)`, a
+    /// non-array is depth 0.
+    fn array_shape(&self, mut ty: TypeId) -> (usize, TypeId) {
+        let mut depth = 0;
+        while let Some(HirType::Array { element, .. }) = self.module.types.get(ty) {
+            ty = *element;
+            depth += 1;
+        }
+        (depth, ty)
+    }
+
+    /// `value` is a `[u8]` array (at any nesting depth), or a nested array
+    /// literal holding one. An optional value (`[u8]?` in either spelling)
+    /// is looked at through its payload. A flat literal is not: its
+    /// elements take the slot's type.
+    pub(crate) fn is_u8_array_value(&self, value: &HirExpr) -> bool {
+        if is_numeric_type(value.ty) || value.ty == TypeId::ANY {
+            return false;
+        }
+        let probe = self.option_payload(value.ty).unwrap_or(value.ty);
+        let (depth, leaf) = self.array_shape(probe);
+        match &value.kind {
+            HirExprKind::Array(items) => depth > 1 && items.iter().any(|item| self.is_u8_array_value(item)),
+            _ => depth > 0 && leaf == TypeId::U8,
         }
     }
 
-    /// `value` is a `[u8]` array that is not an array literal (a literal's
-    /// elements take the slot's type).
-    pub(crate) fn is_u8_array_value(&self, value: &HirExpr) -> bool {
-        !is_numeric_type(value.ty)
-            && value.ty != TypeId::ANY
-            && !matches!(value.kind, HirExprKind::Array(_))
-            && matches!(self.module.types.get(value.ty), Some(HirType::Array { element, .. }) if *element == TypeId::U8)
-    }
-
-    /// The array check for a slot whose declared element type is known only
-    /// from its AST spelling (a callee declared later in the file, a method
-    /// or trait row): `want` is that element type.
-    pub(crate) fn reject_u8_array_into(&self, want: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
-        if want == TypeId::U8 || !is_numeric_type(want) || !self.is_u8_array_value(value) {
+    /// The array check against a declared word-array shape. Used directly for
+    /// a slot known only from its AST spelling (a callee declared later in the
+    /// file, a method or trait row).
+    pub(crate) fn reject_u8_array_into(&self, want: &WordArraySlot, value: &HirExpr, slot: &str) -> LowerResult<()> {
+        if want.depth == 0 || want.leaf == TypeId::U8 || !is_numeric_type(want.leaf) {
+            return Ok(());
+        }
+        if let HirExprKind::Array(items) = &value.kind {
+            // A literal's scalar elements take the slot's type; its rows do not.
+            if want.depth > 1 {
+                let row = WordArraySlot { name: String::new(), depth: want.depth - 1, leaf: want.leaf };
+                for item in items {
+                    self.reject_u8_array_into(&row, item, slot)?;
+                }
+            }
+            return Ok(());
+        }
+        let value_ty = self.option_payload(value.ty).unwrap_or(value.ty);
+        if self.array_shape(value_ty) != (want.depth, TypeId::U8) {
             return Ok(());
         }
         let name = numeric_type_name;
+        let (open, close) = ("[".repeat(want.depth), "]".repeat(want.depth));
         Err(LowerError::Unsupported(format!(
-            "{LOWERING_TYPE_ERROR_TAG} type mismatch: {slot} is declared as `[{}]` but receives `[u8]`; arrays do not convert element types, build a new array with `.map(\\x: x as {})`",
-            name(want),
-            name(want)
+            "{LOWERING_TYPE_ERROR_TAG} type mismatch: {slot} is declared as `{open}{}{close}` but receives `{open}u8{close}`; arrays do not convert element types, build a new array with `.map(\\x: x as {})`",
+            name(want.leaf),
+            name(want.leaf)
         )))
     }
 
-    /// The numeric element type of a parameter spelled `[T]` or `List<T>`
-    /// with a primitive `T` (`int`/`float` included); `None` for every other
-    /// shape (aliases, `[T]?`, nested arrays).
-    pub(crate) fn numeric_array_param_element(&self, ty: Option<&simple_parser::ast::Type>) -> Option<TypeId> {
+    /// The word-array shape of a parameter spelled `[T]` or `List<T>` with a
+    /// primitive `T` (`int`/`float` included), nested (`[[T]]`) or optional
+    /// (`[T]?`); `None` for every other shape (aliases, generics).
+    pub(crate) fn numeric_array_param_element(&self, param: &simple_parser::ast::Parameter) -> Option<WordArraySlot> {
         use simple_parser::ast::Type;
-        let element = match ty? {
-            Type::Array { element, .. } => element.as_ref(),
-            Type::Generic { name, args } if (name == "List" || name == "list") && args.len() == 1 => &args[0],
-            _ => return None,
+        let mut ty = match param.ty.as_ref()? {
+            Type::Optional(inner) => inner.as_ref(),
+            // The `Option<[T]>` spelling parses as a Generic, not Optional.
+            Type::Generic { name, args } if name == "Option" && args.len() == 1 => &args[0],
+            other => other,
         };
-        match element {
-            Type::Simple(name) => self.module.types.lookup(name).filter(|t| is_numeric_type(*t)),
-            _ => None,
+        let mut depth = 0;
+        loop {
+            ty = match ty {
+                Type::Array { element, .. } => element.as_ref(),
+                Type::Generic { name, args } if (name == "List" || name == "list") && args.len() == 1 => &args[0],
+                Type::Simple(name) if depth > 0 => {
+                    let leaf = self.module.types.lookup(name).filter(|t| is_numeric_type(*t))?;
+                    return Some(WordArraySlot { name: param.name.clone(), depth, leaf });
+                }
+                _ => return None,
+            };
+            depth += 1;
         }
     }
 
     /// `numeric_array_param_element` for each parameter, or an empty row for a
     /// variadic parameter list (same keying rule as `fn_param_type_names`).
-    pub(crate) fn numeric_array_param_row(&self, params: &[simple_parser::ast::Parameter]) -> Vec<Option<TypeId>> {
+    pub(crate) fn numeric_array_param_row(&self, params: &[simple_parser::ast::Parameter]) -> Vec<Option<WordArraySlot>> {
         if params.iter().any(|p| p.variadic) {
             return Vec::new();
         }
-        params
-            .iter()
-            .map(|p| self.numeric_array_param_element(p.ty.as_ref()))
-            .collect()
+        params.iter().map(|p| self.numeric_array_param_element(p)).collect()
     }
 
-    /// Run `reject_u8_array_into` over positional arguments against a row of
-    /// declared element types.
+    /// Run `reject_u8_array_into` over call arguments against a row of
+    /// declared word-array parameters. `ast_args` carries the argument names
+    /// when the call is still in source order (a named argument is matched to
+    /// its parameter by name); `None` when `args` is already in slot order.
     pub(crate) fn reject_u8_arrays_in_row(
         &self,
-        row: &[Option<TypeId>],
+        row: &[Option<WordArraySlot>],
+        ast_args: Option<&[simple_parser::ast::Argument]>,
         args: &[HirExpr],
         callee: &str,
     ) -> LowerResult<()> {
-        for (i, (arg, want)) in args.iter().zip(row.iter()).enumerate() {
+        for (i, arg) in args.iter().enumerate() {
+            let named = ast_args.and_then(|a| a.get(i)).and_then(|a| a.name.as_deref());
+            let (index, want) = match named {
+                Some(name) => match row.iter().position(|p| p.as_ref().is_some_and(|p| p.name == name)) {
+                    Some(index) => (index, row[index].as_ref()),
+                    None => continue,
+                },
+                None => (i, row.get(i).and_then(|p| p.as_ref())),
+            };
             if let Some(want) = want {
-                self.reject_u8_array_into(*want, arg, &format!("argument {} of `{callee}`", i + 1))?;
+                self.reject_u8_array_into(want, arg, &format!("argument {} of `{callee}`", index + 1))?;
             }
         }
         Ok(())
+    }
+
+    /// The builtin `push`/`append` element slot: the receiver is an array
+    /// whose ELEMENT type is itself a word array (`[[i64]].push(b)`), and
+    /// the pushed value is a `[u8]` array of that nesting. An untyped empty
+    /// receiver is not checked here: its element type was just refined from
+    /// the pushed value (the caller runs this after that refinement).
+    pub(crate) fn reject_u8_array_push_element(
+        &self,
+        receiver_element: TypeId,
+        value: &HirExpr,
+        method: &str,
+    ) -> LowerResult<()> {
+        let (depth, leaf) = self.array_shape(receiver_element);
+        if depth == 0 || leaf == TypeId::U8 || !is_numeric_type(leaf) {
+            return Ok(());
+        }
+        let slot = format!("element type of the receiver of `{method}`");
+        self.reject_u8_array_into(&WordArraySlot { name: String::new(), depth, leaf }, value, &slot)
     }
 
     /// `T?` returned where a concrete scalar is declared. The seed's Option
@@ -709,7 +807,10 @@ impl Lowerer {
 
     fn validate_implicit_return_type(&self, body: &[HirStmt], expected: TypeId) -> LowerResult<()> {
         match body.last() {
-            Some(HirStmt::Expr(expr)) => self.validate_declared_return_type(expected, expr.ty),
+            Some(HirStmt::Expr(expr)) => {
+                self.reject_array_element_mismatch(expected, expr, "the return value")?;
+                self.validate_declared_return_type(expected, expr.ty)
+            }
             Some(HirStmt::If {
                 then_block,
                 else_block: Some(else_block),
@@ -1397,7 +1498,12 @@ impl Lowerer {
         // overlay enter below.
         self.current_function_owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
         let previous_type_scope = self.enter_flatten_struct_scope();
+        // Local indices restart per function: an untyped `var xs = []` that is
+        // never pushed to must not mark the same index of the next function,
+        // or a declared `var z: [u8] = []` there is retyped by its first push.
+        let previous_untyped_empty_arrays = std::mem::take(&mut self.untyped_empty_array_locals);
         let result = self.lower_function_body(f, owner_type);
+        self.untyped_empty_array_locals = previous_untyped_empty_arrays;
         // Restore unconditionally: the body only restores on its success path,
         // and the module pass may continue with the next function after an
         // E1003-class verdict.

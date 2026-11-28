@@ -1,0 +1,1374 @@
+# Latin autohinter, light mode: an integer port of FreeType's `af_latin`
+# (afhints.c / aflatin.c), the hinter Chrome 159 runs on a glyf outline
+# (skrifa's port, `SkFontHinting::kSlight`). Light mode hints the vertical
+# axis only: blue zones, horizontal-stem edges, then strong and weak points;
+# x is the scaled coordinate rounded to 26.6. Every step is 26.6 / 16.16
+# integer arithmetic so the hinted outline equals FreeType's to 1/64 px, which
+# Skia's analytic AA needs (a 1/64 px change flips quarter-row snaps).
+#
+# Not ported: the horizontal axis (off in light mode) and non-Latin styles.
+# Left out on purpose: FreeType 2.14's diacritic adjustment database
+# (afadjust.c: accent / dot separation, tilde stretch). The hinter Chrome 159
+# ships does not have it: its 8 px `i` keeps the dot against the stem where
+# FreeType 2.14 lifts it 40/64 px.
+#
+# Arrays are flat [i64]:
+#   glyph points  x, y, tag per point in font units; tag bit 0 = on-curve,
+#                 bit 1 = last point of its contour
+#   hinted points x, y per point in 26.6 px
+#   face metrics  `af_latin_face_metrics` (per font)
+#   scaled metrics `af_latin_scaled_metrics` (per font and size)
+# A point is one array per field (`fx`, `fy`, `oy`, `py`, flags, directions,
+# next / prev), not a record in one array: on the interpreter lane a store
+# into a one-field array costs a third of one through two record constants,
+# and the hinter runs once per glyph and size of a page.
+
+val _F_CONTROL: i64 = 1
+val _F_TOUCH_Y: i64 = 8
+val _F_WEAK: i64 = 16
+
+val _DIR_NONE: i64 = 4
+
+# Segment record.
+val _G_FLAGS: i64 = 0
+val _G_DIR: i64 = 1
+val _G_POS: i64 = 2
+val _G_DELTA: i64 = 3
+val _G_MIN: i64 = 4
+val _G_MAX: i64 = 5
+val _G_HEIGHT: i64 = 6
+val _G_EDGE: i64 = 7
+val _G_EDGE_NEXT: i64 = 8
+val _G_LINK: i64 = 9
+val _G_SERIF: i64 = 10
+val _G_SCORE: i64 = 11
+val _G_FIRST: i64 = 12
+val _G_LAST: i64 = 13
+val _GS: i64 = 14
+
+# Edge record.
+val _E_FPOS: i64 = 0
+val _E_OPOS: i64 = 1
+val _E_POS: i64 = 2
+val _E_FLAGS: i64 = 3
+val _E_DIR: i64 = 4
+val _E_SCALE: i64 = 5
+val _E_BLUE: i64 = 6
+val _E_HAS_BLUE: i64 = 7
+val _E_LINK: i64 = 8
+val _E_SERIF: i64 = 9
+val _E_FIRST: i64 = 10
+val _E_LAST: i64 = 11
+val _ES: i64 = 12
+
+val _EDGE_ROUND: i64 = 1
+val _EDGE_SERIF: i64 = 2
+val _EDGE_DONE: i64 = 4
+
+# Face metrics: [0] units per em, [1] standard width, [2] width count,
+# [3..19) widths, [19] blue count, then ref, shoot, ascender, descender, flags
+# per blue.
+val _M_UPEM: i64 = 0
+val _M_STDW: i64 = 1
+val _M_WIDTHS: i64 = 2
+val _M_BLUES: i64 = 19
+val _MB: i64 = 5
+
+val _BLUE_ACTIVE: i64 = 1
+val _BLUE_TOP: i64 = 2
+val _BLUE_ADJUSTMENT: i64 = 16
+
+# Scaled metrics: [0] x scale, [1] y scale (16.16), [2] blue count, then
+# ref org, shoot org, ref fit, shoot fit, flags per blue.
+val _Z_BLUES: i64 = 2
+val _ZB: i64 = 5
+
+# The Latin blue strings (afblue.dat, AF_BLUE_STRINGSET_LATN), `|` between
+# zones: capital top, capital bottom, small f top, small top (x-height),
+# small bottom, small descender.
+pub val AF_LATIN_BLUE_CHARS: text = "THEZOCQS|HEZLOCUS|fijkdbh|uvxzoesc|nrxzoesc|pqgjy"
+# Standard character of the Latin script (stem widths).
+pub val AF_LATIN_STANDARD_CHAR: i64 = 111
+
+fn _abs(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+# FT_MulFix: a * b / 65536, rounded half away from zero.
+fn _mul_fix(a: i64, b: i64) -> i64:
+    val p = a * b
+    if p >= 0: (p + 32768) >> 16 else: 0 - ((32768 - p) >> 16)
+
+# FT_DivFix: a * 65536 / b, rounded half away from zero.
+fn _div_fix(a: i64, b: i64) -> i64:
+    val neg = (a < 0) != (b < 0)
+    val ua = _abs(a)
+    val ub = _abs(b)
+    val q = if ub > 0: ((ua << 16) + (ub >> 1)) / ub else: 2147483647
+    if neg: 0 - q else: q
+
+# FT_MulDiv: a * b / c, rounded half away from zero.
+fn _mul_div(a: i64, b: i64, c: i64) -> i64:
+    val neg = ((a < 0) != (b < 0)) != (c < 0)
+    val uc = _abs(c)
+    val q = if uc > 0: (_abs(a) * _abs(b) + (uc >> 1)) / uc else: 2147483647
+    if neg: 0 - q else: q
+
+fn _pix_round(v: i64) -> i64:
+    (v + 32) & (0 - 64)
+
+fn _hypot(x0: i64, y0: i64) -> i64:
+    val x = _abs(x0)
+    val y = _abs(y0)
+    if x > y: x + ((3 * y) >> 3) else: y + ((3 * x) >> 3)
+
+fn _corner_is_flat(in_x: i64, in_y: i64, out_x: i64, out_y: i64) -> bool:
+    val d_in = _hypot(in_x, in_y)
+    val d_out = _hypot(out_x, out_y)
+    val d_hypot = _hypot(in_x + out_x, in_y + out_y)
+    (d_in + d_out - d_hypot) < (d_hypot >> 4)
+
+# af_direction_compute: right 1, left -1, up 2, down -2, none 4.
+fn _direction(dx: i64, dy: i64) -> i64:
+    var dir: i64 = 0
+    var ll: i64 = 0
+    var ss: i64 = 0
+    if dy >= dx:
+        if dy >= 0 - dx:
+            dir = 2
+            ll = dy
+            ss = dx
+        else:
+            dir = 0 - 1
+            ll = 0 - dx
+            ss = dy
+    else:
+        if dy >= 0 - dx:
+            dir = 1
+            ll = dx
+            ss = dy
+        else:
+            dir = 0 - 2
+            ll = 0 - dy
+            ss = dx
+    if ll <= 14 * _abs(ss): _DIR_NONE else: dir
+
+# First point index of each contour.
+fn _contours(pts: [i64]) -> [i64]:
+    var out: [i64] = []
+    val n = pts.len() / 3
+    var first: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        if (pts[i * 3 + 2] & 2) != 0:
+            out.push(first)
+            first = i + 1
+        i = i + 1
+    out
+
+# FT_Outline_Get_Orientation: -1 for a fill-left (PostScript) outline, 1 else.
+# The major direction of the vertical axis: right for PostScript, left else.
+fn _major_dir(pts: [i64], contours: [i64]) -> i64:
+    val n = pts.len() / 3
+    var area: i64 = 0
+    var c: i64 = 0
+    while c < contours.len():
+        val first = contours[c]
+        val last = if c + 1 < contours.len(): contours[c + 1] - 1 else: n - 1
+        var px = pts[last * 3]
+        var py = pts[last * 3 + 1]
+        var i = first
+        while i <= last:
+            val cx = pts[i * 3]
+            val cy = pts[i * 3 + 1]
+            area = area + (cy - py) * (cx + px)
+            px = cx
+            py = cy
+            i = i + 1
+        c = c + 1
+    if area > 0: 1 else: 0 - 1
+
+# af_glyph_hints_reload: in / out directions and weak points, all in font
+# units. The point record is one array per field (`fx`, `fy`: font units;
+# flags; in / out direction; next / prev point of the contour), each sized to
+# the point count by the caller. The scaled and hinted y (`oy`, `py`) come
+# from `_scale_points`; x is not hinted in light mode and is scaled at the end.
+# reason: one array per point field is the interpreter-cheap layout (see file header).
+# @allow(too_many_arguments)
+fn _reload(pts: [i64], contours: [i64], upem: i64, mut fx: [i64], mut fy: [i64], mut pf: [i64], mut pin: [i64], mut pout: [i64], mut pnext: [i64], mut pprev: [i64]):
+    val n = fx.len()
+    # FreeType's u / v: offsets to the next / previous point that is not near
+    var pu: [i64] = [0; n]
+    var pv: [i64] = [0; n]
+    val near_limit = 20 * upem / 2048
+    val near_limit2 = 2 * near_limit - 1
+    var c: i64 = 0
+    while c < contours.len():
+        val start = contours[c]
+        val last = if c + 1 < contours.len(): contours[c + 1] - 1 else: n - 1
+        var prev = last
+        var i = start
+        while i <= last:
+            fx[i] = pts[i * 3]
+            fy[i] = pts[i * 3 + 1]
+            pf[i] = if (pts[i * 3 + 2] & 1) != 0: 0 else: _F_CONTROL
+            pin[i] = _DIR_NONE
+            pout[i] = _DIR_NONE
+            pprev[i] = prev
+            pnext[prev] = i
+            prev = i
+            i = i + 1
+        var first = start
+        var point = first
+        prev = pprev[first]
+        while prev != first:
+            var dx = fx[point] - fx[prev]
+            var dy = fy[point] - fy[prev]
+            if dx < 0: dx = 0 - dx
+            if dy < 0: dy = 0 - dy
+            if dx + dy >= near_limit2:
+                break
+            point = prev
+            prev = pprev[prev]
+        first = point
+        var curr = first
+        pu[curr] = 0
+        pv[first] = 0
+        var out_x: i64 = 0
+        var out_y: i64 = 0
+        var next = first
+        var again = true
+        while again:
+            point = next
+            next = pnext[point]
+            out_x = out_x + fx[next] - fx[point]
+            out_y = out_y + fy[next] - fy[point]
+            val ax = if out_x < 0: 0 - out_x else: out_x
+            val ay = if out_y < 0: 0 - out_y else: out_y
+            if ax + ay < near_limit:
+                pf[next] = pf[next] | _F_WEAK
+            else:
+                pu[curr] = next - curr
+                pv[next] = curr - next
+                val out_dir = _direction(out_x, out_y)
+                pout[curr] = out_dir
+                curr = pnext[curr]
+                while curr != next:
+                    pin[curr] = out_dir
+                    pout[curr] = out_dir
+                    curr = pnext[curr]
+                pin[next] = out_dir
+                pu[curr] = first - curr
+                pv[first] = curr - first
+                out_x = 0
+                out_y = 0
+            again = next != first
+        c = c + 1
+    var i: i64 = 0
+    while i < n:
+        if (pf[i] & _F_WEAK) == 0 and pin[i] == _DIR_NONE and pout[i] == _DIR_NONE:
+            val next_u = i + pu[i]
+            val prev_v = i + pv[i]
+            if ((fx[i] - fx[prev_v]) ^ (fx[next_u] - fx[i])) >= 0 and ((fy[i] - fy[prev_v]) ^ (fy[next_u] - fy[i])) >= 0:
+                pf[i] = pf[i] | _F_WEAK
+                pu[prev_v] = next_u - prev_v
+                pv[next_u] = prev_v - next_u
+        i = i + 1
+    i = 0
+    while i < n:
+        if (pf[i] & _F_WEAK) == 0:
+            var weak = false
+            if (pf[i] & _F_CONTROL) != 0:
+                weak = true
+            else if pout[i] == pin[i]:
+                if pout[i] != _DIR_NONE:
+                    weak = true
+                else:
+                    val next_u = i + pu[i]
+                    val prev_v = i + pv[i]
+                    if _corner_is_flat(fx[i] - fx[prev_v], fy[i] - fy[prev_v], fx[next_u] - fx[i], fy[next_u] - fy[i]):
+                        pu[prev_v] = next_u - prev_v
+                        pv[next_u] = prev_v - next_u
+                        weak = true
+            else if pin[i] == 0 - pout[i]:
+                weak = true
+            if weak:
+                pf[i] = pf[i] | _F_WEAK
+        i = i + 1
+
+# FT_MulFix of every y: the scaled position `oy` and the position to hint `py`.
+fn _scale_points(fy: [i64], y_scale: i64, mut oy: [i64], mut py: [i64]):
+    var i: i64 = 0
+    while i < fy.len():
+        val sy = fy[i] * y_scale
+        val scaled_y = if sy >= 0: (sy + 32768) >> 16 else: 0 - ((32768 - sy) >> 16)
+        oy[i] = scaled_y
+        py[i] = scaled_y
+        i = i + 1
+
+# One zeroed segment (score 32000, no edge / link / serif) at slot `count`.
+fn _new_segment(mut g: [i64], count: i64) -> i64:
+    val b = count * _GS
+    if g.len() < b + _GS:
+        var k: i64 = 0
+        while k < _GS:
+            g.push(0)
+            k = k + 1
+    var j: i64 = 0
+    while j < _GS:
+        g[b + j] = 0
+        j = j + 1
+    g[b + _G_SCORE] = 32000
+    g[b + _G_EDGE] = 0 - 1
+    g[b + _G_EDGE_NEXT] = 0 - 1
+    g[b + _G_LINK] = 0 - 1
+    g[b + _G_SERIF] = 0 - 1
+    b
+
+fn _seg_close(mut g: [i64], sb: i64, st: [i64], flat_threshold: i64, keep_round: bool):
+    g[sb + _G_POS] = (st[0] + st[1]) >> 1
+    g[sb + _G_DELTA] = (st[1] - st[0]) >> 1
+    if ((st[4] | st[5]) & _F_CONTROL) != 0 and (st[7] - st[6]) < flat_threshold:
+        g[sb + _G_FLAGS] = g[sb + _G_FLAGS] | _EDGE_ROUND
+    else if not keep_round:
+        g[sb + _G_FLAGS] = g[sb + _G_FLAGS] & (0 - 1 - _EDGE_ROUND)
+    g[sb + _G_MIN] = st[2]
+    g[sb + _G_MAX] = st[3]
+    g[sb + _G_HEIGHT] = st[3] - st[2]
+
+# af_latin_hints_compute_segments, vertical dimension (FreeType's u is `fy`,
+# its v `fx`). Returns
+# the segment count; `g` receives the records. `st` / `held` hold min_pos,
+# max_pos, min_coord, max_coord, min_flags, max_flags, min_on_coord,
+# max_on_coord of the running and the previous segment.
+# reason: one array per point field is the interpreter-cheap layout (see file header).
+# @allow(too_many_arguments)
+fn _compute_segments(fx: [i64], fy: [i64], pf: [i64], pin: [i64], pout: [i64], pnext: [i64], pprev: [i64], contours: [i64], upem: i64, mut g: [i64]) -> i64:
+    val flat_threshold = upem / 14
+    # the major direction of the vertical axis is horizontal: right 1 / left -1
+    var segment_dir: i64 = 1
+    var count: i64 = 0
+    var c: i64 = 0
+    while c < contours.len():
+        var point = contours[c]
+        var last = pprev[point]
+        var on_edge = false
+        var st: [i64] = [32000, 0 - 32000, 32000, 0 - 32000, 0, 0, 32000, 0 - 32000]
+        var held: [i64] = [32000, 0 - 32000, 32000, 0 - 32000, 0, 0, 32000, 0 - 32000]
+        var prev_segment: i64 = 0 - 1
+        var segment: i64 = 0 - 1
+        if (pout[last] == 1 or pout[last] == 0 - 1) and (pout[point] == 1 or pout[point] == 0 - 1):
+            last = point
+            var back = true
+            while back:
+                point = pprev[point]
+                if (pout[point] != 1 and pout[point] != 0 - 1):
+                    point = pnext[point]
+                    back = false
+                else if point == last:
+                    back = false
+        last = point
+        var passed = false
+        var walk = true
+        while walk:
+            if on_edge:
+                val u = fy[point]
+                if u < st[0]: st[0] = u
+                if u > st[1]: st[1] = u
+                val v = fx[point]
+                if v < st[2]:
+                    st[2] = v
+                    st[4] = pf[point]
+                if v > st[3]:
+                    st[3] = v
+                    st[5] = pf[point]
+                if (pf[point] & _F_CONTROL) == 0:
+                    if v < st[6]: st[6] = v
+                    if v > st[7]: st[7] = v
+                if pout[point] != segment_dir or point == last:
+                    if prev_segment < 0 or g[segment + _G_FIRST] != g[prev_segment + _G_LAST]:
+                        g[segment + _G_LAST] = point
+                        _seg_close(g, segment, st, flat_threshold, true)
+                        prev_segment = segment
+                        var k: i64 = 0
+                        while k < 8:
+                            held[k] = st[k]
+                            k = k + 1
+                    else:
+                        val prev_last = g[prev_segment + _G_LAST]
+                        if pin[prev_last] == pin[point]:
+                            if held[0] < st[0]: st[0] = held[0]
+                            if held[1] > st[1]: st[1] = held[1]
+                            if held[2] < st[2]:
+                                st[2] = held[2]
+                                st[4] = held[4]
+                            if held[3] > st[3]:
+                                st[3] = held[3]
+                                st[5] = held[5]
+                            if held[6] < st[6]: st[6] = held[6]
+                            if held[7] > st[7]: st[7] = held[7]
+                            g[prev_segment + _G_LAST] = point
+                            _seg_close(g, prev_segment, st, flat_threshold, false)
+                        else:
+                            if _abs(held[3] - held[2]) > _abs(st[3] - st[2]):
+                                if st[0] < held[0]: held[0] = st[0]
+                                if st[1] > held[1]: held[1] = st[1]
+                                g[prev_segment + _G_LAST] = point
+                                g[prev_segment + _G_POS] = (held[0] + held[1]) >> 1
+                                g[prev_segment + _G_DELTA] = (held[1] - held[0]) >> 1
+                            else:
+                                if held[0] < st[0]: st[0] = held[0]
+                                if held[1] > st[1]: st[1] = held[1]
+                                g[segment + _G_LAST] = point
+                                _seg_close(g, segment, st, flat_threshold, true)
+                                var k: i64 = 0
+                                while k < _GS:
+                                    g[prev_segment + k] = g[segment + k]
+                                    k = k + 1
+                                k = 0
+                                while k < 8:
+                                    held[k] = st[k]
+                                    k = k + 1
+                        count = count - 1
+                    on_edge = false
+                    segment = 0 - 1
+            if point == last:
+                if passed:
+                    walk = false
+                passed = true
+            if walk:
+                if not on_edge and ((pout[point] == 1 or pout[point] == 0 - 1) or point == pprev[point]):
+                    if count > 1000:
+                        return 0
+                    segment_dir = pout[point]
+                    segment = _new_segment(g, count)
+                    count = count + 1
+                    g[segment + _G_DIR] = segment_dir
+                    g[segment + _G_FIRST] = point
+                    g[segment + _G_LAST] = point
+                    if prev_segment >= 0:
+                        prev_segment = segment - _GS
+                    st[0] = fy[point]
+                    st[1] = fy[point]
+                    st[2] = fx[point]
+                    st[3] = fx[point]
+                    st[4] = pf[point]
+                    st[5] = pf[point]
+                    if (pf[point] & _F_CONTROL) != 0:
+                        st[6] = 32000
+                        st[7] = 0 - 32000
+                    else:
+                        st[6] = fx[point]
+                        st[7] = fx[point]
+                    on_edge = true
+                    if point == pprev[point]:
+                        g[segment + _G_POS] = st[0]
+                        if (pf[point] & _F_CONTROL) != 0:
+                            g[segment + _G_FLAGS] = g[segment + _G_FLAGS] | _EDGE_ROUND
+                        g[segment + _G_MIN] = fx[point]
+                        g[segment + _G_MAX] = fx[point]
+                        g[segment + _G_HEIGHT] = 0
+                        on_edge = false
+                        segment = 0 - 1
+                point = pnext[point]
+        c = c + 1
+    var s: i64 = 0
+    while s < count:
+        val sb = s * _GS
+        val first = g[sb + _G_FIRST]
+        val last = g[sb + _G_LAST]
+        val first_v = fx[first]
+        val last_v = fx[last]
+        val before_v = fx[pprev[first]]
+        val after_v = fx[pnext[last]]
+        if first_v < last_v:
+            if before_v < first_v:
+                g[sb + _G_HEIGHT] = g[sb + _G_HEIGHT] + ((first_v - before_v) >> 1)
+            if after_v > last_v:
+                g[sb + _G_HEIGHT] = g[sb + _G_HEIGHT] + ((after_v - last_v) >> 1)
+        else:
+            if before_v > first_v:
+                g[sb + _G_HEIGHT] = g[sb + _G_HEIGHT] + ((before_v - first_v) >> 1)
+            if after_v < last_v:
+                g[sb + _G_HEIGHT] = g[sb + _G_HEIGHT] + ((last_v - after_v) >> 1)
+        s = s + 1
+    count
+
+# af_latin_hints_link_segments. `max_width` is the largest standard width
+# (0 while the widths themselves are being measured).
+fn _link_segments(mut g: [i64], count: i64, major_dir: i64, upem: i64, max_width: i64):
+    var len_threshold = 8 * upem / 2048
+    if len_threshold == 0: len_threshold = 1
+    val len_score = 6000 * upem / 2048
+    var a: i64 = 0
+    while a < count:
+        val ab = a * _GS
+        if g[ab + _G_DIR] == major_dir:
+            var b: i64 = 0
+            while b < count:
+                val bb = b * _GS
+                val pos1 = g[ab + _G_POS]
+                val pos2 = g[bb + _G_POS]
+                if g[ab + _G_DIR] + g[bb + _G_DIR] == 0 and pos2 > pos1:
+                    var lo = g[ab + _G_MIN]
+                    var hi = g[ab + _G_MAX]
+                    if lo < g[bb + _G_MIN]: lo = g[bb + _G_MIN]
+                    if hi > g[bb + _G_MAX]: hi = g[bb + _G_MAX]
+                    val len = hi - lo
+                    if len >= len_threshold:
+                        val dist = pos2 - pos1
+                        var dist_demerit = dist
+                        if max_width != 0:
+                            val delta = (dist << 10) / max_width - 1024
+                            if delta > 10000: dist_demerit = 32000
+                            else if delta > 0: dist_demerit = delta * delta / 3000
+                            else: dist_demerit = 0
+                        val score = dist_demerit + len_score / len
+                        if score < g[ab + _G_SCORE]:
+                            g[ab + _G_SCORE] = score
+                            g[ab + _G_LINK] = b
+                        if score < g[bb + _G_SCORE]:
+                            g[bb + _G_SCORE] = score
+                            g[bb + _G_LINK] = a
+                b = b + 1
+        a = a + 1
+    a = 0
+    while a < count:
+        val ab = a * _GS
+        val other = g[ab + _G_LINK]
+        if other >= 0 and g[other * _GS + _G_LINK] != a:
+            g[ab + _G_LINK] = 0 - 1
+            g[ab + _G_SERIF] = g[other * _GS + _G_LINK]
+        a = a + 1
+
+# af_latin_hints_compute_edges, vertical dimension. Returns the edge count.
+fn _compute_edges(mut g: [i64], count: i64, major_dir: i64, scale: i64, stdw: i64, mut e: [i64]) -> i64:
+    var edges: i64 = 0
+    val segment_width_threshold = _div_fix(32, scale)
+    var edge_distance_threshold = _mul_fix(stdw / 5, scale)
+    if edge_distance_threshold > 16: edge_distance_threshold = 16
+    edge_distance_threshold = _div_fix(edge_distance_threshold, scale)
+    var s: i64 = 0
+    while s < count:
+        val sb = s * _GS
+        if g[sb + _G_HEIGHT] >= 0 and g[sb + _G_DELTA] <= segment_width_threshold and g[sb + _G_DIR] != _DIR_NONE and not (g[sb + _G_SERIF] >= 0 and 2 * g[sb + _G_HEIGHT] < 0):
+            var found: i64 = 0 - 1
+            var ee: i64 = 0
+            while ee < edges and found < 0:
+                if _abs(g[sb + _G_POS] - e[ee * _ES + _E_FPOS]) < edge_distance_threshold and e[ee * _ES + _E_DIR] == g[sb + _G_DIR]:
+                    found = ee
+                ee = ee + 1
+            if found < 0:
+                val fpos = g[sb + _G_POS]
+                var k: i64 = 0
+                while k < _ES:
+                    e.push(0)
+                    k = k + 1
+                var at = edges
+                var shift = true
+                while at > 0 and shift:
+                    val before = e[(at - 1) * _ES + _E_FPOS]
+                    if before < fpos or (before == fpos and g[sb + _G_DIR] == major_dir):
+                        shift = false
+                    else:
+                        k = 0
+                        while k < _ES:
+                            e[at * _ES + k] = e[(at - 1) * _ES + k]
+                            k = k + 1
+                        at = at - 1
+                edges = edges + 1
+                val eb = at * _ES
+                k = 0
+                while k < _ES:
+                    e[eb + k] = 0
+                    k = k + 1
+                e[eb + _E_FIRST] = s
+                e[eb + _E_LAST] = s
+                e[eb + _E_DIR] = g[sb + _G_DIR]
+                e[eb + _E_FPOS] = fpos
+                e[eb + _E_OPOS] = _mul_fix(fpos, scale)
+                e[eb + _E_POS] = e[eb + _E_OPOS]
+                e[eb + _E_LINK] = 0 - 1
+                e[eb + _E_SERIF] = 0 - 1
+                g[sb + _G_EDGE_NEXT] = s
+            else:
+                val fb = found * _ES
+                g[sb + _G_EDGE_NEXT] = e[fb + _E_FIRST]
+                g[e[fb + _E_LAST] * _GS + _G_EDGE_NEXT] = s
+                e[fb + _E_LAST] = s
+        s = s + 1
+    s = 0
+    while s < count:
+        val sb = s * _GS
+        if g[sb + _G_DIR] == _DIR_NONE:
+            var found: i64 = 0 - 1
+            var ee: i64 = 0
+            while ee < edges and found < 0:
+                if _abs(g[sb + _G_POS] - e[ee * _ES + _E_FPOS]) < edge_distance_threshold:
+                    found = ee
+                ee = ee + 1
+            if found >= 0:
+                val fb = found * _ES
+                g[sb + _G_EDGE_NEXT] = e[fb + _E_FIRST]
+                g[e[fb + _E_LAST] * _GS + _G_EDGE_NEXT] = s
+                e[fb + _E_LAST] = s
+        s = s + 1
+    var ed: i64 = 0
+    while ed < edges:
+        val first = e[ed * _ES + _E_FIRST]
+        var seg = first
+        var again = true
+        while again:
+            g[seg * _GS + _G_EDGE] = ed
+            seg = g[seg * _GS + _G_EDGE_NEXT]
+            again = seg != first
+        ed = ed + 1
+    ed = 0
+    while ed < edges:
+        val eb = ed * _ES
+        var is_round: i64 = 0
+        var is_straight: i64 = 0
+        val first = e[eb + _E_FIRST]
+        var seg = first
+        var again = true
+        while again:
+            val sb = seg * _GS
+            if (g[sb + _G_FLAGS] & _EDGE_ROUND) != 0: is_round = is_round + 1
+            else: is_straight = is_straight + 1
+            val serif = g[sb + _G_SERIF]
+            val link = g[sb + _G_LINK]
+            val is_serif = serif >= 0 and g[serif * _GS + _G_EDGE] >= 0 and g[serif * _GS + _G_EDGE] != ed
+            if (link >= 0 and g[link * _GS + _G_EDGE] >= 0) or is_serif:
+                var edge2 = e[eb + _E_LINK]
+                var seg2 = link
+                if is_serif:
+                    seg2 = serif
+                    edge2 = e[eb + _E_SERIF]
+                if edge2 >= 0:
+                    val edge_delta = _abs(e[eb + _E_FPOS] - e[edge2 * _ES + _E_FPOS])
+                    val seg_delta = _abs(g[sb + _G_POS] - g[seg2 * _GS + _G_POS])
+                    if seg_delta < edge_delta:
+                        edge2 = g[seg2 * _GS + _G_EDGE]
+                else:
+                    edge2 = g[seg2 * _GS + _G_EDGE]
+                if is_serif:
+                    e[eb + _E_SERIF] = edge2
+                    e[edge2 * _ES + _E_FLAGS] = e[edge2 * _ES + _E_FLAGS] | _EDGE_SERIF
+                else:
+                    e[eb + _E_LINK] = edge2
+            seg = g[sb + _G_EDGE_NEXT]
+            again = seg != first
+        # `edge->flags = AF_EDGE_NORMAL` drops a SERIF mark set by an earlier edge.
+        e[eb + _E_FLAGS] = 0
+        if is_round > 0 and is_round >= is_straight:
+            e[eb + _E_FLAGS] = _EDGE_ROUND
+        if e[eb + _E_SERIF] >= 0 and e[eb + _E_LINK] >= 0:
+            e[eb + _E_SERIF] = 0 - 1
+        ed = ed + 1
+    edges
+
+# af_latin_hints_compute_blue_edges.
+fn _blue_edges(mut e: [i64], edges: i64, major_dir: i64, upem: i64, scaled: [i64]):
+    val scale = scaled[1]
+    val blues = scaled[_Z_BLUES]
+    var ed: i64 = 0
+    while ed < edges:
+        val eb = ed * _ES
+        var best_dist = _mul_fix(upem / 40, scale)
+        if best_dist > 32: best_dist = 32
+        var bb: i64 = 0
+        while bb < blues:
+            val zb = _Z_BLUES + 1 + bb * _ZB
+            val flags = scaled[zb + 4]
+            if (flags & _BLUE_ACTIVE) != 0:
+                val is_top = (flags & _BLUE_TOP) != 0
+                val is_major = e[eb + _E_DIR] == major_dir
+                if is_top != is_major:
+                    var dist = (_abs(e[eb + _E_FPOS] - scaled[zb]) * scale + 32768) >> 16
+                    if dist < best_dist:
+                        best_dist = dist
+                        e[eb + _E_BLUE] = scaled[zb + 2]
+                        e[eb + _E_HAS_BLUE] = 1
+                    if (e[eb + _E_FLAGS] & _EDGE_ROUND) != 0 and dist != 0:
+                        val is_under_ref = e[eb + _E_FPOS] < scaled[zb]
+                        if is_top != is_under_ref:
+                            dist = (_abs(e[eb + _E_FPOS] - scaled[zb + 1]) * scale + 32768) >> 16
+                            if dist < best_dist:
+                                best_dist = dist
+                                e[eb + _E_BLUE] = scaled[zb + 3]
+                                e[eb + _E_HAS_BLUE] = 1
+            bb = bb + 1
+        ed = ed + 1
+
+fn _edge_seg_min(fx: [i64], g: [i64], e: [i64], eb: i64) -> i64:
+    val f = e[eb + _E_FIRST] * _GS
+    val l = e[eb + _E_LAST] * _GS
+    var m = fx[g[f + _G_FIRST]]
+    var v = fx[g[f + _G_LAST]]
+    if v < m: m = v
+    v = fx[g[l + _G_FIRST]]
+    if v < m: m = v
+    v = fx[g[l + _G_LAST]]
+    if v < m: m = v
+    m
+
+fn _edge_seg_max(fx: [i64], g: [i64], e: [i64], eb: i64) -> i64:
+    val f = e[eb + _E_FIRST] * _GS
+    val l = e[eb + _E_LAST] * _GS
+    var m = fx[g[f + _G_FIRST]]
+    var v = fx[g[f + _G_LAST]]
+    if v > m: m = v
+    v = fx[g[l + _G_FIRST]]
+    if v > m: m = v
+    v = fx[g[l + _G_LAST]]
+    if v > m: m = v
+    m
+
+# The edge below a fitted edge must not end up above it.
+fn _keep_order_below(mut e: [i64], ed: i64):
+    val eb = ed * _ES
+    if ed > 0 and e[eb + _E_POS] < e[eb - _ES + _E_POS]:
+        val link = e[eb + _E_LINK]
+        if link >= 0 and _abs(e[link * _ES + _E_POS] - e[eb - _ES + _E_POS]) > 16:
+            e[eb + _E_POS] = e[eb - _ES + _E_POS]
+
+# af_latin_hint_edges, vertical dimension, light mode: a stem keeps its scaled
+# width (af_latin_compute_stem_width returns it unchanged).
+fn _hint_edges(fx: [i64], g: [i64], mut e: [i64], edges: i64):
+    var anchor: i64 = 0 - 1
+    var has_non_stem_edges = false
+    var ed: i64 = 0
+    while ed < edges:
+        val eb = ed * _ES
+        if (e[eb + _E_FLAGS] & _EDGE_DONE) == 0:
+            var edge1: i64 = 0 - 1
+            var edge2 = e[eb + _E_LINK]
+            var blue: i64 = 0
+            if e[eb + _E_HAS_BLUE] != 0:
+                blue = e[eb + _E_BLUE]
+                edge1 = ed
+            else if edge2 >= 0 and e[edge2 * _ES + _E_HAS_BLUE] != 0:
+                blue = e[edge2 * _ES + _E_BLUE]
+                edge1 = edge2
+                edge2 = ed
+            if edge1 >= 0:
+                e[edge1 * _ES + _E_POS] = blue
+                e[edge1 * _ES + _E_FLAGS] = e[edge1 * _ES + _E_FLAGS] | _EDGE_DONE
+                if edge2 >= 0 and e[edge2 * _ES + _E_HAS_BLUE] == 0:
+                    e[edge2 * _ES + _E_POS] = blue + e[edge2 * _ES + _E_OPOS] - e[edge1 * _ES + _E_OPOS]
+                    e[edge2 * _ES + _E_FLAGS] = e[edge2 * _ES + _E_FLAGS] | _EDGE_DONE
+                if anchor < 0: anchor = ed
+        ed = ed + 1
+    ed = 0
+    while ed < edges:
+        val eb = ed * _ES
+        if (e[eb + _E_FLAGS] & _EDGE_DONE) == 0:
+            val edge2 = e[eb + _E_LINK]
+            val e2 = edge2 * _ES
+            if edge2 < 0:
+                has_non_stem_edges = true
+            else if e[e2 + _E_HAS_BLUE] != 0:
+                e[eb + _E_POS] = e[e2 + _E_POS] + e[eb + _E_OPOS] - e[e2 + _E_OPOS]
+                e[eb + _E_FLAGS] = e[eb + _E_FLAGS] | _EDGE_DONE
+            else if anchor < 0:
+                val org_len = e[e2 + _E_OPOS] - e[eb + _E_OPOS]
+                val cur_len = org_len
+                val u_off: i64 = if cur_len <= 64: 32 else: 38
+                val d_off: i64 = if cur_len <= 64: 32 else: 26
+                if cur_len < 96:
+                    val org_center = e[eb + _E_OPOS] + (org_len >> 1)
+                    var cur_pos1 = _pix_round(org_center)
+                    if _abs(org_center - (cur_pos1 - u_off)) < _abs(org_center - (cur_pos1 + d_off)):
+                        cur_pos1 = cur_pos1 - u_off
+                    else:
+                        cur_pos1 = cur_pos1 + d_off
+                    e[eb + _E_POS] = cur_pos1 - cur_len / 2
+                    e[e2 + _E_POS] = e[eb + _E_POS] + cur_len
+                else:
+                    e[eb + _E_POS] = _pix_round(e[eb + _E_OPOS])
+                anchor = ed
+                e[eb + _E_FLAGS] = e[eb + _E_FLAGS] | _EDGE_DONE
+                e[e2 + _E_POS] = e[eb + _E_POS] + org_len
+            else:
+                val ab = anchor * _ES
+                val org_pos = e[ab + _E_POS] + (e[eb + _E_OPOS] - e[ab + _E_OPOS])
+                val org_len = e[e2 + _E_OPOS] - e[eb + _E_OPOS]
+                val org_center = org_pos + (org_len >> 1)
+                val cur_len = org_len
+                if (e[e2 + _E_FLAGS] & _EDGE_DONE) != 0:
+                    e[eb + _E_POS] = e[e2 + _E_POS] - cur_len
+                else if cur_len < 96:
+                    val u_off: i64 = if cur_len <= 64: 32 else: 38
+                    val d_off: i64 = if cur_len <= 64: 32 else: 26
+                    var cur_pos1 = _pix_round(org_center)
+                    if _abs(org_center - (cur_pos1 - u_off)) < _abs(org_center - (cur_pos1 + d_off)):
+                        cur_pos1 = cur_pos1 - u_off
+                    else:
+                        cur_pos1 = cur_pos1 + d_off
+                    e[eb + _E_POS] = cur_pos1 - cur_len / 2
+                    e[e2 + _E_POS] = cur_pos1 + cur_len / 2
+                else:
+                    val cur_pos1 = _pix_round(org_pos)
+                    val delta1 = _abs(cur_pos1 + (cur_len >> 1) - org_center)
+                    val cur_pos2 = _pix_round(org_pos + org_len) - cur_len
+                    val delta2 = _abs(cur_pos2 + (cur_len >> 1) - org_center)
+                    e[eb + _E_POS] = if delta1 < delta2: cur_pos1 else: cur_pos2
+                    e[e2 + _E_POS] = e[eb + _E_POS] + cur_len
+                e[eb + _E_FLAGS] = e[eb + _E_FLAGS] | _EDGE_DONE
+                e[e2 + _E_FLAGS] = e[e2 + _E_FLAGS] | _EDGE_DONE
+                _keep_order_below(e, ed)
+        ed = ed + 1
+    if not has_non_stem_edges and anchor >= 0:
+        return
+    ed = 0
+    while ed < edges:
+        val eb = ed * _ES
+        if (e[eb + _E_FLAGS] & _EDGE_DONE) == 0:
+            var delta: i64 = 1000
+            var skip = false
+            val serif = e[eb + _E_SERIF]
+            if serif >= 0:
+                delta = e[serif * _ES + _E_OPOS] - e[eb + _E_OPOS]
+                var top = serif
+                var bottom = ed
+                if delta < 0:
+                    delta = 0 - delta
+                    top = ed
+                    bottom = serif
+                if delta < 96:
+                    var min_pos = _edge_seg_min(fx, g, e, top * _ES)
+                    var max_pos = _edge_seg_max(fx, g, e, top * _ES)
+                    val bmin = _edge_seg_min(fx, g, e, bottom * _ES)
+                    val bmax = _edge_seg_max(fx, g, e, bottom * _ES)
+                    if bmin < min_pos: min_pos = bmin
+                    if bmax > max_pos: max_pos = bmax
+                    var mid = bottom + 1
+                    while mid < top and not skip:
+                        val e_min = _edge_seg_min(fx, g, e, mid * _ES)
+                        val e_max = _edge_seg_max(fx, g, e, mid * _ES)
+                        if not ((e_min < min_pos and e_max < min_pos) or (e_min > max_pos and e_max > max_pos)):
+                            skip = true
+                        mid = mid + 1
+            if not skip:
+                if delta < 80:
+                    e[eb + _E_POS] = e[serif * _ES + _E_POS] + (e[eb + _E_OPOS] - e[serif * _ES + _E_OPOS])
+                else if anchor < 0:
+                    e[eb + _E_POS] = _pix_round(e[eb + _E_OPOS])
+                    anchor = ed
+                else:
+                    var before = ed - 1
+                    while before >= 0 and (e[before * _ES + _E_FLAGS] & _EDGE_DONE) == 0:
+                        before = before - 1
+                    var after = ed + 1
+                    while after < edges and (e[after * _ES + _E_FLAGS] & _EDGE_DONE) == 0:
+                        after = after + 1
+                    if before >= 0 and after < edges:
+                        val bb = before * _ES
+                        val ab = after * _ES
+                        if e[ab + _E_OPOS] == e[bb + _E_OPOS]:
+                            e[eb + _E_POS] = e[bb + _E_POS]
+                        else:
+                            e[eb + _E_POS] = e[bb + _E_POS] + _mul_div(e[eb + _E_OPOS] - e[bb + _E_OPOS], e[ab + _E_POS] - e[bb + _E_POS], e[ab + _E_OPOS] - e[bb + _E_OPOS])
+                    else:
+                        val ab = anchor * _ES
+                        e[eb + _E_POS] = e[ab + _E_POS] + ((e[eb + _E_OPOS] - e[ab + _E_OPOS] + 16) & (0 - 32))
+                e[eb + _E_FLAGS] = e[eb + _E_FLAGS] | _EDGE_DONE
+                _keep_order_below(e, ed)
+                if ed + 1 < edges and (e[eb + _ES + _E_FLAGS] & _EDGE_DONE) != 0 and e[eb + _E_POS] > e[eb + _ES + _E_POS]:
+                    val link = e[eb + _E_LINK]
+                    # FreeType reads `edge[-1]` here as well; the first edge has no link
+                    # in practice (a linked edge is fitted in the stem side).
+                    if link >= 0 and ed > 0 and _abs(e[link * _ES + _E_POS] - e[eb - _ES + _E_POS]) > 16:
+                        e[eb + _E_POS] = e[eb + _ES + _E_POS]
+        ed = ed + 1
+
+# af_glyph_hints_align_edge_points and af_glyph_hints_align_strong_points.
+# reason: one array per point field is the interpreter-cheap layout (see file header).
+# @allow(too_many_arguments)
+fn _align_edge_and_strong_points(fx: [i64], fy: [i64], oy: [i64], mut py: [i64], mut pf: [i64], pnext: [i64], g: [i64], count: i64, mut e: [i64], edges: i64):
+    var s: i64 = 0
+    while s < count:
+        val sb = s * _GS
+        val edge = g[sb + _G_EDGE]
+        if edge >= 0:
+            val last = g[sb + _G_LAST]
+            var point = g[sb + _G_FIRST]
+            var again = true
+            while again:
+                py[point] = e[edge * _ES + _E_POS]
+                pf[point] = pf[point] | _F_TOUCH_Y
+                again = point != last
+                point = pnext[point]
+        s = s + 1
+    if edges == 0:
+        return
+    val n = fx.len()
+    val top = (edges - 1) * _ES
+    var i: i64 = 0
+    while i < n:
+        if (pf[i] & (_F_TOUCH_Y | _F_WEAK)) == 0:
+            val fu = fy[i]
+            val ou = oy[i]
+            var u: i64 = 0
+            if e[_E_FPOS] - fu >= 0:
+                u = e[_E_POS] - (e[_E_OPOS] - ou)
+            else if fu - e[top + _E_FPOS] >= 0:
+                u = e[top + _E_POS] + (ou - e[top + _E_OPOS])
+            else:
+                var lo: i64 = 0
+                var hi = edges
+                var hit: i64 = 0 - 1
+                if hi <= 8:
+                    var nn: i64 = 0
+                    while nn < hi and e[nn * _ES + _E_FPOS] < fu:
+                        nn = nn + 1
+                    if e[nn * _ES + _E_FPOS] == fu: hit = nn
+                    lo = nn
+                else:
+                    while lo < hi and hit < 0:
+                        val mid = (hi + lo) >> 1
+                        val fpos = e[mid * _ES + _E_FPOS]
+                        if fu < fpos: hi = mid
+                        else if fu > fpos: lo = mid + 1
+                        else: hit = mid
+                if hit >= 0:
+                    u = e[hit * _ES + _E_POS]
+                else:
+                    val bb = (lo - 1) * _ES
+                    val ab = lo * _ES
+                    if e[bb + _E_SCALE] == 0:
+                        e[bb + _E_SCALE] = _div_fix(e[ab + _E_POS] - e[bb + _E_POS], e[ab + _E_FPOS] - e[bb + _E_FPOS])
+                    u = e[bb + _E_POS] + _mul_fix(fu - e[bb + _E_FPOS], e[bb + _E_SCALE])
+            py[i] = u
+            pf[i] = pf[i] | _F_TOUCH_Y
+        i = i + 1
+
+# af_iup_interp over points p1..p2 between touched ref1 and ref2: FreeType's
+# u is `py` (hinted), its v is `oy` (scaled).
+fn _iup_interp(oy: [i64], mut py: [i64], p1: i64, p2: i64, ref1_in: i64, ref2_in: i64):
+    if p1 > p2:
+        return
+    var ref1 = ref1_in
+    var ref2 = ref2_in
+    if oy[ref1] > oy[ref2]:
+        ref1 = ref2_in
+        ref2 = ref1_in
+    val v1 = oy[ref1]
+    val v2 = oy[ref2]
+    val u1 = py[ref1]
+    val u2 = py[ref2]
+    val d1 = u1 - v1
+    val d2 = u2 - v2
+    val flat = u1 == u2 or v1 == v2
+    val scale = if flat: 0 else: _div_fix(u2 - u1, v2 - v1)
+    var i = p1
+    while i <= p2:
+        var u = oy[i]
+        if u <= v1: u = u + d1
+        else if u >= v2: u = u + d2
+        else if flat: u = u1
+        else: u = u1 + _mul_fix(u - v1, scale)
+        py[i] = u
+        i = i + 1
+
+# af_glyph_hints_align_weak_points: interpolate untouched points per contour.
+fn _align_weak_points(oy: [i64], mut py: [i64], pf: [i64], pprev: [i64], contours: [i64]):
+    var c: i64 = 0
+    while c < contours.len():
+        val first_point = contours[c]
+        val end_point = pprev[first_point]
+        var point = first_point
+        while point <= end_point and (pf[point] & _F_TOUCH_Y) == 0:
+            point = point + 1
+        if point <= end_point:
+            val first_touched = point
+            var last_touched = point
+            var more = true
+            while more:
+                while point < end_point and (pf[point + 1] & _F_TOUCH_Y) != 0:
+                    point = point + 1
+                last_touched = point
+                point = point + 1
+                while point <= end_point and (pf[point] & _F_TOUCH_Y) == 0:
+                    point = point + 1
+                if point > end_point:
+                    more = false
+                else:
+                    _iup_interp(oy, py, last_touched + 1, point - 1, last_touched, point)
+            if last_touched == first_touched:
+                val delta = py[first_touched] - oy[first_touched]
+                if delta != 0:
+                    var k = first_point
+                    while k <= end_point:
+                        if k != first_touched:
+                            py[k] = oy[k] + delta
+                        k = k + 1
+            else:
+                if last_touched < end_point:
+                    _iup_interp(oy, py, last_touched + 1, end_point, last_touched, first_touched)
+                if first_touched > 0:
+                    _iup_interp(oy, py, first_point, first_touched - 1, last_touched, first_touched)
+        c = c + 1
+
+# A glyph of FreeType's `af_latn_nonbase_uniranges` (afranges.c): a spacing or
+# combining accent. It is hinted without blue zones (`_` then sits on a
+# half-pixel centre instead of the descender zone).
+# reason: a Unicode scalar in (see file header).
+# @allow(primitive_api)
+pub fn af_latin_is_nonbase(codepoint: i64) -> bool:
+    val cp = codepoint
+    if (cp >= 94 and cp <= 96) or cp == 126 or cp == 168 or cp == 169 or (cp >= 174 and cp <= 176) or cp == 180 or cp == 184 or (cp >= 188 and cp <= 190):
+        return true
+    (cp >= 697 and cp <= 735) or (cp >= 741 and cp <= 879) or (cp >= 6832 and cp <= 6891) or (cp >= 7616 and cp <= 7679) or cp == 8215 or cp == 8254 or cp == 42888 or (cp >= 43000 and cp <= 43002)
+
+# af_sort_and_quantize_widths over the first `count` values of `w`; returns
+# the new count.
+fn _sort_and_quantize_widths(mut w: [i64], count: i64, threshold: i64) -> i64:
+    if count == 1:
+        return 1
+    var i: i64 = 1
+    while i < count:
+        var j = i
+        while j > 0 and w[j] < w[j - 1]:
+            val swap = w[j]
+            w[j] = w[j - 1]
+            w[j - 1] = swap
+            j = j - 1
+        i = i + 1
+    var cur_idx: i64 = 0
+    var cur_val = if count > 0: w[0] else: 0
+    i = 1
+    while i < count:
+        if w[i] - cur_val > threshold or i == count - 1:
+            var sum: i64 = 0
+            if w[i] - cur_val <= threshold and i == count - 1:
+                i = i + 1
+            var j = cur_idx
+            while j < i:
+                sum = sum + w[j]
+                w[j] = 0
+                j = j + 1
+            w[cur_idx] = sum / j
+            if i < count - 1:
+                cur_idx = i + 1
+                cur_val = w[cur_idx]
+        i = i + 1
+    cur_idx = 1
+    i = 1
+    while i < count:
+        if w[i] != 0:
+            w[cur_idx] = w[i]
+            cur_idx = cur_idx + 1
+        i = i + 1
+    if count == 0: 0 else: cur_idx
+
+fn _sort(mut values: [i64]):
+    var i: i64 = 1
+    while i < values.len():
+        var j = i
+        while j > 0 and values[j] < values[j - 1]:
+            val swap = values[j]
+            values[j] = values[j - 1]
+            values[j - 1] = swap
+            j = j - 1
+        i = i + 1
+
+# One blue character: [found, extremum y, round, ascender, descender] with the
+# running ascender / descender of the zone passed in and handed back.
+fn _blue_extremum(pts: [i64], is_top: bool, flat_threshold: i64, ascender_in: i64, descender_in: i64) -> [i64]:
+    var ascender = ascender_in
+    var descender = descender_in
+    val n = pts.len() / 3
+    if n <= 2:
+        return [0, 0, 0, ascender, descender]
+    var best_point: i64 = 0 - 1
+    var best_y: i64 = 0
+    var best_first: i64 = 0 - 1
+    var best_last: i64 = 0 - 1
+    var first: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        if (pts[i * 3 + 2] & 2) != 0:
+            val last = i
+            if last > first:
+                var pp = first
+                while pp <= last:
+                    val y = pts[pp * 3 + 1]
+                    if is_top:
+                        if best_point < 0 or y > best_y:
+                            best_point = pp
+                            best_y = y
+                            if best_y > ascender: ascender = best_y
+                        else if y < descender:
+                            descender = y
+                    else:
+                        if best_point < 0 or y < best_y:
+                            best_point = pp
+                            best_y = y
+                            if best_y < descender: descender = best_y
+                        else if y > ascender:
+                            ascender = y
+                    pp = pp + 1
+                if best_point > best_last:
+                    best_first = first
+                    best_last = last
+            first = i + 1
+        i = i + 1
+    if best_point < 0:
+        return [0, 0, 0, ascender, descender]
+    val best_x = pts[best_point * 3]
+    var seg_first = best_point
+    var seg_last = best_point
+    var on_first: i64 = 0 - 1
+    var on_last: i64 = 0 - 1
+    if (pts[best_point * 3 + 2] & 1) != 0:
+        on_first = best_point
+        on_last = best_point
+    var prev = best_point
+    var again = true
+    while again:
+        prev = if prev > best_first: prev - 1 else: best_last
+        val dist = _abs(pts[prev * 3 + 1] - best_y)
+        if dist > 5 and _abs(pts[prev * 3] - best_x) <= 20 * dist:
+            again = false
+        else:
+            seg_first = prev
+            if (pts[prev * 3 + 2] & 1) != 0:
+                on_first = prev
+                if on_last < 0: on_last = prev
+            again = prev != best_point
+    var next = best_point
+    again = true
+    while again:
+        next = if next < best_last: next + 1 else: best_first
+        val dist = _abs(pts[next * 3 + 1] - best_y)
+        if dist > 5 and _abs(pts[next * 3] - best_x) <= 20 * dist:
+            again = false
+        else:
+            seg_last = next
+            if (pts[next * 3 + 2] & 1) != 0:
+                on_last = next
+                if on_first < 0: on_first = next
+            again = next != best_point
+    var round: i64 = 0
+    if not (on_first >= 0 and on_last >= 0 and _abs(pts[on_last * 3] - pts[on_first * 3]) > flat_threshold):
+        if (pts[seg_first * 3 + 2] & 1) == 0 or (pts[seg_last * 3 + 2] & 1) == 0:
+            round = 1
+    [1, best_y, round, ascender, descender]
+
+# af_latin_metrics_init_widths (vertical axis) and af_latin_metrics_init_blues.
+# `std_pts` are the points of the standard character, `blue_pts` those of the
+# characters of AF_LATIN_BLUE_CHARS in order (`|` skipped; a missing glyph is
+# an empty array). Empty result: the font has no blue zone and is not hinted.
+# reason: flat integer arrays are the hinter's data model (see file header).
+# @allow(primitive_api)
+pub fn af_latin_face_metrics(upem: i64, std_pts: [i64], blue_pts: [[i64]]) -> [i64]:
+    var m: [i64] = [0; 20]
+    m[_M_UPEM] = upem
+    var width_count: i64 = 0
+    if std_pts.len() > 0:
+        val contours = _contours(std_pts)
+        val n = std_pts.len() / 3
+        var fx: [i64] = [0; n]
+        var fy: [i64] = [0; n]
+        var pf: [i64] = [0; n]
+        var pin: [i64] = [0; n]
+        var pout: [i64] = [0; n]
+        var pnext: [i64] = [0; n]
+        var pprev: [i64] = [0; n]
+        _reload(std_pts, contours, upem, fx, fy, pf, pin, pout, pnext, pprev)
+        var g: [i64] = []
+        val count = _compute_segments(fx, fy, pf, pin, pout, pnext, pprev, contours, upem, g)
+        _link_segments(g, count, _major_dir(std_pts, contours), upem, 0)
+        var widths: [i64] = [0; 16]
+        var s: i64 = 0
+        while s < count:
+            val link = g[s * _GS + _G_LINK]
+            if link > s and g[link * _GS + _G_LINK] == s and width_count < 16:
+                widths[width_count] = _abs(g[s * _GS + _G_POS] - g[link * _GS + _G_POS])
+                width_count = width_count + 1
+            s = s + 1
+        width_count = _sort_and_quantize_widths(widths, width_count, upem / 100)
+        var k: i64 = 0
+        while k < width_count:
+            m[_M_WIDTHS + 1 + k] = widths[k]
+            k = k + 1
+    m[_M_WIDTHS] = width_count
+    m[_M_STDW] = if width_count > 0: m[_M_WIDTHS + 1] else: 50 * upem / 2048
+    val flat_threshold = upem / 14
+    var blue_count: i64 = 0
+    var glyph: i64 = 0
+    var zone: i64 = 0
+    var ci: i64 = 0
+    val chars = AF_LATIN_BLUE_CHARS
+    while ci <= chars.byte_len():
+        var flats: [i64] = []
+        var rounds: [i64] = []
+        var ascender: i64 = 0
+        var descender: i64 = 0
+        # zones 0, 2, 3 are top zones; zone 3 fits the x-height
+        val is_top = zone == 0 or zone == 2 or zone == 3
+        while ci < chars.byte_len() and chars.char_code_at(ci) != 124:
+            if glyph < blue_pts.len():
+                val r = _blue_extremum(blue_pts[glyph], is_top, flat_threshold, ascender, descender)
+                ascender = r[3]
+                descender = r[4]
+                if r[0] != 0:
+                    if r[2] != 0: rounds.push(r[1]) else: flats.push(r[1])
+            glyph = glyph + 1
+            ci = ci + 1
+        ci = ci + 1
+        if flats.len() > 0 or rounds.len() > 0:
+            _sort(rounds)
+            _sort(flats)
+            var blue_ref: i64 = 0
+            var blue_shoot: i64 = 0
+            if flats.len() == 0:
+                blue_ref = rounds[rounds.len() / 2]
+                blue_shoot = blue_ref
+            else if rounds.len() == 0:
+                blue_ref = flats[flats.len() / 2]
+                blue_shoot = blue_ref
+            else:
+                blue_ref = flats[flats.len() / 2]
+                blue_shoot = rounds[rounds.len() / 2]
+            if blue_shoot != blue_ref and is_top != (blue_shoot > blue_ref):
+                blue_ref = (blue_shoot + blue_ref) / 2
+                blue_shoot = blue_ref
+            m.push(blue_ref)
+            m.push(blue_shoot)
+            m.push(ascender)
+            m.push(descender)
+            m.push((if is_top: _BLUE_TOP else: 0) | (if zone == 3: _BLUE_ADJUSTMENT else: 0))
+            blue_count = blue_count + 1
+        zone = zone + 1
+    if blue_count == 0:
+        return []
+    m[_M_BLUES] = blue_count
+    # A lower zone's upper line must not side the next zone's lower line.
+    var order: [i64] = []
+    var b: i64 = 0
+    while b < blue_count:
+        order.push(b)
+        b = b + 1
+    var i: i64 = 1
+    while i < blue_count:
+        var j = i
+        var sorting = true
+        while j > 0 and sorting:
+            val ja = _M_BLUES + 1 + order[j - 1] * _MB
+            val jb = _M_BLUES + 1 + order[j] * _MB
+            val a = if (m[ja + 4] & _BLUE_TOP) != 0: m[ja] else: m[ja + 1]
+            val bv = if (m[jb + 4] & _BLUE_TOP) != 0: m[jb] else: m[jb + 1]
+            if bv >= a:
+                sorting = false
+            else:
+                val swap = order[j]
+                order[j] = order[j - 1]
+                order[j - 1] = swap
+                j = j - 1
+        i = i + 1
+    i = 0
+    while i + 1 < blue_count:
+        val ia = _M_BLUES + 1 + order[i] * _MB
+        val ib = _M_BLUES + 1 + order[i + 1] * _MB
+        val at = if (m[ia + 4] & _BLUE_TOP) != 0: ia + 1 else: ia
+        val bt = if (m[ib + 4] & _BLUE_TOP) != 0: ib + 1 else: ib
+        if m[at] > m[bt]: m[at] = m[bt]
+        i = i + 1
+    m
+
+# af_latin_metrics_scale_dim for the vertical axis: the x-height fit of the
+# scale and the fitted blue zones. `size64` is the size in 26.6 px. The
+# x-height rounds up from 40/64: FreeType's `increase-x-height` property (52/64
+# for 6..14 ppem) is off by default, and Chrome 159 matches that (8 px `x` is
+# 4 rows, 6 px 3).
+# reason: flat integer arrays are the hinter's data model (see file header).
+# @allow(primitive_api)
+pub fn af_latin_scaled_metrics(face: [i64], size64: i64) -> [i64]:
+    val upem = face[_M_UPEM]
+    val x_scale = _div_fix(size64, upem)
+    var scale = x_scale
+    val blues = face[_M_BLUES]
+    var bb: i64 = 0
+    var adjust: i64 = 0 - 1
+    while bb < blues and adjust < 0:
+        if (face[_M_BLUES + 1 + bb * _MB + 4] & _BLUE_ADJUSTMENT) != 0: adjust = bb
+        bb = bb + 1
+    if adjust >= 0:
+        val scaled = _mul_fix(face[_M_BLUES + 1 + adjust * _MB + 1], scale)
+        val fitted = (scaled + 40) & (0 - 64)
+        if scaled != fitted:
+            val new_scale = _mul_div(scale, fitted, scaled)
+            var max_height = upem
+            bb = 0
+            while bb < blues:
+                val fb = _M_BLUES + 1 + bb * _MB
+                if face[fb + 2] > max_height: max_height = face[fb + 2]
+                if 0 - face[fb + 3] > max_height: max_height = 0 - face[fb + 3]
+                bb = bb + 1
+            val dist = _mul_fix(max_height, new_scale - scale)
+            if dist > 0 - 128 and dist < 128:
+                scale = new_scale
+    var z: [i64] = [x_scale, scale, blues]
+    bb = 0
+    while bb < blues:
+        val fb = _M_BLUES + 1 + bb * _MB
+        val ref_cur = _mul_fix(face[fb], scale)
+        val shoot_cur = _mul_fix(face[fb + 1], scale)
+        var ref_fit = ref_cur
+        var shoot_fit = shoot_cur
+        var flags = face[fb + 4]
+        val dist = _mul_fix(face[fb] - face[fb + 1], scale)
+        if dist <= 48 and dist >= 0 - 48:
+            var delta2 = _abs(dist)
+            delta2 = if delta2 < 32: 0 else: (if delta2 < 48: 32 else: 64)
+            if dist < 0: delta2 = 0 - delta2
+            ref_fit = _pix_round(ref_cur)
+            shoot_fit = ref_fit - delta2
+            flags = flags | _BLUE_ACTIVE
+        z.push(face[fb])
+        z.push(face[fb + 1])
+        z.push(ref_fit)
+        z.push(shoot_fit)
+        z.push(flags)
+        bb = bb + 1
+    z
+
+# af_latin_hints_apply, light mode: the hinted (x, y) of every point in 26.6.
+# `base`: not an `af_latin_is_nonbase` glyph.
+# reason: flat integer arrays are the hinter's data model (see file header).
+# @allow(primitive_api)
+pub fn af_latin_hint_points(pts: [i64], face: [i64], scaled: [i64], base: bool) -> [i64]:
+    val upem = face[_M_UPEM]
+    val contours = _contours(pts)
+    val n = pts.len() / 3
+    var fx: [i64] = [0; n]
+    var fy: [i64] = [0; n]
+    var oy: [i64] = [0; n]
+    var py: [i64] = [0; n]
+    var pf: [i64] = [0; n]
+    var pin: [i64] = [0; n]
+    var pout: [i64] = [0; n]
+    var pnext: [i64] = [0; n]
+    var pprev: [i64] = [0; n]
+    _reload(pts, contours, upem, fx, fy, pf, pin, pout, pnext, pprev)
+    _scale_points(fy, scaled[1], oy, py)
+    val major_dir = _major_dir(pts, contours)
+    var g: [i64] = []
+    val count = _compute_segments(fx, fy, pf, pin, pout, pnext, pprev, contours, upem, g)
+    val width_count = face[_M_WIDTHS]
+    _link_segments(g, count, major_dir, upem, if width_count > 0: face[_M_WIDTHS + width_count] else: 0)
+    var e: [i64] = []
+    val edges = _compute_edges(g, count, major_dir, scaled[1], face[_M_STDW], e)
+    if base:
+        _blue_edges(e, edges, major_dir, upem, scaled)
+    _hint_edges(fx, g, e, edges)
+    _align_edge_and_strong_points(fx, fy, oy, py, pf, pnext, g, count, e, edges)
+    _align_weak_points(oy, py, pf, pprev, contours)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(_mul_fix(fx[i], scaled[0]))
+        out.push(py[i])
+        i = i + 1
+    out

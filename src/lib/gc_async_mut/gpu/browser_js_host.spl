@@ -1,9 +1,7 @@
-# Host adapter: JS interpreter runtime bridge for `browser_engine/script`.
-#
-# Lives outside wm_lane_scope_dirs() (`src/lib/gc_async_mut/gpu/browser_engine/`
-# is a scope root; this file is a sibling on the `gpu` render sub-lane, matching
-# `engine2d_host_clock.spl`), keeping direct `std.nogc_sync_mut.*` imports out
-# of the portable `browser_engine/` lane while using tier-explicit `nogc_sync_mut`.
+# Browser JS Host Adapter
+# Re-exports JS engine symbols and provides host DOM / style-shim helpers
+# for multi-script browser execution without exposing internal JS submodules.
+
 export use std.nogc_sync_mut.js.engine.runtime.{
     JsRuntime,
     js_runtime_with_default_logger,
@@ -16,3 +14,48 @@ export use std.nogc_sync_mut.js.engine.runtime.{
     NATIVE_DOM_EVENT_TARGET_REMOVE,
     NATIVE_DOM_EVENT_TARGET_DISPATCH
 }
+export use std.nogc_sync_mut.js.types.js_types.{JsValue}
+export use std.nogc_sync_mut.js.engine.interpreter_types.{
+    js_to_string,
+    to_boolean,
+    to_number
+}
+
+pub fn browser_js_camel_to_kebab(prop: text) -> text:
+    """Convert camelCase CSS property name (e.g. backgroundColor) to kebab-case."""
+    if prop == "":
+        return ""
+    var out = ""
+    var i = 0
+    val n = prop.byte_len()
+    while i < n:
+        val ch = prop.slice(i, i + 1)
+        val b = prop.byte_at(i)
+        if b >= 65 and b <= 90:
+            if i > 0:
+                out = out + "-"
+            out = out + ch.lower()
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+pub fn browser_js_dom_shim_source() -> text:
+    """JS helper shim installed on projected DOM elements for style/form/selector parity."""
+    var js = ""
+    js = js + "function __simple_collect_text(node) {{ if (node === null || node === undefined) {{ return ''; }} if (node.nodeType === 3) {{ return String(node.data || ''); }} var out = ''; var ch = node.children || []; for (var i = 0; i < ch.length; i = i + 1) {{ out = out + __simple_collect_text(ch[i]); }} return out; }}\n"
+    js = js + "function __simple_sync_text(node) {{ var cur = node; while (cur !== null && cur !== undefined) {{ if (cur.nodeType !== 3) {{ var tn = String(cur.tagName || '').toUpperCase(); if (tn !== 'HTML' && tn !== 'HEAD' && tn !== 'BODY' && tn !== 'STYLE' && tn !== 'SCRIPT') {{ var txt = __simple_collect_text(cur); cur.textContent = txt; cur.__simple_init_text = txt; }} }} cur = cur.parentNode; }} }}\n"
+    js = js + "function __simple_split_ws(s) {{ var raw = String(s || '').trim(); if (raw === '') {{ return []; }} var out = []; var parts = raw.split(' '); for (var i = 0; i < parts.length; i = i + 1) {{ var p = parts[i].trim(); if (p !== '') {{ out.push(p); }} }} return out; }}\n"
+    js = js + "function __simple_match_compound(el, raw) {{ if (el === null || el === undefined || el.nodeType !== 1) {{ return false; }} var sel = raw.trim(); if (sel === '') {{ return false; }} var attr_idx = sel.indexOf('['); if (attr_idx >= 0) {{ var close_idx = sel.indexOf(']'); if (close_idx > attr_idx) {{ var head = sel.slice(0, attr_idx); var inner = sel.slice(attr_idx + 1, close_idx); var tail = sel.slice(close_idx + 1); var eq = inner.indexOf('='); var attr_ok = false; if (eq >= 0) {{ var aname = inner.slice(0, eq).trim(); var aval = inner.slice(eq + 1).trim(); if (aval.length >= 2 && (aval.slice(0, 1) === '\"' || aval.slice(0, 1) === \"'\")) {{ aval = aval.slice(1, aval.length - 1); }} attr_ok = el.hasAttribute(aname) && el.getAttribute(aname) === aval; }} else {{ attr_ok = el.hasAttribute(inner.trim()); }} if (!attr_ok) {{ return false; }} var combined = head + tail; if (combined === '') {{ return true; }} return __simple_match_compound(el, combined); }} }} var tag = ''; var i = 0; while (i < sel.length) {{ var c = sel.slice(i, i + 1); if (c === '#' || c === '.') {{ break; }} tag = tag + c; i = i + 1; }} if (tag !== '' && tag !== '*') {{ if (String(el.tagName || '').toUpperCase() !== tag.toUpperCase()) {{ return false; }} }} while (i < sel.length) {{ var kind = sel.slice(i, i + 1); var start = i + 1; i = start; while (i < sel.length) {{ var c2 = sel.slice(i, i + 1); if (c2 === '#' || c2 === '.') {{ break; }} i = i + 1; }} var tok = sel.slice(start, i); if (kind === '#') {{ if (el.id !== tok) {{ return false; }} }} else if (kind === '.') {{ var cls_list = __simple_split_ws(el.className); var found = false; for (var j = 0; j < cls_list.length; j = j + 1) {{ if (cls_list[j] === tok) {{ found = true; break; }} }} if (!found) {{ return false; }} }} }} return true; }}\n"
+    js = js + "function __simple_match_chain(el, chain) {{ var parts = __simple_split_ws(chain); if (parts.length === 0) {{ return false; }} if (!__simple_match_compound(el, parts[parts.length - 1])) {{ return false; }} var cur = el.parentNode; var idx = parts.length - 2; while (idx >= 0) {{ var matched = false; while (cur !== null && cur !== undefined) {{ if (__simple_match_compound(cur, parts[idx])) {{ matched = true; cur = cur.parentNode; break; }} cur = cur.parentNode; }} if (!matched) {{ return false; }} idx = idx - 1; }} return true; }}\n"
+    js = js + "function __simple_matches_selector(el, selector) {{ var raw = String(selector || ''); var groups = raw.split(','); for (var i = 0; i < groups.length; i = i + 1) {{ if (__simple_match_chain(el, groups[i])) {{ return true; }} }} return false; }}\n"
+    js = js + "function __simple_query_walk(nodes, selector, first_only, out) {{ for (var i = 0; i < nodes.length; i = i + 1) {{ var n = nodes[i]; if (n.nodeType === 1 && __simple_matches_selector(n, selector)) {{ out.push(n); if (first_only) {{ return true; }} }} if (n.children && n.children.length > 0) {{ if (__simple_query_walk(n.children, selector, first_only, out) && first_only) {{ return true; }} }} }} return false; }}\n"
+    js = js + "function __simple_find_id_walk(nodes, target_id) {{ for (var i = 0; i < nodes.length; i = i + 1) {{ var n = nodes[i]; if (n.nodeType === 1 && n.id === target_id) {{ return n; }} if (n.children && n.children.length > 0) {{ var found = __simple_find_id_walk(n.children, target_id); if (found !== null) {{ return found; }} }} }} return null; }}\n"
+    js = js + "function __simple_dom_install(el) {{ if (el === null || el === undefined || el.__simple_dom_ready) {{ return el; }} el.__simple_dom_ready = true; if (!el.__attrs) {{ el.__attrs = {{}}; }} if (!el.__styles) {{ el.__styles = {{}}; }} if (!el.children) {{ el.children = []; }} if (!el.childNodes) {{ el.childNodes = el.children; }} if (el.parentNode === undefined) {{ el.parentNode = null; }} if (!el.addEventListener) {{ el.addEventListener = document.addEventListener; el.removeEventListener = document.removeEventListener; el.dispatchEvent = document.dispatchEvent; }} el.getAttribute = function(name) {{ var v = this.__attrs[name]; if (v === undefined || v === null) {{ return null; }} return String(v); }}; el.setAttribute = function(name, value) {{ var s = String(value); this.__attrs[name] = s; if (name === 'id') {{ this.id = s; }} else if (name === 'class') {{ this.className = s; }} else if (name === 'value') {{ this.value = s; }} }}; el.hasAttribute = function(name) {{ var v = this.__attrs[name]; return v !== undefined && v !== null; }}; el.removeAttribute = function(name) {{ this.__attrs[name] = undefined; if (name === 'id') {{ this.id = ''; }} else if (name === 'class') {{ this.className = ''; }} }}; el.matches = function(sel) {{ return __simple_matches_selector(this, sel); }}; el.appendChild = function(child) {{ if (child === null || child === undefined) {{ return child; }} if (child.parentNode !== null && child.parentNode !== undefined && child.parentNode.removeChild) {{ child.parentNode.removeChild(child); }} child.parentNode = this; this.children.push(child); if (this.childNodes !== this.children) {{ this.childNodes.push(child); }} __simple_sync_text(this); return child; }}; el.removeChild = function(child) {{ if (child === null || child === undefined) {{ return child; }} var kept = []; for (var i = 0; i < this.children.length; i = i + 1) {{ if (this.children[i] !== child) {{ kept.push(this.children[i]); }} }} this.children = kept; this.childNodes = kept; child.parentNode = null; __simple_sync_text(this); return child; }}; el.querySelector = function(sel) {{ var out = []; __simple_query_walk(this.children || [], sel, true, out); return out.length > 0 ? out[0] : null; }}; el.querySelectorAll = function(sel) {{ var out = []; __simple_query_walk(this.children || [], sel, false, out); return out; }}; el.classList = {{ __el: el, contains: function(c) {{ var list = __simple_split_ws(this.__el.className); for (var i = 0; i < list.length; i = i + 1) {{ if (list[i] === c) {{ return true; }} }} return false; }}, add: function(c) {{ if (c === undefined || c === null || c === '') {{ return; }} if (this.contains(c)) {{ return; }} var list = __simple_split_ws(this.__el.className); list.push(String(c)); this.__el.setAttribute('class', list.join(' ')); }}, remove: function(c) {{ var list = __simple_split_ws(this.__el.className); var kept = []; for (var i = 0; i < list.length; i = i + 1) {{ if (list[i] !== c) {{ kept.push(list[i]); }} }} this.__el.setAttribute('class', kept.join(' ')); }}, toggle: function(c) {{ if (this.contains(c)) {{ this.remove(c); return false; }} this.add(c); return true; }} }}; el.style = {{ __el: el, setProperty: function(k, v) {{ this.__el.__styles[String(k)] = String(v); }}, getPropertyValue: function(k) {{ var v = this.__el.__styles[String(k)]; if (v === undefined || v === null) {{ return ''; }} return String(v); }}, removeProperty: function(k) {{ var key = String(k); var old = this.__el.__styles[key]; this.__el.__styles[key] = undefined; if (old === undefined || old === null) {{ return ''; }} return String(old); }} }}; return el; }}\n"
+    js = js + "document.createElement = function(tag) {{ var upper = String(tag || 'div').toUpperCase(); var el = {{ nodeType: 1, tagName: upper, nodeName: upper, id: '', className: '', textContent: '', value: '', parentNode: null, children: [], childNodes: [], __attrs: {{}}, __styles: {{}}, __simple_init_text: '', __simple_init_inner_html: '' }}; return __simple_dom_install(el); }};\n"
+    js = js + "document.createTextNode = function(data) {{ var s = String(data || ''); return {{ nodeType: 3, tagName: '#text', nodeName: '#text', data: s, nodeValue: s, textContent: s, parentNode: null, children: [], childNodes: [] }}; }};\n"
+    js = js + "function __simple_hyd_dom() {{ var seed = document.__simple_dom_seed; var nodes = []; document.__simple_roots = []; if (seed) {{ for (var i = 0; i < seed.count; i = i + 1) {{ var n = seed['n' + i]; nodes.push(n); if (n.nodeType !== 3) {{ __simple_dom_install(n); n.__simple_init_text = String(n.textContent || ''); n.__simple_init_inner_html = ''; }} else {{ n.children = []; n.childNodes = []; n.parentNode = null; }} }} for (var j = 0; j < nodes.length; j = j + 1) {{ var node = nodes[j]; var p = node.__simple_parent_idx; if (p >= 0 && p < nodes.length) {{ var par = nodes[p]; node.parentNode = par; par.children.push(node); if (par.childNodes !== par.children) {{ par.childNodes.push(node); }} }} else {{ document.__simple_roots.push(node); }} }} if (seed.bodyIdx >= 0 && seed.bodyIdx < nodes.length) {{ document.body = nodes[seed.bodyIdx]; }} if (seed.docElemIdx >= 0 && seed.docElemIdx < nodes.length) {{ document.documentElement = nodes[seed.docElemIdx]; }} else {{ document.documentElement = document.body; }} }} delete document.__simple_dom_seed; }}\n"
+    js = js + "document.getElementById = function(id) {{ return __simple_find_id_walk(document.__simple_roots || [], String(id || '')); }};\n"
+    js = js + "document.querySelector = function(sel) {{ var out = []; __simple_query_walk(document.__simple_roots || [], sel, true, out); return out.length > 0 ? out[0] : null; }};\n"
+    js = js + "document.querySelectorAll = function(sel) {{ var out = []; __simple_query_walk(document.__simple_roots || [], sel, false, out); return out; }};\n"
+    js

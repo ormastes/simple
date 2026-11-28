@@ -8,6 +8,23 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::process::Child;
 
+/// Read the environment-crossing counter (diagnostic; counts
+/// `rt_env_get`/`rt_env_get_i64` SFFI crossings in the runtime, gated by
+/// SIMPLE_FLATBRIDGE_ENV_COUNT=1 — see
+/// doc/08_tracking/bug/flat_ast_bridge_phase3_snapshot_throughput_2026-08-31).
+pub fn rt_env_get_counter_read(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(
+        simple_runtime::value::sffi::env_process::env_get_crossing_count() as i64,
+    ))
+}
+
+/// Reset the environment-crossing counter (diagnostic; see
+/// `rt_env_get_counter_read`).
+pub fn rt_env_get_counter_reset(_args: &[Value]) -> Result<Value, CompileError> {
+    simple_runtime::value::sffi::env_process::env_get_crossing_count_reset();
+    Ok(Value::Bool(true))
+}
+
 /// Owned-process V3 exposes opaque native leases that the interpreter cannot
 /// safely manufacture or project. Keep every registered entry fail-closed.
 pub fn rt_process_owned_v3_adapter_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
@@ -1520,6 +1537,10 @@ struct PipedProcess {
     exit_status: Option<std::process::ExitStatus>,
     /// Registry generation for `PipedProcessRefV1` (0 = legacy pid-only spawn).
     generation: i64,
+    /// Split spawn only (`rt_process_spawn_piped_split_v1`); `child.stderr` is
+    /// `None` for the legacy shape, where stderr is inherited.
+    stderr_state: i64,
+    stderr_tail: Vec<u8>,
 }
 
 impl PipedProcess {
@@ -1542,6 +1563,10 @@ fn piped_arg_pid(args: &[Value], who: &str) -> Result<i64, CompileError> {
 ///
 /// Callable from Simple as: `rt_process_spawn_piped(cmd: text, args: [text]) -> i64`
 pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
+    piped_spawn_child(args, false)
+}
+
+fn piped_spawn_child(args: &[Value], split_stderr: bool) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime(
             "rt_process_spawn_piped requires 2 arguments (cmd, args)",
@@ -1569,16 +1594,20 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
     let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     command.args(&cmd_args);
-    spawn_piped_child(command, "rt_process_spawn_piped")
+    spawn_piped_child(command, "rt_process_spawn_piped", split_stderr)
 }
 
 /// Shared by every piped spawn form so stdio wiring and registry publication
 /// cannot diverge between them.
-fn spawn_piped_child(mut command: std::process::Command, who: &str) -> Result<Value, CompileError> {
+fn spawn_piped_child(mut command: std::process::Command, who: &str, split_stderr: bool) -> Result<Value, CompileError> {
     command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit());
+        .stderr(if split_stderr {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::inherit()
+        });
 
     match command.spawn() {
         Ok(child) => {
@@ -1596,12 +1625,20 @@ fn spawn_piped_child(mut command: std::process::Command, who: &str) -> Result<Va
                     }
                 }
             }
+            if split_stderr && !piped_split_endpoints_nonblocking(&child) {
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(Value::Int(-1));
+            }
             PIPED_PROCESSES.lock().unwrap().insert(pid, PipedProcess {
                 child,
                 stdout_state: 0,
                 stdout_tail: Vec::new(),
                 exit_status: None,
                 generation: 0,
+                stderr_state: 0,
+                stderr_tail: Vec::new(),
             });
             Ok(Value::Int(pid))
         }
@@ -1708,7 +1745,7 @@ fn child_environment_command(args: &[Value], who: &str) -> Result<Option<std::pr
 /// `rt_process_spawn_piped_environment_v1(cmd: text, args: [text], environment: [text], mode: i64) -> i64`
 pub fn rt_process_spawn_piped_environment_v1(args: &[Value]) -> Result<Value, CompileError> {
     match child_environment_command(args, "rt_process_spawn_piped_environment_v1")? {
-        Some(command) => spawn_piped_child(command, "rt_process_spawn_piped_environment_v1"),
+        Some(command) => spawn_piped_child(command, "rt_process_spawn_piped_environment_v1", false),
         None => Ok(Value::Int(CHILD_ENV_INVALID)),
     }
 }
@@ -2219,6 +2256,281 @@ pub fn rt_process_close_piped_ref_v1(args: &[Value]) -> Result<Value, CompileErr
     let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
     let valid = piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation);
     Ok(Value::Int(if valid { -3 } else { -2 }))
+}
+
+// ---------------------------------------------------------------------------
+// Split-stderr / byte-safe piped family. Interpreter twin of the C exports at
+// the end of src/runtime/runtime_process.c (and of the Rust observer provider
+// in compiler_rust/runtime/src/piped_process_observer.rs). Same contract:
+//   * spawn_piped_split_v1 gives stderr its own pipe; legacy spawn inherits it.
+//   * every read and write is ONE nonblocking step and never parks, so a
+//     caller polling stdout and stderr in turn cannot deadlock against a child
+//     that fills the other pipe (process_piped_pump_bytes_v1 is that loop);
+//   * byte reads return at most min(max_bytes, 65536) bytes, [] when idle;
+//   * stderr state: -2 not separately piped, -1 unknown/error, 0 open, 1 EOF.
+// ---------------------------------------------------------------------------
+
+const PIPED_BYTES_CAP_V1: usize = 65536;
+const PIPED_WRITE_CHUNK_V1: usize = 4096;
+
+/// stderr must never park the interpreter: O_NONBLOCK on unix; Windows reads
+/// are gated by PeekNamedPipe instead (anonymous pipes have no O_NONBLOCK).
+/// Windows split children also get PIPE_NOWAIT on stdin: the write-only handle
+/// lacks FILE_READ_ATTRIBUTES, so free space cannot be queried; a PIPE_NOWAIT
+/// write of <= 4 KiB is accepted whole or returns 0 (measured on Win11).
+fn piped_split_endpoints_nonblocking(child: &std::process::Child) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SetNamedPipeHandleState(pipe: *mut std::ffi::c_void, mode: *const u32,
+                max_collection: *const u32, timeout: *const u32) -> i32;
+        }
+        const PIPE_NOWAIT: u32 = 1;
+        let Some(stdin) = child.stdin.as_ref() else { return false };
+        let ok = unsafe {
+            SetNamedPipeHandleState(stdin.as_raw_handle() as *mut std::ffi::c_void, &PIPE_NOWAIT,
+                std::ptr::null(), std::ptr::null())
+        };
+        if ok == 0 {
+            return false;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let Some(err) = child.stderr.as_ref() else { return false };
+        let fd = err.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        child.stderr.is_some()
+    }
+}
+
+/// `rt_process_spawn_piped_split_v1(cmd: text, cmd_len: i64, args: [text]) -> i64`
+pub fn rt_process_spawn_piped_split_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (Some(Value::Str(cmd)), Some(Value::Int(cmd_len)), Some(Value::Array(argv))) =
+        (args.first(), args.get(1), args.get(2))
+    else {
+        return Ok(Value::Int(-1));
+    };
+    if *cmd_len <= 0 || *cmd_len as usize != cmd.len() || cmd.contains('\0') || argv.len() > PIPED_REF_MAX_ARGS_V1 {
+        return Ok(Value::Int(-1));
+    }
+    if !argv.iter().all(|a| matches!(a, Value::Str(s) if !s.contains('\0'))) {
+        return Ok(Value::Int(-1));
+    }
+    piped_spawn_child(&[Value::Str(cmd.clone()), Value::Array(argv.clone())], true)
+}
+
+#[cfg(windows)]
+fn piped_handle_bytes_available(handle: std::os::windows::io::RawHandle) -> std::io::Result<usize> {
+    unsafe extern "system" {
+        fn PeekNamedPipe(pipe: *mut std::ffi::c_void, buffer: *mut std::ffi::c_void, size: u32,
+            read: *mut u32, available: *mut u32, left: *mut u32) -> i32;
+    }
+    let mut available: u32 = 0;
+    let ok = unsafe {
+        PeekNamedPipe(handle as *mut std::ffi::c_void, std::ptr::null_mut(), 0,
+            std::ptr::null_mut(), &mut available, std::ptr::null_mut())
+    };
+    if ok == 0 { Err(std::io::Error::last_os_error()) } else { Ok(available as usize) }
+}
+
+/// One nonblocking read step. Hands back any UTF-8 tail a previous text read
+/// held first, so mixing text and byte reads never drops or reorders a byte.
+fn piped_read_raw(process: &mut PipedProcess, stderr: bool, cap: usize) -> Vec<u8> {
+    use std::io::Read;
+    let PipedProcess { child, stdout_state, stdout_tail, stderr_state, stderr_tail, .. } = process;
+    let (state, tail) = if stderr { (stderr_state, stderr_tail) } else { (stdout_state, stdout_tail) };
+    let take = tail.len().min(cap);
+    let mut out: Vec<u8> = tail.drain(..take).collect();
+    if *state != 0 || out.len() == cap {
+        return out;
+    }
+    let want_max = cap - out.len();
+    #[cfg(windows)]
+    let want = {
+        use std::os::windows::io::AsRawHandle;
+        let handle = if stderr {
+            child.stderr.as_ref().map(|h| h.as_raw_handle())
+        } else {
+            child.stdout.as_ref().map(|h| h.as_raw_handle())
+        };
+        match handle.map(piped_handle_bytes_available) {
+            Some(Ok(0)) => return out,
+            Some(Ok(n)) => n.min(want_max),
+            Some(Err(error)) => {
+                *state = if error.raw_os_error() == Some(109) { 1 } else { -1 };
+                return out;
+            }
+            None => {
+                *state = -1;
+                return out;
+            }
+        }
+    };
+    #[cfg(not(windows))]
+    let want = want_max;
+    let reader: Option<&mut dyn Read> = if stderr {
+        child.stderr.as_mut().map(|r| r as &mut dyn Read)
+    } else {
+        child.stdout.as_mut().map(|r| r as &mut dyn Read)
+    };
+    let Some(reader) = reader else {
+        *state = -1;
+        return out;
+    };
+    let start = out.len();
+    out.resize(start + want, 0);
+    match reader.read(&mut out[start..]) {
+        Ok(0) => {
+            *state = 1;
+            out.truncate(start);
+        }
+        Ok(n) => out.truncate(start + n),
+        Err(error) => {
+            out.truncate(start);
+            if !matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) {
+                *state = if error.raw_os_error() == Some(109) { 1 } else { -1 };
+            }
+        }
+    }
+    out
+}
+
+fn piped_read_bytes_export(args: &[Value], stderr: bool, who: &str) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, who)?;
+    let max_bytes = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => return Err(CompileError::runtime(format!("{who}: max_bytes must be an integer"))),
+    };
+    if pid <= 0 || max_bytes <= 0 {
+        return Ok(Value::byte_array(Vec::new()));
+    }
+    let cap = (max_bytes as u64).min(PIPED_BYTES_CAP_V1 as u64) as usize;
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let bytes = match map.get_mut(&pid) {
+        Some(process) if !stderr || process.child.stderr.is_some() => piped_read_raw(process, stderr, cap),
+        _ => Vec::new(),
+    };
+    Ok(Value::byte_array(bytes))
+}
+
+/// `rt_process_read_stdout_bytes_v1(pid: i64, max_bytes: i64) -> [u8]`
+pub fn rt_process_read_stdout_bytes_v1(args: &[Value]) -> Result<Value, CompileError> {
+    piped_read_bytes_export(args, false, "rt_process_read_stdout_bytes_v1")
+}
+
+/// `rt_process_read_stderr_bytes_v1(pid: i64, max_bytes: i64) -> [u8]`
+pub fn rt_process_read_stderr_bytes_v1(args: &[Value]) -> Result<Value, CompileError> {
+    piped_read_bytes_export(args, true, "rt_process_read_stderr_bytes_v1")
+}
+
+/// `rt_process_read_stderr(pid: i64) -> text`: stderr twin of
+/// `rt_process_read_stdout`. Text holds back an incomplete UTF-8 tail until
+/// the next read; at EOF it is flushed lossily.
+pub fn rt_process_read_stderr(args: &[Value]) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, "rt_process_read_stderr")?;
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let Some(process) = map.get_mut(&pid) else { return Ok(Value::text(String::new())) };
+    if process.child.stderr.is_none() {
+        return Ok(Value::text(String::new()));
+    }
+    let mut held = piped_read_raw(process, true, 8192);
+    if process.stderr_state != 0 {
+        return Ok(Value::text(String::from_utf8_lossy(&held).into_owned()));
+    }
+    // Keep at most 3 trailing bytes of an incomplete UTF-8 sequence for later.
+    let valid = match std::str::from_utf8(&held) {
+        Ok(_) => held.len(),
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        Err(_) => held.len(),
+    };
+    process.stderr_tail = held.split_off(valid);
+    Ok(Value::text(String::from_utf8_lossy(&held).into_owned()))
+}
+
+/// `rt_process_stderr_state_v1(pid: i64) -> i64`
+pub fn rt_process_stderr_state_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, "rt_process_stderr_state_v1")?;
+    let map = PIPED_PROCESSES.lock().unwrap();
+    Ok(Value::Int(match map.get(&pid) {
+        None => -1,
+        Some(process) if process.child.stderr.is_none() => -2,
+        Some(process) if process.stderr_state == 1 && !process.stderr_tail.is_empty() => 0,
+        Some(process) => process.stderr_state,
+    }))
+}
+
+/// Bytes the child stdin pipe accepts right now without parking.
+#[cfg(unix)]
+fn piped_stdin_writable_now(stdin: &std::process::ChildStdin, request: usize) -> usize {
+    use std::os::unix::io::AsRawFd;
+    let mut poll = libc::pollfd { fd: stdin.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+    let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+    // POLLOUT on a pipe means at least PIPE_BUF bytes fit; never ask for more.
+    if ready == 1 && poll.revents & libc::POLLOUT != 0 { request.min(libc::PIPE_BUF) } else { 0 }
+}
+
+/// Windows: split children carry PIPE_NOWAIT on stdin (see
+/// piped_split_endpoints_nonblocking), so a <= 4 KiB write never parks; legacy
+/// children are blocking and refused by the caller.
+#[cfg(windows)]
+fn piped_stdin_writable_now(_stdin: &std::process::ChildStdin, request: usize) -> usize {
+    request
+}
+
+/// `rt_process_write_stdin_bytes_some_v1(pid: i64, data: [u8], offset: i64, max_bytes: i64) -> i64`
+/// One nonblocking step: count accepted (0 = pipe full), -1 bad argument/unknown child.
+pub fn rt_process_write_stdin_bytes_some_v1(args: &[Value]) -> Result<Value, CompileError> {
+    use std::io::Write;
+    let pid = piped_arg_pid(args, "rt_process_write_stdin_bytes_some_v1")?;
+    let int_at = |i: usize| match args.get(i) { Some(Value::Int(n)) => Some(*n), _ => None };
+    let (Some(offset), Some(max_bytes)) = (int_at(2), int_at(3)) else {
+        return Err(CompileError::runtime(
+            "rt_process_write_stdin_bytes_some_v1: offset and max_bytes must be integers",
+        ));
+    };
+    let Some(data) = args.get(1) else { return Ok(Value::Int(-1)) };
+    let owned;
+    let bytes: &[u8] = match data.byte_array_view() {
+        Some(view) => view,
+        None => match data.try_array_bytes() {
+            Some(vec) => { owned = vec; &owned }
+            None => return Ok(Value::Int(-1)),
+        },
+    };
+    if pid <= 0 || offset < 0 || max_bytes <= 0 || offset as u64 > bytes.len() as u64 {
+        return Ok(Value::Int(-1));
+    }
+    let start = offset as usize;
+    if start == bytes.len() {
+        return Ok(Value::Int(0));
+    }
+    let request = (bytes.len() - start).min(max_bytes as usize).min(PIPED_WRITE_CHUNK_V1);
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let Some(process) = map.get_mut(&pid) else { return Ok(Value::Int(-1)) };
+    // Windows legacy children have a blocking stdin; only split spawns are nonblocking.
+    if cfg!(windows) && process.child.stderr.is_none() {
+        return Ok(Value::Int(-1));
+    }
+    let Some(stdin) = process.child.stdin.as_mut() else { return Ok(Value::Int(-1)) };
+    let now = piped_stdin_writable_now(stdin, request);
+    if now == 0 {
+        return Ok(Value::Int(0));
+    }
+    match stdin.write(&bytes[start..start + now]) {
+        Ok(n) => Ok(Value::Int(n as i64)),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock) => Ok(Value::Int(0)),
+        Err(_) => Ok(Value::Int(-1)),
+    }
 }
 
 /// Read the same owned stream state consumed by process_read_stdout_result.

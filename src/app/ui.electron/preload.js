@@ -21,8 +21,29 @@ function commonInputEnvelope(eventType, fields = {}) {
     };
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-    document.addEventListener('keydown', event => {
+function handleFormValueEvent(event) {
+    const el = event.target && event.target.closest
+        ? event.target.closest('input[id], textarea[id], select[id]')
+        : null;
+    if (!el || !el.id) {
+        return;
+    }
+    if (el.tagName === 'SELECT') {
+        sendInput(commonInputEnvelope('action', { value: 'select_' + el.id + '_' + el.selectedIndex }));
+        return;
+    }
+    sendInput(commonInputEnvelope('input', { target_id: el.id, value: el.value }));
+}
+
+function registerPreloadListeners(doc) {
+    doc.addEventListener('keydown', event => {
+        const isFormControl = !!(event.target && event.target.matches && event.target.matches('input, textarea, select'));
+        if (isFormControl) {
+            if (event.key === 'Escape' || event.key === 'Tab') {
+                sendInput(commonInputEnvelope('key', { key: event.key }));
+            }
+            return;
+        }
         const allowed = event.key.length === 1 || [
             'Enter', 'Escape', 'Backspace', 'Tab',
             'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'
@@ -32,14 +53,42 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    document.addEventListener('click', event => {
-        const action = event.target && event.target.closest
-            ? event.target.closest('[data-action]')
+    doc.addEventListener('click', event => {
+        const target = event.target;
+        const action = target && target.closest
+            ? target.closest('[data-action]')
             : null;
         if (action) {
             sendInput(commonInputEnvelope('action', { value: action.getAttribute('data-action') || '' }));
+            return;
+        }
+        const listItem = target && target.closest
+            ? target.closest('.list-item[data-index]')
+            : null;
+        if (listItem) {
+            const list = listItem.closest('.widget-list[id]');
+            const idx = listItem.getAttribute('data-index') || '';
+            if (list && list.id && idx !== '') {
+                sendInput(commonInputEnvelope('action', { value: 'select_' + list.id + '_' + idx }));
+            }
         }
     });
+
+    doc.addEventListener('input', handleFormValueEvent);
+    doc.addEventListener('change', handleFormValueEvent);
+
+    doc.addEventListener('focusin', event => {
+        const el = event.target && event.target.closest
+            ? event.target.closest('input[id], textarea[id], select[id], button[id], [data-action][id]')
+            : null;
+        if (el && el.id) {
+            sendInput(commonInputEnvelope('focus', { target_id: el.id }));
+        }
+    });
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    registerPreloadListeners(document);
 });
 
 contextBridge.exposeInMainWorld('simpleElectron', {
