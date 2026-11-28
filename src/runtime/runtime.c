@@ -3934,14 +3934,29 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(int64_t text_value) {
  * came back as an untagged address that reads as an empty string.
  *
  * The hosted twin now shares that canonical tagged ABI in both directions;
- * no private byte-buffer representation crosses the Simple extern boundary. */
+ * no private byte-buffer representation crosses the Simple extern boundary.
+ *
+ * Layouts: a `[u8]` is byte-packed or a generic array of tagged-int slots
+ * (`[0u8; 64]`, a `[u8]` literal, `push`). On ELF this body, not the
+ * runtime_native.c one, is the one linked (runtime.o is first under
+ * --allow-multiple-definition), and it used to copy the array data verbatim:
+ * a slot array gave the low bytes of `value << 3`, and any byte >= 0x80 made
+ * strict UTF-8 return NIL -- every sha256_text hex digest in a Stage 2 native
+ * binary. The array owner narrows both layouts; a bad element is NIL, as in
+ * runtime_native.c and the Rust runtime. See doc/08_tracking/bug/
+ * runtime_c_twin_first_definition_wins_linux_divergence_2026-10-20.md. */
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     int64_t len = rt_array_len_safe(bytes_value);
     if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);
-    const uint8_t* data =
-        (const uint8_t*)(uintptr_t)rt_array_data_ptr((SplArray*)(uintptr_t)bytes_value);
-    if (!data) return rt_string_new(NULL, 0);
-    return spl_text_from_utf8_strict(data, (size_t)len);
+    int64_t length = rt_array_bytes_validate(bytes_value);
+    if (length <= 0) return SPL_UTF8_TEXT_REJECTED;
+    uint8_t* narrowed = (uint8_t*)malloc((size_t)length);
+    if (!narrowed) return rt_string_new(NULL, 0);
+    int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
+    int64_t result = copied > 0 ? spl_text_from_utf8_strict(narrowed, (size_t)copied)
+                                : SPL_UTF8_TEXT_REJECTED;
+    free(narrowed);
+    return result;
 }
 
 #endif
