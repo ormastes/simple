@@ -1035,6 +1035,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_event_loop_deregister",
     "rt_event_loop_poll",
     "rt_event_loop_poll_get_fd",
+    "rt_event_loop_poll_get_ready",
+    "rt_event_loop_poll_get_token",
     "rt_event_loop_close",
     "rt_value_raw_i64",
     "rt_tls_client_connect",

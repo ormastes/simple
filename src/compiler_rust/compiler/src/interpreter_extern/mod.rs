@@ -1488,6 +1488,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         interpreter_event_loop::rt_event_loop_poll_get_fd_interp
     );
     insert_simple!(
+        "rt_event_loop_poll_get_ready",
+        interpreter_event_loop::rt_event_loop_poll_get_ready_interp
+    );
+    insert_simple!(
+        "rt_event_loop_poll_get_token",
+        interpreter_event_loop::rt_event_loop_poll_get_token_interp
+    );
+    insert_simple!(
         "rt_event_loop_register",
         interpreter_event_loop::rt_event_loop_register_interp
     );
