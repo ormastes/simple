@@ -539,6 +539,11 @@ pub enum CompileError {
     /// Error from ? operator that should be propagated as a return value
     #[error("try: early return")]
     TryError(Box<Value>),
+    /// `return` inside a match/if EXPRESSION arm (or lambda/unsafe block body). Propagates
+    /// like `TryError` to every function/method/class boundary, but is a distinct variant so
+    /// a BDD `it` body can localize it without also swallowing a failing `?`.
+    #[error("try: early return")]
+    ArmReturn(Box<Value>),
     /// Execution was interrupted by user (Ctrl-C)
     #[error("interrupted: execution stopped by user request")]
     InterruptedByUser,
@@ -734,6 +739,7 @@ impl CompileError {
             Self::LintWithContext(p) => &p.message,
             Self::RuntimeWithContext(p) => &p.message,
             Self::TryError(_) => "try: early return",
+            Self::ArmReturn(_) => "try: early return",
             Self::InterruptedByUser => "interrupted: execution stopped by user request",
             Self::GhostError(msg) => msg,
             Self::ExecutionLimitExceeded { message, .. } => message,

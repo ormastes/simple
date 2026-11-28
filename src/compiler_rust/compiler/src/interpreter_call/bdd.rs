@@ -876,10 +876,10 @@ pub(crate) fn exec_block_value(
 fn localize_bdd_return(result: Result<Value, CompileError>) -> Result<Value, CompileError> {
     match result {
         Err(CompileError::BlockReturn(value)) => Ok(value),
-        // A `return` inside a match/if-expression arm of a BDD body travels on the
-        // TryError channel (interp_return_in_match_expr_swallowed_2026-06-30); it ends
+        // A `return` inside a match/if-expression arm of a BDD body travels as ArmReturn
+        // (interp_return_in_match_expr_swallowed_2026-06-30); it ends
         // this example only and must not surface as "try: early return".
-        Err(CompileError::TryError(value)) => Ok(*value),
+        Err(CompileError::ArmReturn(value)) => Ok(*value),
         other => other,
     }
 }

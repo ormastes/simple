@@ -1,12 +1,22 @@
 # Regression: `return` inside a match arm of an `it` body must end only that
-# example, not escape as the seed's "try: early return" error.
+# example, not escape as the seed's "try: early return" error. `?` shares the
+# same TryError channel but must still FAIL the example on Err.
+# Each tripwire `expect(...)` after a `return` arm fails the example if the
+# `return` did not actually end it.
 use std.spec.*
+use std.io.{process_run, env_get}
 
 fn pick(flag: bool) -> Result<i64, text>:
     if flag:
         Ok(1)
     else:
         Err("no")
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
 
 describe "return inside match arm of an it block":
     it "ends the example on Err arm return":
@@ -17,12 +27,12 @@ describe "return inside match arm of an it block":
                 return
         expect(v).to_equal(-1)
 
-    it "continues past the Ok arm":
-        val v = match pick(true):
+    it "takes the Err arm of a value-producing match and ends the example":
+        val v = match pick(false):
             case Ok(value): value
             case Err(reason):
                 return
-        expect(v).to_equal(1)
+        expect("tripwire").to_equal("not reached")
 
     it "ends the example on if-expression return":
         val v = if pick(false).is_err():
@@ -30,3 +40,18 @@ describe "return inside match arm of an it block":
         else:
             5
         expect(v).to_equal(-1)
+
+    it "continues past the Ok arm":
+        val v = match pick(true):
+            case Ok(value): value
+            case Err(reason):
+                return
+        expect(v).to_equal(1)
+
+describe "? inside an it block":
+    it "still fails the example when ? meets an Err":
+        val command = simple_binary() + " run test/fixtures/bdd_it_try_failure/try_err_child.spl"
+        val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+        val out = stdout + stderr
+        expect(out).to_contain("1 example, 1 failure")
+        expect(out).not_to_contain("0 failures")
