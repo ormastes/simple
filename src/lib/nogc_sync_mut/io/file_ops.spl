@@ -173,6 +173,26 @@ fn file_write_bytes(path: text, data: [u8]) -> bool:
 fn file_atomic_write_bytes(path: text, data: [u8]) -> bool:
     file_atomic_write_bytes_tagged_native(host_path_native(path), data)
 
+# Durable variant of the atomic byte write: stage beside the target, fsync the
+# staged bytes, then rename over the target. A rename failure (target is a
+# directory, cross-device link, busy replacement) reports false and removes
+# the staging file, leaving the target directory as it was found.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_atomic_write_bytes_durable", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn file_atomic_write_bytes_durable(path: text, data: [u8]) -> bool:
+    val staging = path + ".durable-staging-" + "{_time_now_unix_micros()}" + "-" + "{_getpid()}"
+    if not file_write_bytes(staging, data):
+        return false
+    val durable = unsafe(capabilities: [ffi]):
+        rt_file_fsync(host_path_native(staging))
+    if not durable:
+        file_delete(staging)
+        return false
+    if file_rename(staging, path):
+        true
+    else:
+        file_delete(staging)
+        false
+
 # Open-time confinement (todo 479): the runtime walks `rel` below the trusted
 # `root`, refusing a reparse point/symlink at EVERY component at open time and
 # holding each directory open until the final read, so a junction swapped in

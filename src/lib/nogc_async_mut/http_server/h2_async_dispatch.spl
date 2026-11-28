@@ -1,0 +1,78 @@
+"""
+# HTTP/2 Async Dispatch
+
+Tracks in-flight asynchronous handler jobs multiplexed over HTTP/2
+connections. Each registered job binds one (connection_id, stream_id) pair;
+duplicate stream registration on the same connection is refused so a
+retried dispatch never shadows the in-flight request. Connection teardown
+removes every job of that connection while leaving sibling connections
+untouched.
+"""
+
+use std.http_server.types.{HttpRequestData}
+
+# ============================================================================
+# Dispatch entry
+# ============================================================================
+
+class H2DispatchEntry:
+    """One in-flight async handler job on a multiplexed HTTP/2 stream."""
+    job_id: i64
+    connection_id: i64
+    stream_id: i64
+    request: HttpRequestData
+
+# ============================================================================
+# Dispatch registry
+# ============================================================================
+
+class H2AsyncDispatch:
+    """Registry of in-flight jobs keyed by job id, unique per connection+stream."""
+    entries: Dict<i64, H2DispatchEntry>
+
+    static fn create() -> H2AsyncDispatch:
+        """Create an empty dispatch registry."""
+        return H2AsyncDispatch(entries: {})
+
+    me register(job_id: i64, connection_id: i64, stream_id: i64, request: HttpRequestData) -> bool:
+        """Admit one job unless its (connection, stream) pair is already taken."""
+        for entry in self.entries:
+            val existing = entry.1
+            if existing.connection_id == connection_id and existing.stream_id == stream_id:
+                return false
+        self.entries[job_id] = H2DispatchEntry(
+            job_id: job_id,
+            connection_id: connection_id,
+            stream_id: stream_id,
+            request: request
+        )
+        true
+
+    fn count() -> i64:
+        """Number of in-flight jobs."""
+        self.entries.len()
+
+    me remove_connection(connection_id: i64) -> [H2DispatchEntry]:
+        """Remove and return every job of one connection."""
+        var removed: [H2DispatchEntry] = []
+        var removed_ids: [i64] = []
+        for entry in self.entries:
+            val existing = entry.1
+            if existing.connection_id == connection_id:
+                removed.append(existing)
+                removed_ids.append(existing.job_id)
+        for job_id in removed_ids:
+            self.entries.remove(job_id)
+        removed
+
+    fn contains(job_id: i64) -> bool:
+        """True while a job id is registered."""
+        self.entries.contains_key(job_id)
+
+    fn get(job_id: i64) -> H2DispatchEntry?:
+        """Registered entry for a job id, or nil."""
+        if self.entries.contains_key(job_id):
+            return self.entries[job_id]
+        None
+
+export H2AsyncDispatch, H2DispatchEntry

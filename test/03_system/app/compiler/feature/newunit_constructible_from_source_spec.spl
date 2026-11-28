@@ -1,0 +1,92 @@
+# @cover src/compiler/30.types/units/unit_registry.spl 80%
+"""
+## Purpose and audience
+Regression spec for bug `newunit_unconstructible_from_source_2026-09-01`
+(doc/08_tracking/bug/). The 2026-09-01 measurement found that a `newunit`
+declaration was accepted while no source form could construct a value of the
+declared type: the constructor form failed with `function 'LbaU' not found`,
+and the only postfix form tried (`7lba`, glued) never parsed. This spec
+closes the Required item "a spec that declares a `newunit` in surface
+syntax, constructs a value, passes it to a function, and reads it back":
+it declares units in surface syntax at module top level, constructs values
+by documented postfix literal (`7_wlba`, `doc/07_guide/language/units.md` §2)
+and by constructor (`WunLba(7)`), passes them through typed functions, and
+reads the raw payload back — asserting the identity base factor (1/1) with
+concrete oracles. For compiler engineers touching the unit declaration,
+unit-suffix literal, or unit-record constructor paths.
+## Operator workflow
+SIMPLE_LIB=src build/p3cache/fresh-seed/simple.exe run test/03_system/app/compiler/feature/newunit_constructible_from_source_spec.spl --mode=interpreter --no-cache --no-session-daemon
+## Compatibility and limitations
+`newunit` is deprecated (warning SPL-UNIT-001, not an error) in favour of
+`unit`; both spellings are exercised here because the bug is about the
+user-facing surface, and both must stay constructible until `newunit` is
+removed. The bare glued form `7wlba` is intentionally absent: the
+documented lexer rule requires `_<symbol>` — `_` + alphabetic starts a unit
+suffix, `_` + digit is a digit separator — so `7wlba` lexes as an integer
+followed by an identifier and is a parse error by design. Seed-side
+measurement; the self-hosted binary retest is tracked in the bug doc.
+## Verification guidance and troubleshooting
+All six examples must pass. A literal-scenario failure means `_<symbol>`
+unit-suffix lexing/semantic regressed; a constructor-scenario failure means
+the unit-record constructor path regressed (the 2026-09-01 defect); a
+readback that differs from the exact literal means the identity base factor
+broke and values are being scaled — file a bug, never soften the oracle.
+"""
+# Lifecycle: doc/08_tracking/bug/newunit_unconstructible_from_source_2026-09-01.md ;
+# plan: doc/02_requirements/language/grammar/world_units_newunit.md (REQ-WUN-001)
+
+use std.spec
+
+newunit WunLba: i64 as wlba
+unit WunCanon: i64 as wcan
+
+fn spec_wlba_payload(x: WunLba) -> i64:
+    return x.value
+
+fn spec_wcan_payload(x: WunCanon) -> i64:
+    return x.value
+
+describe "newunit constructible from source (bug newunit_unconstructible_from_source_2026-09-01)":
+    describe "REQ-WUN-001: newunit declared in surface syntax":
+        it "constructs from a postfix literal and round-trips through a typed function":
+            # @req REQ-WUN-001
+            # @capture(statistics): raw payload read back from a postfix-literal unit value
+            step("declare `newunit WunLba: i64 as wlba` in surface syntax")
+            step("construct 7_wlba, pass it to spec_wlba_payload, and read the payload back")
+            val raw = spec_wlba_payload(7_wlba)
+            expect(raw).to_equal(7)  # oracle: identity base factor 1/1 — payload is exactly the literal, never scaled
+
+        it "constructs with the Name(raw) constructor and round-trips through a typed function":
+            # @req REQ-WUN-001
+            # @capture(statistics): raw payload read back from a constructor-built unit value
+            step("construct WunLba(9) and read the payload back through the typed function")
+            val raw = spec_wlba_payload(WunLba(9))
+            expect(raw).to_equal(9)  # oracle: the 2026-09-01 failing form (`LbaU(7)` -> function not found) now stores the raw primitive unchanged
+
+        it "constructs into an explicitly annotated binding and round-trips":
+            # @req REQ-WUN-001
+            step("bind 5_wlba to `val u: WunLba` and read the payload back")
+            val u: WunLba = 5_wlba
+            val raw = spec_wlba_payload(u)
+            expect(raw).to_equal(5)  # oracle: annotated binding keeps the nominal type; payload is exactly the literal
+
+    describe "REQ-WUN-001: canonical unit declaration stays constructible":
+        it "constructs from a postfix literal and round-trips through a typed function":
+            # @req REQ-WUN-001
+            step("declare `unit WunCanon: i64 as wcan` in surface syntax")
+            val raw = spec_wcan_payload(7_wcan)
+            expect(raw).to_equal(7)  # oracle: identity base factor 1/1 — payload is exactly the literal, never scaled
+
+        it "constructs with the Name(raw) constructor and round-trips through a typed function":
+            # @req REQ-WUN-001
+            step("construct WunCanon(11) and read the payload back through the typed function")
+            val raw = spec_wcan_payload(WunCanon(11))
+            expect(raw).to_equal(11)  # oracle: constructor path stores the raw primitive unchanged
+
+        it "constructs distinct values of the same unit and keeps them distinct":
+            # @req REQ-WUN-001
+            step("build 3_wcan and 4_wcan through the typed function and compare payloads")
+            val a = spec_wcan_payload(3_wcan)
+            val b = spec_wcan_payload(4_wcan)
+            expect(a).to_equal(3)  # oracle: first literal payload is exact
+            expect(b).to_equal(4)  # oracle: second literal payload is exact and not aliased to the first
