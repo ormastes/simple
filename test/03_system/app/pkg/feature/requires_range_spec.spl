@@ -5,10 +5,23 @@ use std.io_runtime.{process_run}
 fn run_phase8_system_fixture(script_body: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/simple-phase8-system.XXXXXX)\ntrap 'rm -rf \"$TMP\"' EXIT\ncd \"$TMP\"\n" + script_body])
 
+# The `lock`/`update` commands exist only in the self-hosted binary. The Rust
+# bootstrap seed prints a "bootstrap seed only" banner and has no `lock`, so a
+# seed-only host cannot run this scenario: report it BLOCKED, never a failure.
+fn seed_only_precondition() -> text:
+    val (out, err, _code) = process_run("bin/simple", ["--version"])
+    if (out + err).contains("bootstrap seed only"):
+        return "precondition: self-hosted bin/simple required (bin/simple is the Rust bootstrap seed, which has no lock/update command)"
+    ""
+
 val PHASE8_SYSTEM_MANIFEST = "cat > simple.sdn <<'SDN'\nproject:\n  name: phase8-system\n  dependencies:\n    - package: backend-old\n      provides:\n        - simple.codegen.BackendPort@1.1.0\n      requires: []\n      link: static\n    - package: backend-current\n      provides:\n        - simple.codegen.BackendPort@1.4.0\n      requires: []\n      link: static\n    - package: compiler\n      provides: []\n      requires:\n        - simple.codegen.BackendPort@^1.2.0\n      link: static\nSDN\n"
 
 describe "Phase 8 package range locking":
     it "runs lock and update through the production CLI with deterministic policy-bound output":
+        val blocked = seed_only_precondition()
+        if blocked != "":
+            fail(blocked)
+            return
         print("KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=deterministic-lock state=BEGIN expected=stable")
         step("Generate and check the lock through the root simple command")
         val script = PHASE8_SYSTEM_MANIFEST +
@@ -30,6 +43,10 @@ describe "Phase 8 package range locking":
         print("KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=deterministic-lock state=PASS expected=stable")
 
     it "preserves the admitted lock when resolution or policy validation fails":
+        val blocked = seed_only_precondition()
+        if blocked != "":
+            fail(blocked)
+            return
         print("KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=refusal-preserves-lock state=BEGIN expected=unchanged")
         step("Mutate the manifest and policy, then require attributed failures without publication")
         val script = PHASE8_SYSTEM_MANIFEST +
