@@ -1,0 +1,423 @@
+# @req REQ-ASPECT-TLDR-AW1
+"""
+# MC/DC coverage: module_tldr_sections_v1.spl
+
+Target: src/compiler/80.driver/cache/module_tldr_sections_v1.spl
+
+The module extracts the "companion" sections of a source file (layouts, traits,
+types, consts, impl headers, generic functions) and moves them over a
+self-delimiting wire form `section: <kind> <n>` newline, `<n>` characters,
+newline. This manual shows what each public function does for an operator: how
+a source line is classified, how its block is cut out, how entries are framed,
+and exactly which malformed frames the reader refuses (answer -1, never
+partial sections). Private helpers are driven through the public functions only.
+
+## Purpose and audience
+
+For engineers who maintain the module-cache TLDR companion format and need to
+know which inputs the extractor and the strict reader accept or refuse.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/cache/coverage/module_tldr_sections_v1_mcdc_spec.spl`
+   from the repository root. No fixture file and no host fact is read.
+2. Measure coverage with
+   `SIMPLE_EXECUTION_MODE=interpreter SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<f> <seed> run <this spec>`
+   (doc/07_guide/infra/testing/coverage.md); the target is every decision and
+   condition seen both true and false.
+
+## Lifecycle
+
+Research: doc/01_research/local/dir_tldr_aspect.md
+Plan: doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (AW-1)
+Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
+Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md (section 3)
+
+## Decision inventory
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 27 | `pub ` prefix strip | c1 | pub and bare declarations |
+| 30 | `not decl.starts_with("fn ")` | c1 | non-fn declaration is never generic |
+| 34 | `lt > 0 and (paren < 0 or lt < paren)` | c1 lt, c2 no paren, c3 order | generic detection its |
+| 38 | blank / space / tab / `#` line | c1..c4 | non-declaration line its |
+| 41-42 | struct / class / enum / bitfield | c1..c4 | layout its |
+| 44, 46 | trait, type | c1 | trait and type its |
+| 48 | val / const | c1, c2 | const it |
+| 50 | impl / extend | c1, c2 | impl it |
+| 52 | generic fn | c1 | generic detection its |
+| 59 | fn / me / static fn member | c1..c3 | impl header members it |
+| 62-63 | block end: bound, blank, space, tab | c1..c4 | block extent its |
+| 72 | skip `@attribute` lines | c1 index>=0, c2 index<len, c3 `@` | attribute its |
+| 74 | start out of range | c1, c2 | out-of-range its |
+| 77 | head not a declaration | c1..c4 | block_at head its |
+| 81 | trim trailing blanks | c1 last>start, c2 blank | trailing blank its |
+| 85 | member loop | c1 | single and multi-line blocks |
+| 86 | `kind != "impl" or member header` | c1, c2 | impl vs non-impl its |
+| 96, 98 | scan loop, no-section line | c1 | sections_of_source its |
+| 107 | entries loop | c1 | render its |
+| 109 | `bar <= 0` | c1 | no bar, leading bar, normal |
+| 117-124 | kind validity, 23 kinds | c1..c23 | one it per kind group, unknown kind |
+| 131 | more records | c1 | none, one, many |
+| 134 | missing newline | c1 | header without newline |
+| 138 | no kind/count separator | c1 | empty head, leading space, no space |
+| 142 | `not valid or count < 0` | c1, c2 | bad kind, bad count, good |
+| 145 | count overruns text | c1 | overrun vs exact fit |
+| 147 | terminator is not newline | c1 | wrong terminator |
+
+All conditions are exercised true and false (short-circuit aware). Gaps: none
+known; every decision above is reachable from the public API.
+Bug suspects: none observed.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:coverage
+
+use std.spec.*
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_section_kind_v1,
+    module_tldr_block_at_v1, module_tldr_sections_of_source_v1,
+    module_tldr_sections_render_v1, module_tldr_sections_parse_v1}
+
+# One wire record with a two-character body "ab".
+fn record(kind: text) -> text:
+    "section: " + kind + " 2\nab\n"
+
+# Parse a single record of `kind`; yields the entry, or a marker on failure.
+fn parsed_one(kind: text) -> text:
+    val w = record(kind)
+    val (entries, consumed) = module_tldr_sections_parse_v1(w)
+    if consumed != w.len():
+        return "bad-consumed"
+    if entries.len() != 1:
+        return "bad-count"
+    entries[0]
+
+# @manual_section: Classifying a source line
+describe "TLDR sections: classifying a source line":
+    it "ignores blank, indented, tab-indented and comment lines":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Classify an empty line, a space-indented line, a tab-indented line and a comment line")
+        # @capture(exec): section kinds
+        step("Every one answers an empty kind, so nested or commented text never starts a section")
+        expect(module_tldr_section_kind_v1("")).to_equal("")
+        expect(module_tldr_section_kind_v1("  struct Hidden:")).to_equal("")
+        expect(module_tldr_section_kind_v1("\tstruct Hidden:")).to_equal("")
+        expect(module_tldr_section_kind_v1("# struct Hidden:")).to_equal("")
+
+    it "classifies struct, class, enum and bitfield as layout, with or without pub":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Classify struct, class, enum and bitfield lines, bare and with the pub prefix")
+        # @capture(exec): section kinds
+        step("All four declarations answer layout and the pub prefix is ignored")
+        expect(module_tldr_section_kind_v1("struct S:")).to_equal("layout")
+        expect(module_tldr_section_kind_v1("pub class C:")).to_equal("layout")
+        expect(module_tldr_section_kind_v1("enum E:")).to_equal("layout")
+        expect(module_tldr_section_kind_v1("pub bitfield B:")).to_equal("layout")
+
+    it "classifies trait, type, const and impl declarations":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Classify trait, type, val, const, impl and extend lines")
+        # @capture(exec): section kinds
+        step("Each declaration maps to its own kind; val and const share const, impl and extend share impl")
+        expect(module_tldr_section_kind_v1("trait T:")).to_equal("trait")
+        expect(module_tldr_section_kind_v1("pub type A = i64")).to_equal("type")
+        expect(module_tldr_section_kind_v1("val X: i64 = 1")).to_equal("const")
+        expect(module_tldr_section_kind_v1("const Y: i64 = 2")).to_equal("const")
+        expect(module_tldr_section_kind_v1("impl T for P:")).to_equal("impl")
+        expect(module_tldr_section_kind_v1("extend P:")).to_equal("impl")
+
+    it "treats only fn declarations with type parameters before the parenthesis as generic":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Classify fn lines with type parameters, with none, and with a generic only inside the argument list")
+        # @capture(exec): section kinds
+        step("Only type parameters before the parenthesis make a generic section; plain functions and argument generics answer empty")
+        expect(module_tldr_section_kind_v1("fn id<T>(x: T) -> T:")).to_equal("generic")
+        expect(module_tldr_section_kind_v1("pub fn id<T>(x: T) -> T:")).to_equal("generic")
+        expect(module_tldr_section_kind_v1("fn bare<T>")).to_equal("generic")
+        expect(module_tldr_section_kind_v1("fn plain(x: i64) -> i64:")).to_equal("")
+        expect(module_tldr_section_kind_v1("fn f(x: Box<T>) -> i64:")).to_equal("")
+
+    it "gives no section to a non-fn, non-declaration line":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Classify a use line, which is neither a declaration nor a function")
+        # @capture(exec): section kind
+        step("The answer is empty, so import lines never become sections")
+        expect(module_tldr_section_kind_v1("use std.spec")).to_equal("")
+
+# @manual_section: Cutting a block out of the source
+describe "TLDR sections: cutting a block out of the source lines":
+    it "returns the declaration and its indented body":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut the block of a struct that is followed by another top-level declaration")
+        # @capture(exec): block text
+        step("The struct and its field are returned and the next declaration is left out")
+        val lines = ["struct A:", "    x: i64", "val B = 1"]
+        expect(module_tldr_block_at_v1(lines, 0, "layout")).to_equal("struct A:\n    x: i64")
+
+    it "keeps tab-indented and interior blank lines but drops trailing blanks":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut a block holding a tab-indented line, an interior blank line and two trailing blank lines")
+        # @capture(exec): block text
+        step("Interior blanks and tabs survive but the trailing blanks are trimmed")
+        val lines = ["struct A:", "\tx: i64", "", "    y: i64", "", ""]
+        expect(module_tldr_block_at_v1(lines, 0, "layout")).to_equal("struct A:\n\tx: i64\n\n    y: i64")
+
+    it "returns just the head when only blank lines follow":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut a one-line declaration followed only by blank lines")
+        # @capture(exec): block text
+        step("Only the head line is returned, with no trailing newline")
+        val lines = ["val X = 1", "", ""]
+        expect(module_tldr_block_at_v1(lines, 0, "const")).to_equal("val X = 1")
+
+    it "skips leading attribute lines to reach the declaration":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut a block starting at an index that points at two attribute lines")
+        # @capture(exec): block text
+        step("The attributes are skipped and the block starts at the declaration")
+        val lines = ["@derive", "@other", "struct A:", "    x: i64"]
+        expect(module_tldr_block_at_v1(lines, 0, "layout")).to_equal("struct A:\n    x: i64")
+
+    it "returns empty for an index outside the lines":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut a block at index -1 and at an index past the last line")
+        # @capture(exec): block text
+        step("Both answer empty rather than failing")
+        val lines = ["struct A:"]
+        expect(module_tldr_block_at_v1(lines, -1, "layout")).to_equal("")
+        expect(module_tldr_block_at_v1(lines, 5, "layout")).to_equal("")
+
+    it "returns empty when attributes run to the end of the lines":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut a block from lines that are only attributes")
+        # @capture(exec): block text
+        step("Skipping attributes runs off the end and the answer is empty")
+        expect(module_tldr_block_at_v1(["@a", "@b"], 0, "layout")).to_equal("")
+
+    it "returns empty when the line is blank, indented, tab-indented or a comment":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut a block at a blank, an indented, a tab-indented and a comment line, then at a real declaration")
+        # @capture(exec): block texts
+        step("Only the real declaration yields a block; the other four answer empty")
+        val lines = ["", "  x", "\tx", "# c", "val Z = 1"]
+        expect(module_tldr_block_at_v1(lines, 0, "const")).to_equal("")
+        expect(module_tldr_block_at_v1(lines, 1, "const")).to_equal("")
+        expect(module_tldr_block_at_v1(lines, 2, "const")).to_equal("")
+        expect(module_tldr_block_at_v1(lines, 3, "const")).to_equal("")
+        expect(module_tldr_block_at_v1(lines, 4, "const")).to_equal("val Z = 1")
+
+    it "keeps only member header lines of an impl block, bodies dropped":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut an impl block with fn, me, static fn and pub fn members, a body line and a val line")
+        # @capture(exec): impl block text
+        step("Only the member header lines are kept, so importers see the surface without bodies")
+        val lines = ["impl T for P:", "    fn a() -> i64:", "        self.x", "    me b():", "    static fn c():", "    pub fn d():", "    val z = 1"]
+        val expected = "impl T for P:\n    fn a() -> i64:\n    me b():\n    static fn c():\n    pub fn d():"
+        expect(module_tldr_block_at_v1(lines, 0, "impl")).to_equal(expected)
+
+    it "keeps every line of a non-impl block":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Cut a trait block that has a method signature and a val line")
+        # @capture(exec): trait block text
+        step("Every line of the trait is kept because only impl blocks are reduced to headers")
+        val lines = ["trait T:", "    fn a() -> i64", "    val z = 1"]
+        expect(module_tldr_block_at_v1(lines, 0, "trait")).to_equal("trait T:\n    fn a() -> i64\n    val z = 1")
+
+# @manual_section: Extracting entries from source
+describe "TLDR sections: extracting entries from source":
+    it "returns no entries for source without declarations":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Extract sections from a comment and a plain function")
+        # @capture(exec): entry count
+        step("No entry is produced, because plain function bodies are deliberately excluded")
+        expect(module_tldr_sections_of_source_v1("# only a comment\nfn plain():\n    1\n").len()).to_equal(0)  # oracle: count fixed by the literal fixture on the lines above
+
+    it "emits ordered kind|block entries and skips attributes and plain functions":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Extract sections from source with an attributed struct, a plain function and a generic function")
+        # @capture(exec): entries
+        step("Entries come back in source order as kind|block, with the plain function left out")
+        val src = "@derive\nstruct A:\n    x: i64\n\nfn plain():\n    1\n\nfn g<T>(x: T) -> T:\n    x\n"
+        val s = module_tldr_sections_of_source_v1(src)
+        expect(s.len()).to_equal(2)  # oracle: count fixed by the literal fixture on the lines above
+        expect(s[0]).to_equal("layout|struct A:\n    x: i64")
+        expect(s[1]).to_equal("generic|fn g<T>(x: T) -> T:\n    x")
+
+    it "normalises CRLF line endings":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Extract sections from source written with CRLF line endings")
+        # @capture(exec): entries
+        step("Both consts are found and no carriage return leaks into the text")
+        val s = module_tldr_sections_of_source_v1("val A = 1\r\nval B = 2\r\n")
+        expect(s.len()).to_equal(2)  # oracle: count fixed by the literal fixture on the lines above
+        expect(s[0]).to_equal("const|val A = 1")
+        expect(s[1]).to_equal("const|val B = 2")
+
+# @manual_section: Rendering the wire form
+describe "TLDR sections: rendering the wire form":
+    it "renders nothing for no entries":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Render an empty entry list")
+        # @capture(exec): wire text
+        step("The wire form is the empty text")
+        expect(module_tldr_sections_render_v1([])).to_equal("")
+
+    it "frames each entry with its kind and body length and drops entries without a kind":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Render entries, one without a bar, one with a leading bar and two well-formed")
+        # @capture(exec): wire text
+        step("Only the well-formed entries are framed, each with its character count")
+        val w = module_tldr_sections_render_v1(["layout|struct A:", "nobar", "|orphan", "const|val X"])
+        expect(w).to_equal("section: layout 9\nstruct A:\nsection: const 5\nval X\n")
+
+# @manual_section: Parsing the wire form
+describe "TLDR sections: parsing the wire form":
+    it "reads zero records from text that does not start a section":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse text that begins with something other than a section prefix")
+        # @capture(exec): entries and consumed count
+        step("No entry is read and nothing is consumed, so the caller sees where the sections end")
+        val (entries, consumed) = module_tldr_sections_parse_v1("sif:\n")
+        expect(entries.len()).to_equal(0)  # oracle: count fixed by the literal fixture on the lines above
+        expect(consumed).to_equal(0)  # oracle: count fixed by the literal fixture on the lines above
+
+    it "reads consecutive records and stops before trailing text":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse two records followed by trailing text")
+        # @capture(exec): entries and consumed count
+        step("Both entries are returned and the consumed count stops exactly before the trailing text")
+        val w = record("layout") + record("trait")
+        val (entries, consumed) = module_tldr_sections_parse_v1(w + "sif:\n")
+        expect(entries.len()).to_equal(2)  # oracle: count fixed by the literal fixture on the lines above
+        expect(entries[0]).to_equal("layout|ab")
+        expect(entries[1]).to_equal("trait|ab")
+        expect(consumed).to_equal(w.len())
+
+    it "accepts a record with an empty body":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse a record whose count is zero")
+        # @capture(exec): entries and consumed count
+        step("One entry with an empty body is returned and all 19 characters are consumed")
+        val (entries, consumed) = module_tldr_sections_parse_v1("section: layout 0\n\n")
+        expect(entries.len()).to_equal(1)  # oracle: count fixed by the literal fixture on the lines above
+        expect(entries[0]).to_equal("layout|")
+        expect(consumed).to_equal(19)  # oracle: count fixed by the literal fixture on the lines above
+
+    it "rejects a header with no newline":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse a header that ends before any newline")
+        # @capture(exec): entries and consumed count
+        step("The reader answers -1 and returns no entry")
+        val (entries, consumed) = module_tldr_sections_parse_v1("section: layout 2")
+        expect(entries.len()).to_equal(0)  # oracle: count fixed by the literal fixture on the lines above
+        expect(consumed).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+
+    it "rejects a header with no kind or no separator":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse headers with an empty head, a leading space and a kind with no count")
+        # @capture(exec): consumed counts
+        step("Each answers -1 because the kind and count cannot be separated")
+        val (_a, c1) = module_tldr_sections_parse_v1("section: \nab\n")
+        val (_b, c2) = module_tldr_sections_parse_v1("section:  2\nab\n")
+        val (_c, c3) = module_tldr_sections_parse_v1("section: layout\nab\n")
+        expect(c1).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+        expect(c2).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+        expect(c3).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+
+    it "rejects an unknown kind":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse a well-formed record whose kind is not in the valid set")
+        # @capture(exec): entries and consumed count
+        step("The reader answers -1 and returns no entry, so a spliced companion is refused")
+        val (entries, consumed) = module_tldr_sections_parse_v1(record("bogus"))
+        expect(entries.len()).to_equal(0)  # oracle: count fixed by the literal fixture on the lines above
+        expect(consumed).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+
+    it "rejects a non-numeric or negative count":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse records whose count is text and whose count is -1")
+        # @capture(exec): consumed counts
+        step("Both answer -1 because a count must be a non-negative number")
+        val (_a, c1) = module_tldr_sections_parse_v1("section: layout abc\nab\n")
+        val (_b, c2) = module_tldr_sections_parse_v1("section: layout -1\nab\n")
+        expect(c1).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+        expect(c2).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+
+    it "rejects a count that overruns the text":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse a record whose count is larger than the remaining text")
+        # @capture(exec): consumed count
+        step("The reader answers -1, so a truncated companion never yields partial sections")
+        val (_p, consumed) = module_tldr_sections_parse_v1("section: layout 5\nab\n")
+        expect(consumed).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+
+    it "rejects a record whose terminator is not a newline":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse a record whose body is not followed by a newline")
+        # @capture(exec): consumed count
+        step("The reader answers -1 because the record is not self-delimiting")
+        val (_p, consumed) = module_tldr_sections_parse_v1("section: layout 2\nabX")
+        expect(consumed).to_equal(-1)  # oracle: -1 is the documented malformed-record sentinel
+
+# @manual_section: The set of valid kinds
+describe "TLDR sections: the set of valid kinds":
+    it "accepts the core declaration kinds":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse one record for each core declaration kind")
+        # @capture(exec): parsed entries
+        step("Each of the nine core kinds is accepted and read back with its body")
+        expect(parsed_one("layout")).to_equal("layout|ab")
+        expect(parsed_one("trait")).to_equal("trait|ab")
+        expect(parsed_one("type")).to_equal("type|ab")
+        expect(parsed_one("const")).to_equal("const|ab")
+        expect(parsed_one("impl")).to_equal("impl|ab")
+        expect(parsed_one("impls")).to_equal("impls|ab")
+        expect(parsed_one("generic")).to_equal("generic|ab")
+        expect(parsed_one("inline")).to_equal("inline|ab")
+        expect(parsed_one("summary")).to_equal("summary|ab")
+
+    it "accepts the macro kinds":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse one record for each macro kind")
+        # @capture(exec): parsed entries
+        step("All three macro kinds are accepted")
+        expect(parsed_one("macro-def")).to_equal("macro-def|ab")
+        expect(parsed_one("macro-use")).to_equal("macro-use|ab")
+        expect(parsed_one("macro-key")).to_equal("macro-key|ab")
+
+    it "accepts the generic template kinds":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse one record for each generic template kind")
+        # @capture(exec): parsed entries
+        step("All three generic template kinds are accepted")
+        expect(parsed_one("generic-template")).to_equal("generic-template|ab")
+        expect(parsed_one("generic-spec")).to_equal("generic-spec|ab")
+        expect(parsed_one("generic-spec-ctx")).to_equal("generic-spec-ctx|ab")
+
+    it "accepts the surface and export kinds":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse one record for each surface, export, declaration, fallback and use kind")
+        # @capture(exec): parsed entries
+        step("All six kinds are accepted")
+        expect(parsed_one("surface")).to_equal("surface|ab")
+        expect(parsed_one("surface-digest")).to_equal("surface-digest|ab")
+        expect(parsed_one("export")).to_equal("export|ab")
+        expect(parsed_one("decl")).to_equal("decl|ab")
+        expect(parsed_one("fallback")).to_equal("fallback|ab")
+        expect(parsed_one("use")).to_equal("use|ab")
+
+    it "accepts the aspect-decl kind":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse a record of kind aspect-decl")
+        # @capture(exec): parsed entry
+        step("The aspect-decl record is accepted, so aspect declarations survive the round trip")
+        expect(parsed_one("aspect-decl")).to_equal("aspect-decl|ab")
+
+    it "accepts the join-point kind":
+        # @req REQ-ASPECT-TLDR-AW1
+        step("Parse a record of kind join-point")
+        # @capture(exec): parsed entry
+        step("The join-point record is accepted, as the last kind of the validity list")
+        expect(parsed_one("join-point")).to_equal("join-point|ab")
