@@ -21022,29 +21022,72 @@ int rt_str_is_ascii_cached(RtCoreString* s) {
 #if defined(__linux__)
 #include <sys/epoll.h>
 
-int64_t rt_event_loop_create(void) {
-    return (int64_t)epoll_create1(0);
+/* Loop handle = pointer to a per-loop RtEvLoop (positive in user space, so
+ * callers' `handle >= 0` checks still hold). The fd -> token table lives in
+ * the loop, grows with the highest registered fd (no fd cap), and is owned by
+ * the thread driving that loop: no shared state, so no lock.
+ * Token contract (shared with the Rust runtime and the interpreter): an event
+ * for an fd with no registered token reports the fd itself as the token.
+ * An error/hangup-only event (no EPOLLIN/EPOLLOUT) reports ready == 0 (Read).
+ * The poll_results/poll_ready/poll_tokens getters below are process-wide
+ * (the getter ABI has no loop argument): one in-flight poll at a time. */
+typedef struct { int64_t token; int64_t set; } RtEvReg;
+typedef struct { int epfd; RtEvReg* regs; int64_t cap; } RtEvLoop;
+
+static RtEvLoop* rt_ev_loop(int64_t h) {
+    return h > 0 ? (RtEvLoop*)(intptr_t)h : NULL;
 }
 
-static int64_t poll_tokens_by_fd[65536];
+int64_t rt_event_loop_create(void) {
+    int epfd = epoll_create1(0);
+    if (epfd < 0) return -1;
+    RtEvLoop* lp = (RtEvLoop*)calloc(1, sizeof(RtEvLoop));
+    if (!lp) { close(epfd); return -1; }
+    lp->epfd = epfd;
+    return (int64_t)(intptr_t)lp;
+}
 
-int64_t rt_event_loop_register(int64_t epfd, int64_t fd, int64_t mode, int64_t token, int64_t edge) {
+static int rt_ev_set_token(RtEvLoop* lp, int64_t fd, int64_t token) {
+    if (fd < 0) return 0;
+    if (fd >= lp->cap) {
+        int64_t ncap = lp->cap ? lp->cap : 64;
+        while (ncap <= fd) ncap *= 2;
+        RtEvReg* n = (RtEvReg*)realloc(lp->regs, (size_t)ncap * sizeof(RtEvReg));
+        if (!n) return 0;
+        memset(n + lp->cap, 0, (size_t)(ncap - lp->cap) * sizeof(RtEvReg));
+        lp->regs = n;
+        lp->cap = ncap;
+    }
+    lp->regs[fd].token = token;
+    lp->regs[fd].set = 1;
+    return 1;
+}
+
+int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode, int64_t token, int64_t edge) {
     struct epoll_event ev;
-    if (fd >= 0 && fd < 65536) poll_tokens_by_fd[fd] = token;
+    RtEvLoop* lp = rt_ev_loop(h);
+    if (!lp || fd < 0) return 0;
+    RtEvReg prev = fd < lp->cap ? lp->regs[fd] : (RtEvReg){0, 0};
+    if (!rt_ev_set_token(lp, fd, token)) return 0;
+    int epfd = lp->epfd;
     int edge_flag = edge ? EPOLLET : 0;
     ev.events = EPOLLIN | edge_flag;
     if (mode == 1) ev.events = EPOLLOUT | edge_flag;
     else if (mode == 2) ev.events = EPOLLIN | EPOLLOUT | edge_flag;
     ev.data.fd = (int)fd;
-    int rc = epoll_ctl((int)epfd, EPOLL_CTL_ADD, (int)fd, &ev);
+    int rc = epoll_ctl(epfd, EPOLL_CTL_ADD, (int)fd, &ev);
     if (rc != 0 && errno == EEXIST) {
-        rc = epoll_ctl((int)epfd, EPOLL_CTL_MOD, (int)fd, &ev);
+        rc = epoll_ctl(epfd, EPOLL_CTL_MOD, (int)fd, &ev);
     }
+    if (rc != 0) lp->regs[fd] = prev; /* failed MOD: the old registration is still live */
     return rc == 0 ? 1 : 0;
 }
 
-int64_t rt_event_loop_deregister(int64_t epfd, int64_t fd) {
-    int rc = epoll_ctl((int)epfd, EPOLL_CTL_DEL, (int)fd, NULL);
+int64_t rt_event_loop_deregister(int64_t h, int64_t fd) {
+    RtEvLoop* lp = rt_ev_loop(h);
+    if (!lp) return 0;
+    if (fd >= 0 && fd < lp->cap) lp->regs[fd].set = 0;
+    int rc = epoll_ctl(lp->epfd, EPOLL_CTL_DEL, (int)fd, NULL);
     if (rc != 0 && errno == ENOENT) return 1;
     return rc == 0 ? 1 : 0;
 }
@@ -21053,10 +21096,12 @@ static int64_t poll_results[256];
 static int64_t poll_ready[256];
 static int64_t poll_tokens[256];
 
-int64_t rt_event_loop_poll(int64_t epfd, int64_t max_events, int64_t timeout_ms) {
+int64_t rt_event_loop_poll(int64_t h, int64_t max_events, int64_t timeout_ms) {
     struct epoll_event events[256];
+    RtEvLoop* lp = rt_ev_loop(h);
+    if (!lp || max_events <= 0) return 0;
     if (max_events > 256) max_events = 256;
-    int n = epoll_wait((int)epfd, events, (int)max_events, (int)timeout_ms);
+    int n = epoll_wait(lp->epfd, events, (int)max_events, (int)timeout_ms);
     if (n < 0) return 0;
     for (int i = 0; i < n; i++) {
         int efd = events[i].data.fd;
@@ -21064,13 +21109,18 @@ int64_t rt_event_loop_poll(int64_t epfd, int64_t max_events, int64_t timeout_ms)
         int writable = (events[i].events & EPOLLOUT) != 0;
         poll_results[i] = (int64_t)efd;
         poll_ready[i] = (readable && writable) ? 2 : (writable ? 1 : 0);
-        poll_tokens[i] = (efd >= 0 && efd < 65536) ? poll_tokens_by_fd[efd] : (int64_t)efd;
+        poll_tokens[i] = (efd >= 0 && efd < lp->cap && lp->regs[efd].set) ? lp->regs[efd].token : (int64_t)efd;
     }
     return (int64_t)n;
 }
 
-int64_t rt_event_loop_close(int64_t epfd) {
-    return (int64_t)close((int)epfd);
+int64_t rt_event_loop_close(int64_t h) {
+    RtEvLoop* lp = rt_ev_loop(h);
+    if (!lp) return -1;
+    int rc = close(lp->epfd);
+    free(lp->regs);
+    free(lp);
+    return (int64_t)rc;
 }
 
 #elif defined(__APPLE__) || defined(__FreeBSD__)
@@ -21099,12 +21149,16 @@ int64_t rt_event_loop_register(int64_t kqfd, int64_t fd, int64_t mode, int64_t t
 }
 
 int64_t rt_event_loop_deregister(int64_t kqfd, int64_t fd) {
-    struct kevent ev[2];
-    EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-    EV_SET(&ev[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    int rc = kevent((int)kqfd, ev, 2, NULL, 0, NULL);
-    if (rc != 0 && errno == ENOENT) return 1;
-    return rc == 0 ? 1 : 0;
+    /* One change per call: with no event list kevent stops at the first
+     * failing change, so a missing READ filter (mode 1) would leave WRITE. */
+    static const int16_t filters[2] = { EVFILT_READ, EVFILT_WRITE };
+    int ok = 1;
+    for (int i = 0; i < 2; i++) {
+        struct kevent ev;
+        EV_SET(&ev, (uintptr_t)fd, filters[i], EV_DELETE, 0, 0, NULL);
+        if (kevent((int)kqfd, &ev, 1, NULL, 0, NULL) != 0 && errno != ENOENT) ok = 0;
+    }
+    return ok;
 }
 
 static int64_t poll_results[256];
@@ -21119,12 +21173,26 @@ int64_t rt_event_loop_poll(int64_t kqfd, int64_t max_events, int64_t timeout_ms)
     ts.tv_nsec = (timeout_ms % 1000) * 1000000;
     int n = kevent((int)kqfd, NULL, 0, events, (int)max_events, &ts);
     if (n < 0) return 0;
+    /* A mode-2 registration installs separate READ and WRITE filters; merge
+     * both hits on one (fd, token) into a single ready == 2 entry, in
+     * first-seen order, matching epoll, the Rust runtime and the interpreter. */
+    int out = 0;
     for (int i = 0; i < n; i++) {
-        poll_results[i] = (int64_t)events[i].ident;
-        poll_ready[i] = (events[i].filter == EVFILT_WRITE) ? 1 : 0;
-        poll_tokens[i] = (int64_t)(intptr_t)events[i].udata;
+        int64_t fd = (int64_t)events[i].ident;
+        int64_t tok = (int64_t)(intptr_t)events[i].udata;
+        int64_t r = (events[i].filter == EVFILT_WRITE) ? 1 : 0;
+        int j = 0;
+        while (j < out && !(poll_results[j] == fd && poll_tokens[j] == tok)) j++;
+        if (j < out) {
+            if (poll_ready[j] != r) poll_ready[j] = 2;
+            continue;
+        }
+        poll_results[out] = fd;
+        poll_ready[out] = r;
+        poll_tokens[out] = tok;
+        out++;
     }
-    return (int64_t)n;
+    return (int64_t)out;
 }
 
 int64_t rt_event_loop_close(int64_t kqfd) {

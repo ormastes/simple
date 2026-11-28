@@ -1,6 +1,6 @@
 # kqueue rt_event_loop_poll reports ReadWrite as two events (2026-11-28)
 
-Status: open (found in review of PR #12418)
+Status: verification-pending (kqueue poll merges READ+WRITE hits on one (fd, token) into a single ready == 2 entry, first-seen order. Prevention: src/runtime/test/rt_event_loop_token_selfcheck.c mode-2 case. Verified on Windows only with a fake kevent harness; needs a macOS/FreeBSD run)
 
 `src/runtime/runtime_native.c`, kqueue `rt_event_loop_poll`: a registration with
 `mode == 2` installs separate EVFILT_READ and EVFILT_WRITE filters, so one fd that is

@@ -122,8 +122,10 @@ mod platform {
             for i in 0..n as usize {
                 let ev = &events[i];
                 let stored_fd = ev.u64 as i64;
-                // Look up full i64 token from side-table
-                let stored_token = state.tokens.get(&(stored_fd as i32)).copied().unwrap_or(0);
+                // Look up full i64 token from side-table; an fd with no
+                // registered token reports the fd itself (same rule as the
+                // C and Rust runtimes).
+                let stored_token = state.tokens.get(&(stored_fd as i32)).copied().unwrap_or(stored_fd);
 
                 // Map epoll event flags back to interest encoding
                 let readable = (ev.events & libc::EPOLLIN as u32) != 0;
