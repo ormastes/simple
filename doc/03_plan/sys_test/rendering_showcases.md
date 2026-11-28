@@ -46,3 +46,4 @@ Design: `doc/05_design/rendering_showcases.md`.
   - `npx electron tools/electron-shell/html_layout_compare_app.js --capture-chrome build/html_layout_compare --pages examples/browser/html_layout_compare/pages`
   - `npx electron tools/electron-shell/html_layout_compare_app.js --dir build/html_layout_compare`
 - **Detailed Plans:** See `doc/03_plan/sys_test/simple_web_engine_completion.md` (§ 3) and `doc/03_plan/sys_test/simple_gui_completion.md` (§ 4).
+- **Suite 2 (`fw01`–`fw06`), Suite 3 (`lq01`–`lq06` Liquid Theme), & Multi-Script (`ms01`–`ms04`):** Documented in `simple_web_engine_completion.md` (§ 4) and `simple_gui_completion.md` (§ 5), paired with `browser_cpu_raster_css_overrides` in `src/app/ui.browser/backend.spl` for Liquid Glass CPU aura + specular highlight parity.

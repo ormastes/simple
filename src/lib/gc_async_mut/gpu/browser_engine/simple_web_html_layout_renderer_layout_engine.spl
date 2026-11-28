@@ -2089,6 +2089,66 @@ fn margin_l_err_milli(cst: Style, cb_w: i32) -> i32:
 fn margin_r_err_milli(cst: Style, cb_w: i32) -> i32:
     if cst.margin_r_auto: 0 else: resolve_horizontal_margin_milli(cst.margin_r, cst.margin_r_pct, cst.margin_r_milli, cb_w) - resolve_horizontal_margin(cst.margin_r, cst.margin_r_pct, cb_w) * 1000
 
+fn _adjust_abs_bottom_auto_height(
+    nodes: [HNode],
+    styles: [Style],
+    child_index: HtmlChildIndex,
+    abs_c: i32,
+    cst: Style,
+    st: Style,
+    iw: i32,
+    viewport_h: i32,
+    absolute_containing_h: i32,
+    static_y: bool,
+    out_bx: [i32],
+    out_by: [i32],
+    out_bh: [i32]
+) -> PositionOffsetResult:
+    if (
+        not static_y and
+        cst.bottom_px >= 0 and
+        cst.top_auto and
+        resolve_percent_height_px(cst.height_px, absolute_containing_h) <= 0
+    ):
+        val est_cb_h = if not cst.position_fixed and not absolute_has_positioned_ancestor(nodes, styles, abs_c) and viewport_h > 0:
+            viewport_h
+        else:
+            absolute_containing_h
+        val est_h = absolute_outer_height(
+            nodes[abs_c],
+            style_with_resolved_percent_margins(cst, iw + st.pad_l + st.pad_r, 0),
+            est_cb_h
+        )
+        val dy_bottom = est_h - out_bh[abs_c]
+        if dy_bottom != 0:
+            return offset_layout_subtree(child_index, abs_c, 0, dy_bottom, out_bx, out_by)
+    PositionOffsetResult(bx: out_bx, by: out_by)
+
+fn _adjust_positioned_container_abs_bottom_children(
+    styles: [Style],
+    child_index: HtmlChildIndex,
+    parent_idx: i32,
+    st: Style,
+    content_height_limit: i32,
+    final_h: i32,
+    out_bx: [i32],
+    out_by: [i32]
+) -> PositionOffsetResult:
+    var bx = out_bx
+    var by = out_by
+    if (st.position_relative or st.position_absolute or st.position_fixed or st.position_sticky) and content_height_limit <= 0:
+        val dy = (final_h - st.border_t - st.border_b) - (st.pad_t + st.pad_b)
+        if dy != 0:
+            var ch = child_index.first_child[parent_idx]
+            while ch >= 0:
+                val ch_st = styles[ch]
+                if ch_st.position_absolute and not ch_st.position_fixed and ch_st.bottom_px >= 0 and ch_st.top_auto:
+                    val moved = offset_layout_subtree(child_index, ch, 0, dy, bx, by)
+                    bx = moved.bx
+                    by = moved.by
+                ch = child_index.next_sibling[ch]
+    PositionOffsetResult(bx: bx, by: by)
+
 fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], st: Style) -> LayoutResult:
     var out_bx = bx
     var out_by = by
@@ -2786,13 +2846,25 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             cell = child_index.first_child[table_row]
             while cell >= 0:
                 if styles[cell].display == "table-cell":
-                    out_bh[cell] = if table_collapse:
+                    val prev_cell_h = out_bh[cell]
+                    val target_cell_h = if table_collapse:
                         (
                             row_h + (styles[cell].border_t + 1) / 2 +
                             styles[cell].border_b / 2
                         )
                     else:
                         row_h
+                    out_bh[cell] = target_cell_h
+                    val cell_va = styles[cell].vertical_align
+                    if target_cell_h > prev_cell_h and (cell_va == "middle" or cell_va == "baseline" or cell_va == ""):
+                        val cell_dy = (target_cell_h - prev_cell_h) / 2
+                        if cell_dy > 0:
+                            var cell_child = child_index.first_child[cell]
+                            while cell_child >= 0:
+                                val moved_cell_child = offset_layout_subtree(child_index, cell_child, 0, cell_dy, out_bx, out_by)
+                                out_bx = moved_cell_child.bx
+                                out_by = moved_cell_child.by
+                                cell_child = child_index.next_sibling[cell_child]
                 cell = child_index.next_sibling[cell]
             out_bh[table_row] = row_h
             table_y = table_y + row_h + table_spacing_y
@@ -3227,6 +3299,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         if st.height_px > 0:
             grid_height = css_outer_height(node, st, st.height_px)
         out_bh[i] = grid_height
+        val grid_abs_moved = _adjust_positioned_container_abs_bottom_children(styles, child_index, i, st, content_height_limit, grid_height, out_bx, out_by)
+        out_bx = grid_abs_moved.bx
+        out_by = grid_abs_moved.by
         return relative_layout_result(
             child_index, i, st, out_bx, out_by, out_bw, out_bh,
             out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
@@ -3452,6 +3527,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     out_wrap_starts = child.wrap_starts
                     out_wrap_ends = child.wrap_ends
                     out_intrinsic_widths = child.intrinsic_widths
+                    val abs_bottom_moved = _adjust_abs_bottom_auto_height(nodes, styles, child_index, fc_wrap, cst, st, iw, viewport_h, absolute_containing_h, false, out_bx, out_by, out_bh)
+                    out_bx = abs_bottom_moved.bx
+                    out_by = abs_bottom_moved.by
                 else:
                     val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
                     val resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
@@ -3646,6 +3724,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 if measured_h > flex_h_wrap:
                     flex_h_wrap = measured_h
             out_bh[i] = flex_h_wrap
+            val wrap_abs_moved = _adjust_positioned_container_abs_bottom_children(styles, child_index, i, st, content_height_limit, flex_h_wrap, out_bx, out_by)
+            out_bx = wrap_abs_moved.bx
+            out_by = wrap_abs_moved.by
             return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h_wrap)
         # Pre-pass: distribute the inner width across flex children. Children with an
         # explicit width (px or %) take it; the leftover space is shared by flex-grow
@@ -3975,6 +4056,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 out_wrap_starts = child.wrap_starts
                 out_wrap_ends = child.wrap_ends
                 out_intrinsic_widths = child.intrinsic_widths
+                val abs_bottom_moved = _adjust_abs_bottom_auto_height(nodes, styles, child_index, fc, cst, st, iw, viewport_h, absolute_containing_h, false, out_bx, out_by, out_bh)
+                out_bx = abs_bottom_moved.bx
+                out_by = abs_bottom_moved.by
             else:
                 val cml = resolve_horizontal_margin(cst.margin_l, cst.margin_l_pct, iw)
                 val cmr = resolve_horizontal_margin(cst.margin_r, cst.margin_r_pct, iw)
@@ -4358,6 +4442,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             if fill_bottom - y > flex_h:
                 flex_h = fill_bottom - y
         out_bh[i] = flex_h
+        val flex_abs_moved = _adjust_positioned_container_abs_bottom_children(styles, child_index, i, st, content_height_limit, flex_h, out_bx, out_by)
+        out_bx = flex_abs_moved.bx
+        out_by = flex_abs_moved.by
         val flex_placed = relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h)
         val flex_end_frac = if flex_h == flex_content_h and st.height_px <= 0: cursor_advance_frac(origin_frac, flex_content_milli) else: origin_frac
         box_device_extra_h_record(nodes.len() as i32, i, box_device_top_px(flex_end_frac * layout_device_scale()) - box_device_top_px(origin_frac * layout_device_scale()))
@@ -4445,6 +4532,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 out_wrap_starts = child.wrap_starts
                 out_wrap_ends = child.wrap_ends
                 out_intrinsic_widths = child.intrinsic_widths
+                val abs_bottom_moved = _adjust_abs_bottom_auto_height(nodes, styles, child_index, flex_c, cst, st, iw, viewport_h, absolute_containing_h, false, out_bx, out_by, out_bh)
+                out_bx = abs_bottom_moved.bx
+                out_by = abs_bottom_moved.by
             else:
                 val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
                 val resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
@@ -4588,6 +4678,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     placed = placed + 1
                 rc = child_index.next_sibling[rc]
         out_bh[i] = flex_h_col
+        val col_abs_moved = _adjust_positioned_container_abs_bottom_children(styles, child_index, i, st, content_height_limit, flex_h_col, out_bx, out_by)
+        out_bx = col_abs_moved.bx
+        out_by = col_abs_moved.by
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h_col)
     var cy = y + st.border_t + st.pad_t
     var child_count = 0
@@ -4751,6 +4844,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             out_wrap_starts = child.wrap_starts
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
+            val abs_bottom_moved = _adjust_abs_bottom_auto_height(nodes, styles, child_index, c, cst, st, iw, viewport_h, absolute_containing_h, static_y, out_bx, out_by, out_bh)
+            out_bx = abs_bottom_moved.bx
+            out_by = abs_bottom_moved.by
         else:
             if cst.float_mode != 0:
                 # A float is out of normal flow (CSS 2.2 9.5.1): it goes as
@@ -5128,6 +5224,16 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     )
                     inline_w = css_outer_width(
                         nodes[c], resolved_inline_style, media_percent_w
+                    )
+                elif inline_replaced and cst.width_px < 0:
+                    val replaced_percent_w = iw * (0 - cst.width_px) / 100
+                    resolved_inline_style = style_with_width(
+                        resolved_inline_style, replaced_percent_w
+                    )
+                    inline_w = constrained_outer_width(
+                        nodes[c],
+                        resolved_inline_style,
+                        css_outer_width(nodes[c], resolved_inline_style, replaced_percent_w)
                     )
                 elif inline_replaced and cst.width_px == 0 and not cst.width_zero:
                     val predicted_w = constrained_outer_width(
@@ -5617,6 +5723,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             val after_lead_w = inline_text_width_after_lead(nodes[c], cst)
                             if after_lead_w > 0 and after_lead_w < out_bw[c]:
                                 out_bw[c] = after_lead_w
+                            elif after_lead_w < 0:
+                                val fallback_lead = resolved_space_advance(cst, text_codepoints(nodes[c].text_trimmed))
+                                if fallback_lead > 0 and out_bw[c] > fallback_lead:
+                                    out_bw[c] = out_bw[c] - fallback_lead
                         g_text_first_line_dx_pending = 0
                         text_first_line_dx_record(nodes.len() as i32, c, run_first_dx)
                         val c_origin_adj: i32 = if nowrap_lead_collapsed: ((nowrap_lead_px as i64) * 1000 - nowrap_lead_milli) as i32 else: 0
@@ -5705,14 +5815,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     # REPLACED elements (img/input/select/video/...) are excluded:
                     # their box is their intrinsic size, not a font metric.
                     val inline_content_h = inline_content_area_height(cst)
-                    if out_bh[c] > 1 and (out_bh[c] <= style_line_h(cst) or out_bh[c] <= inline_element_union_text_line_h(child_index, nodes, styles, c)):
-                        # A content area taller than the line-height (negative
-                        # leading) overflows the line instead of growing it:
-                        # Chrome 159, `font:16px/1` Liberation Sans `<span>`
-                        # (content area 17) in a div -> the div is 16 px.
-                        if inline_content_h > out_bh[c]:
-                            inline_line_part_h = out_bh[c]
-                        out_bh[c] = inline_content_h
+                    val v_frame = cst.pad_t + cst.pad_b + cst.border_t + cst.border_b
+                    val inner_bh = out_bh[c] - v_frame
+                    if (inner_bh > 1 or (v_frame > 0 and inner_bh > 0)) and (inner_bh <= style_line_h(cst) or inner_bh <= inline_element_union_text_line_h(child_index, nodes, styles, c)):
+                        # Vertical padding and border on `display: inline` frame
+                        # the content area without growing the line box; negative
+                        # half-leading (content area > line height) overflows.
+                        inline_line_part_h = inner_bh
+                        out_bh[c] = inline_content_h + v_frame
                 # Boxes a float arriving later on this line has to move. A
                 # run that wrapped is left alone: its box spans several lines.
                 if nodes[c].tag != "#text" or out_wrap_starts[c].len() <= 1:
@@ -6289,6 +6399,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     val authored_px = if layout_device_scale() > 1: 0 elif hangs_from_baseline: (if authored_frac > 500: 1 else: 0) else: cursor_advance_px(origin_frac, authored_frac)
     h = h + authored_px
     out_bh[i] = h
+    val flow_abs_moved = _adjust_positioned_container_abs_bottom_children(styles, child_index, i, st, content_height_limit, h, out_bx, out_by)
+    out_bx = flow_abs_moved.bx
+    out_by = flow_abs_moved.by
     if in_inline_run and inline_x > max_inline_x:
         max_inline_x = inline_x
     if st.display == "inline":

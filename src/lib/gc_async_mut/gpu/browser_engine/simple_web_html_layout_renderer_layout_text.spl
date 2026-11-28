@@ -62,6 +62,11 @@ fn line_h(fs: i32) -> i32:
 fn style_line_h(st: Style) -> i32:
     if st.line_height_px > 0:
         return st.line_height_px
+    if st.line_height_px <= -10000:
+        val mult100 = (0 - st.line_height_px) - 10000
+        val lh100 = font_milli_of(st.font_size, st.font_size_milli) * mult100 / 100000
+        if lh100 > 0:
+            return lh100
     if st.line_height_px < 0:
         # negative sentinel = unitless line-height multiplier * 10 (e.g. 1.6 -> -16),
         # resolved here against the element's final font-size.
@@ -860,17 +865,22 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
         if ctag == "#text" and kept_breaks == 0:
             val txt: text = nodes[c].text_trimmed
             if txt.len() > 0:
-                if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_pre:
-                    inline_run = inline_run + resolved_space_advance(cst, text_codepoints(txt))
-                gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not cst.white_space_pre
-                val resolved = cst.resolved_font_width
+                if row_flex:
+                    if row_items > 0:
+                        inline_run = inline_run + styles[i].column_gap_px
+                    row_items = row_items + 1
+                else:
+                    if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_pre:
+                        inline_run = inline_run + resolved_space_advance(cst, text_codepoints(txt))
+                    gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not cst.white_space_pre
+                val resolved = if cst.resolved_font_width_milli > 0: (((cst.resolved_font_width_milli + 999) / 1000) as i32) else: cst.resolved_font_width
                 if resolved > 0:
                     inline_run = inline_run + resolved
                 else:
                     val glyph_w = style_char_w(cst)
                     val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
                     inline_run = inline_run + (text_cell_width(txt) as i32) * ink_w
-            elif nodes[c].text_data.byte_len() > 0 and not cst.white_space_pre and inline_run > 0:
+            elif not row_flex and nodes[c].text_data.byte_len() > 0 and not cst.white_space_pre and inline_run > 0:
                 # A whitespace-only text node between two inline boxes
                 # (`<a>Edit</a> <a>Del</a>`) is one collapsible space.
                 gap_pending = true
@@ -1115,7 +1125,7 @@ fn _lay_inline_text_advance_width_inner(node: HNode, st: Style) -> i32:
             if edges > 0 and st.resolved_font_width_milli >= 0 and st.resolved_space_milli > 0:
                 return ((st.resolved_font_width_milli + edge_milli + 500) / 1000) as i32
             return st.resolved_font_width + edges * resolved_space_advance(st, trimmed_cps)
-    if raw == " " and node.text_trimmed == "":
+    if node.text_trimmed == "" and not st.white_space_spaces_kept:
         # The inline loop already charges this space as the next run's lead
         # space (mid-line) or drops it (line start); with the face known the
         # node adds nothing more (Chrome 159: one 4.4453 px space in total).

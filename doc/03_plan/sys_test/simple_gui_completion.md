@@ -80,3 +80,27 @@ In addition to unit/system SSpec gates, GUI and hosted UI parity against Chrome 
   ```sh
   SIMPLE_LIB=src bin/simple test test/03_system/app/simple_web/feature/chrome_vs_simple_web_layout_compare_spec.spl --mode=interpreter --memory-limit=1G
   ```
+
+---
+
+## 5. Suite 2 (`fw01`–`fw06`), Suite 3 (`lq01`–`lq06` Liquid Theme) & Multi-Script (`ms01`–`ms04`) Extensions
+
+### 5.1 Suite 2: Famous Web Page Rendering Diff (`fw01`–`fw06`, `640x420`)
+- `fw01`: Google Search & Knowledge Panel (`640x420`)
+- `fw02`: Wikipedia Encyclopedia Article & Infobox (`640x420`)
+- `fw03`: Hacker News Front Page Table & Ranks (`640x420`)
+- `fw04`: GitHub Repository & PR Code Diff (`640x420`)
+- `fw05`: YouTube Watch Player & Up-Next Queue (`640x420`)
+- `fw06`: New York Times Multi-Column Editorial Front Page (`640x420`)
+
+### 5.2 Suite 3: Liquid Theme Rendering Diff (`lq01`–`lq06`) & CPU Raster Aura Overrides
+- `browser_cpu_raster_css_overrides` (`src/app/ui.browser/backend.spl`) suppresses multi-pass `76px` `backdrop-filter` blur, `box-shadow` stacks, and `body::before`/`body::after` stripes on CPU rasterizers while preserving Liquid Glass radial+linear ambient aura (`body { background: radial-gradient(...) linear-gradient(...) !important; }`) and top-edge specular highlights (`border-top-color: rgba(255,255,255,0.22)` dark / `0.85` light on `.widget-panel`, `.widget-card`, `.widget-menubar`, `.widget-statusbar`).
+- `lq01`: Liquid Dark Theme (`fluid_dark` Aura, Glass Panels & Glow, `640x420`)
+- `lq02`: Liquid Light Theme (`fluid_light` Celestial Ether, `640x420`)
+- `lq03`: macOS Glass Dark Window Gallery (`glass_css.spl`, `640x420`)
+- `lq04`: Stitch Glass Obsidian Dark (`glass_obsidian_dark`, `640x420`)
+- `lq05`: Liquid Frosted `backdrop-filter: blur(12px)` Over Photo & Orbs (`640x420`)
+- `lq06`: UI Kitchen Sink Window (`960x640`, Chrome vs Pure-Simple Liquid Glass aura parity)
+
+### 5.3 Multi-Script Comparison Lanes (`ms01`–`ms04`, `520x340`)
+- Exercises JS, `SimpleScript` (`<script type="text/simple">`), and `AgentScript` (`<script type="text/agent">`) against Chrome across `ms01` (KPI card), `ms02` (Form fill + select + live preview), `ms03` (Kanban column transition), and `ms04` (Cooperative JS + Simple + Agent 3-stage pipeline).

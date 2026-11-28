@@ -2176,6 +2176,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
     insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
     insert_simple!("rt_process_spawn_piped_generation_v1", system::rt_process_spawn_piped_generation_v1);
+    insert_simple!("rt_process_spawn_piped_split_v1", system::rt_process_spawn_piped_split_v1);
+    insert_simple!("rt_process_read_stdout_bytes_v1", system::rt_process_read_stdout_bytes_v1);
+    insert_simple!("rt_process_read_stderr_bytes_v1", system::rt_process_read_stderr_bytes_v1);
+    insert_simple!("rt_process_read_stderr", system::rt_process_read_stderr);
+    insert_simple!("rt_process_stderr_state_v1", system::rt_process_stderr_state_v1);
+    insert_simple!("rt_process_write_stdin_bytes_some_v1", system::rt_process_write_stdin_bytes_some_v1);
     insert_simple!("rt_process_piped_pid_for_generation_v1", system::rt_process_piped_pid_for_generation_v1);
     insert_simple!("rt_process_read_stdout_ref_v1", system::rt_process_read_stdout_ref_v1);
     insert_simple!("rt_process_stdout_state_ref_v1", system::rt_process_stdout_state_ref_v1);
