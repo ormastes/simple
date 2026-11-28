@@ -13,11 +13,39 @@ bootstrap_logged_windows_cargo() (
     [ "$blwc_timeout" -ge 0 ] && [ "$blwc_timeout" -le 7200 ] &&
         [ "$blwc_max_bytes" -gt 0 ] && [ "$blwc_max_bytes" -le 67108864 ] || return 126
     [ "$1" = env ] && [ "$2" = -i ] || return 126
-    blwc_python=$(command -v python3 || command -v python) || {
+    # Phase routing: unset/phase1/phase2/stage1/stage2 keep the Python helper
+    # (pre-p2 has no verified Simple stage); phase3/phase4/stage3/stage4 run the
+    # Simple twin under the pinned verified stage binary; anything else refuses.
+    case "${BOOTSTRAP_LOGGED_PROCESS_PHASE:-}" in
+        ''|phase1|phase2|stage1|stage2) blwc_twin= ;;
+        phase3|phase4|stage3|stage4) blwc_twin=1 ;;
+        *)
+            printf 'bootstrap-native-cargo-error: unknown BOOTSTRAP_LOGGED_PROCESS_PHASE=%s
+' "$BOOTSTRAP_LOGGED_PROCESS_PHASE" >&2
+            return 2 ;;
+    esac
+    if [ -n "$blwc_twin" ]; then
+        [ -n "${SIMPLE_VERIFIED_STAGE_BINARY:-}" ] && [ -x "$SIMPLE_VERIFIED_STAGE_BINARY" ] &&
+            [ -n "${SIMPLE_VERIFIED_STAGE_PIN:-}" ] || {
+            printf 'bootstrap-native-cargo-error: p3+ bounded-log twin requires SIMPLE_VERIFIED_STAGE_BINARY and SIMPLE_VERIFIED_STAGE_PIN
+' >&2
+            return 2
+        }
+        # Native path form: the twin derives its source root from argv and the
+        # pin location guard compares it with the (native) pin path.
+        blwc_helper=$(cygpath -m "$blwc_root/scripts/bootstrap/run-process-group-bounded-log-windows.spl") || return 126
+    else
+        blwc_helper=$blwc_root/scripts/bootstrap/run-process-group-bounded-log-windows.py
+    fi
+    blwc_run=
+    if [ -n "$blwc_twin" ]; then
+        blwc_python=$SIMPLE_VERIFIED_STAGE_BINARY
+        blwc_run=run
+    else blwc_python=$(command -v python3 || command -v python) || {
         printf 'bootstrap-native-cargo-error: python3 (or python) not found on PATH; required to run %s/scripts/bootstrap/run-process-group-bounded-log-windows.py, the native Windows Cargo launch supervisor. Declared in scripts/setup/bootstrap-prereqs.shs (windows platform_tools) -- run `sh scripts/setup/bootstrap-prereqs.shs check` to see the full prerequisite table.\n' "$blwc_root" >&2
         return 126
     }
-    blwc_helper=$blwc_root/scripts/bootstrap/run-process-group-bounded-log-windows.py
+    fi
     blwc_helper_sha=$(sha256sum <"$blwc_helper" | awk '{print $1}') || return 126
     blwc_parent=$(CDPATH= cd -- "${blwc_log%/*}" && pwd -P) || return 126
     # MSYS process IDs can recur across independent sessions. A fresh capture
@@ -25,7 +53,7 @@ bootstrap_logged_windows_cargo() (
     blwc_parent=$(mktemp -d "$blwc_parent/${blwc_log##*/}.process.XXXXXX") || return 126
     blwc_leaf=command
     blwc_status=0
-    "$blwc_python" "$blwc_helper" --command-environment=clean-prefix \
+    "$blwc_python" ${blwc_run:+"$blwc_run"} "$blwc_helper" --command-environment=clean-prefix \
         --root-exit-policy=terminate-job \
         --helper-sha256="$blwc_helper_sha" --output-parent="$blwc_parent" \
         --log-leaf="$blwc_leaf.log" --receipt-leaf="$blwc_leaf.env" \
