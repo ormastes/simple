@@ -166,15 +166,17 @@ static Fixture start_fixture(char fill, int code, int residue_word) {
     return f;
 }
 
-/* Poll until the runtime reports the helper tree empty, then collect it. */
-static void retire_helper(const Fixture *f) {
-    int empty = 0;
+/* Poll until the runtime reports the helper tree empty, then collect it.
+ * Returns the leader exit code the runtime reports for the helper. */
+static int retire_helper(const Fixture *f) {
+    int empty = 0, reported;
     for (int attempt = 0; attempt < 600 && !empty; attempt++) {
         assert(rt_lg_poll(&rt_linux_group) == 0);
         empty = rt_linux_group.leader_reaped && rt_linux_group.tree_empty;
         if (!empty) usleep(5000);
     }
     assert(empty);
+    reported = rt_linux_group.exit_code;
     SplArray *collected = rt_linux_group_collect_v1(1);
     assert(collected && collected->items[0].as_int == 0);
     rt_array_free(collected);
@@ -182,6 +184,7 @@ static void retire_helper(const Fixture *f) {
     /* Collect removed the helper group, so its now-empty parent can go too. */
     assert(unlinkat(root_fd, f->parent, AT_REMOVEDIR) == 0);
     rt_linux_group = (RtLinuxGroup){0};
+    return reported;
 }
 
 static int engine_open(const Fixture *f) {
@@ -243,7 +246,7 @@ int main(void) {
     /* 1. Asked, leader exited 0: the residue is moved, thawed and alive; the
      *    helper group retires exactly as before. */
     Fixture moved = start_fixture('a', 0, 1);
-    retire_helper(&moved);
+    assert(retire_helper(&moved) == 0);
     int engine = engine_open(&moved);
     assert(engine >= 0);
     assert(member_of(engine, moved.residue) && kill(moved.residue, 0) == 0);
@@ -256,30 +259,31 @@ int main(void) {
 
     /* 2. Asked, leader failed: nothing is moved and no group is made. */
     Fixture failed = start_fixture('b', 3, 1);
-    retire_helper(&failed);
+    assert(retire_helper(&failed) == 3);
     assert(engine_open(&failed) < 0 && errno == ENOENT);
     gone(failed.residue);
 
     /* 3. Not asked (twelve words): byte-for-byte the old behaviour. */
     Fixture plain = start_fixture('c', 0, 0);
-    retire_helper(&plain);
+    assert(retire_helper(&plain) == 0);
     assert(engine_open(&plain) < 0 && errno == ENOENT);
     gone(plain.residue);
 
     /* 4. Asked, leader exited 0, but cancelled: killed, never moved. */
     Fixture cancelled = start_fixture('d', 0, 1);
     rt_linux_group.cancelled = 1;
-    retire_helper(&cancelled);
+    assert(retire_helper(&cancelled) == 0);
     assert(engine_open(&cancelled) < 0 && errno == ENOENT);
     gone(cancelled.residue);
 
     /* 5. The name is already taken: never adopted. The residue is killed with
-     *    its frozen helper group and the foreign directory is left as it was. */
+     *    its frozen helper group and the foreign directory is left as it was.
+     *    The start is reported failed, not as a leader that exited 0. */
     Fixture taken = start_fixture('e', 0, 1);
     char name[80];
     snprintf(name, sizeof(name), "simple-engine-%s", taken.identity);
     assert(mkdirat(root_fd, name, 0700) == 0);
-    retire_helper(&taken);
+    assert(retire_helper(&taken) == RT_LG_RESIDUE_MOVE_FAILED_EXIT);
     engine = engine_open(&taken);
     assert(engine >= 0 && wait_empty(engine) && !member_of(engine, taken.residue));
     close(engine);
@@ -305,9 +309,38 @@ int main(void) {
     assert(unlinkat(root_fd, crashed.parent, AT_REMOVEDIR) == 0);
     rt_linux_group = (RtLinuxGroup){0};
 
+    /* 7. The delegated root refuses the engine group (EACCES or EPERM on
+     *    mkdirat): nothing is made, the residue is killed with its helper
+     *    group, and the leader that exited 0 is reported with the permission
+     *    exit code. The cgroup root stands in for a root this uid may not
+     *    create under; root itself can create anywhere, so it cannot check this. */
+    assert(rt_lg_residue_refusal(EACCES) == RT_LG_RESIDUE_MOVE_PERMISSION_EXIT &&
+        rt_lg_residue_refusal(EPERM) == RT_LG_RESIDUE_MOVE_PERMISSION_EXIT &&
+        rt_lg_residue_refusal(EROFS) == RT_LG_RESIDUE_MOVE_PERMISSION_EXIT &&
+        rt_lg_residue_refusal(EEXIST) == RT_LG_RESIDUE_MOVE_FAILED_EXIT &&
+        RT_LG_RESIDUE_MOVE_FAILED_EXIT > 255 && RT_LG_RESIDUE_MOVE_PERMISSION_EXIT > 255);
+    if (geteuid() == 0) {
+        close(root_fd);
+        assert(unlinkat(scope_fd, "residue-selfcheck-root", AT_REMOVEDIR) == 0);
+        puts("SKIP: delegated-root permission refusal cannot be checked as root; not a PASS");
+        return 77;
+    }
+    int denied_fd = open("/sys/fs/cgroup", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(denied_fd >= 0);
+    Fixture denied = start_fixture('g', 0, 1);
+    snprintf(name, sizeof(name), "simple-engine-%s", denied.identity);
+    errno = 0;
+    assert(mkdirat(denied_fd, name, 0700) != 0 && (errno == EACCES || errno == EPERM || errno == EROFS));
+    rt_lg_delegation.root_fd = denied_fd;
+    assert(retire_helper(&denied) == RT_LG_RESIDUE_MOVE_PERMISSION_EXIT);
+    assert(engine_open(&denied) < 0 && errno == ENOENT);
+    assert(openat(denied_fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC) < 0 && errno == ENOENT);
+    close(denied_fd);
+    gone(denied.residue);
+
     close(root_fd);
     assert(unlinkat(scope_fd, "residue-selfcheck-root", AT_REMOVEDIR) == 0);
-    puts("runtime_linux_group_residue_move_selfcheck: PASS (6 cases, real cgroup v2)");
+    puts("runtime_linux_group_residue_move_selfcheck: PASS (7 cases, real cgroup v2)");
     return 0;
 }
 #endif

@@ -1188,8 +1188,14 @@ impl HirLowering:
         interpreter's import-time `check_private_use_names`
         (src/compiler_rust/.../interpreter_module/module_loader.rs). A braced
         `use m.{name}` that names a bare (non-pub) top-level `fn` of `m` from a
-        file in a DIFFERENT directory is a hard error [E-HIR-PRIVATE-IMPORT-001]
-        by default. A `rel|name` pair frozen in
+        file in a DIFFERENT directory is a visibility violation: a recorded
+        warning [W-HIR-PRIVATE-IMPORT-001] by default and a hard error
+        [E-HIR-PRIVATE-IMPORT-001] under SIMPLE_STRICT_PRIVATE_IMPORTS=1.
+        STAGED again (2026-11-28): the hard default (469b8fa6eb2) stopped the
+        aarch64 Stage 2 full-CLI build at HIR on non-baselined importers
+        (lib/common/crypto/xxh3.spl, mir_opt/_AutoVectorize/{recipe,rewrite}.spl);
+        a textual census finds about 136 (module, fn) pairs in total in that closure. Flip the
+        default only after a full-CLI build is warning-free. A `rel|name` pair frozen in
         scripts/check/private_import_baseline.txt at the repository root (with
         SCV snapshot prefix normalization) is the seed's `[visibility-warning]`.
         Exemptions matching seed & HIR visibility rules:
@@ -1211,7 +1217,11 @@ impl HirLowering:
         val imported_canon = module_surface_canonical_path(imported_norm)
         val importer_dir = if importer_canon != "": private_import_dir_of(importer_canon) else: private_import_dir_of(importer_norm)
         val imported_dir = if imported_canon != "": private_import_dir_of(imported_canon) else: private_import_dir_of(imported_norm)
-        if importer_dir == imported_dir:
+        # `_`-prefixed top-level fns are module-internal by naming convention:
+        # directory siblings share plain private names, but never underscore
+        # names (gap 4, export visibility;
+        # doc/08_tracking/bug/compiler_interpreter_integration_real_gaps_found_2026-09-06.md).
+        if importer_dir == imported_dir and not name.starts_with("_"):
             return false
         if imported.exports.len() > 0:
             return false
@@ -1239,8 +1249,11 @@ impl HirLowering:
         if is_reexport:
             self.warning("[W-HIR-PRIVATE-IMPORT-001] " + message, span)
             return false
-        self.error("[E-HIR-PRIVATE-IMPORT-001] " + message, span)
-        true
+        if (hir_module_env_get("SIMPLE_STRICT_PRIVATE_IMPORTS") ?? "") == "1":
+            self.error("[E-HIR-PRIVATE-IMPORT-001] " + message, span)
+            return true
+        self.warning("[W-HIR-PRIVATE-IMPORT-001] " + message, span)
+        false
 
     me resolve_package_sibling_symbols(module: ParserModule):
         """Directory-package semantics: files in one source directory share a

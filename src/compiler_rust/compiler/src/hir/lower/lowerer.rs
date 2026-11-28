@@ -41,6 +41,9 @@ pub(super) struct GenericIdentityParamSpec {
     pub index: usize,
     pub name: String,
     pub generic_param_pos: Option<usize>,
+    /// Other parameters typed by the same type variable (index, name): the
+    /// call is instantiated only when their arguments agree.
+    pub same_type_params: Vec<(usize, String)>,
 }
 
 pub struct Lowerer {
@@ -73,6 +76,10 @@ pub struct Lowerer {
     pub(super) suffix_guessed_return_types: HashSet<TypeId>,
     /// Set by `lookup_method_return_type` when its result came from that guess.
     pub(super) last_method_return_guessed: std::cell::Cell<bool>,
+    /// Sticky per function: a suffix-search guess produced a FLOAT type in the
+    /// function being lowered. A guessed float is not evidence, so the
+    /// float-into-int errors and the int/float value join skip that function.
+    pub(super) guessed_float_in_function: std::cell::Cell<bool>,
     /// Declaration line of the function currently being lowered. Recorded so the
     /// `lenient_types` unresolved-name fallback can attribute the global it
     /// emits to a source location; `Expr::Identifier` carries no span of its own.
@@ -230,6 +237,12 @@ pub struct Lowerer {
     /// enum-slot check consumes it only for a receiver declared in the file
     /// being lowered; the float-into-int check consumes every row.
     pub(super) method_param_type_names: HashMap<String, Vec<Option<String>>>,
+    /// Declared numeric element type per array parameter (`[i64]`, `List<u32>`),
+    /// parallel to `fn_param_type_names` / `method_param_type_names`, keyed the
+    /// same way. Lets the `[u8]`-into-word-array check see a slot whose type is
+    /// known only by its AST spelling.
+    pub(super) fn_param_array_elems: HashMap<String, Vec<Option<TypeId>>>,
+    pub(super) method_param_array_elems: HashMap<String, Vec<Option<TypeId>>>,
     /// `Owner.method` keys of `method_param_type_names` declared `static`:
     /// only these rows are checked at a `Type.method(args)` call, so an
     /// instance method called with an explicit receiver never shifts slots.
@@ -335,6 +348,19 @@ pub struct Lowerer {
     /// Erased generics type the call as Any; a struct/class argument (or
     /// explicit `<Struct>`) recovers the nominal struct identity.
     pub(super) generic_identity_param: HashMap<String, GenericIdentityParamSpec>,
+    /// Functions declared without a return annotation, by every key
+    /// `generic_identity_param` uses (see `implicit_generic.rs`). The value is
+    /// whether the body yields a value, known once the body is lowered.
+    pub(super) unannotated_return_fns: HashMap<String, Option<bool>>,
+    /// Typed uses of an uninferred value: (callee whose body was not yet
+    /// lowered, error), judged once every body is lowered (a procedure's call
+    /// is `()`, not an uninferred value).
+    pub(super) pending_uninferred_uses: Vec<(Option<String>, super::error::LowerError)>,
+    /// The entry file is a script by file kind (`.shs` / `.sscript`).
+    pub(super) entry_is_script: bool,
+    /// Untyped values at typed uses are errors (`SIMPLE_STRICT_ANY=1`), not
+    /// the default warnings.
+    pub(super) strict_any: bool,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Canonical `module_prefix__Type` -> declared field `= default` exprs,
@@ -426,6 +452,25 @@ thread_local! {
     static PRIVATE_REF_VIOLATIONS: std::cell::RefCell<Option<Vec<PrivateRefViolation>>> = const { std::cell::RefCell::new(None) };
 }
 
+thread_local! {
+    /// True while the unit being lowered on this thread has a SCRIPT entry
+    /// file (see `set_entry_script_mode`).
+    static ENTRY_SCRIPT_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tell the lowerings that follow on this thread whether the entry file is a
+/// script by file kind (`.shs` / `.sscript`; `.spl` is a compiled safe module,
+/// specs included). Script-owned
+/// functions keep dynamically typed value joins; see
+/// `Lowerer::join_value_arms`. Only the run/JIT lane sets it.
+pub fn set_entry_script_mode(on: bool) {
+    ENTRY_SCRIPT_MODE.with(|cell| cell.set(on));
+}
+
+pub(crate) fn entry_script_mode() -> bool {
+    ENTRY_SCRIPT_MODE.with(|cell| cell.get())
+}
+
 fn private_ref_gate_armed() -> bool {
     PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow().is_some())
 }
@@ -472,6 +517,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -531,6 +577,8 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            fn_param_array_elems: HashMap::new(),
+            method_param_array_elems: HashMap::new(),
             static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
@@ -542,6 +590,10 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             generic_identity_param: HashMap::new(),
+            unannotated_return_fns: HashMap::new(),
+            pending_uninferred_uses: Vec::new(),
+            entry_is_script: false,
+            strict_any: std::env::var_os("SIMPLE_STRICT_ANY").is_some_and(|v| v != "0"),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -582,6 +634,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -641,6 +694,8 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            fn_param_array_elems: HashMap::new(),
+            method_param_array_elems: HashMap::new(),
             static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
@@ -652,6 +707,10 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             generic_identity_param: HashMap::new(),
+            unannotated_return_fns: HashMap::new(),
+            pending_uninferred_uses: Vec::new(),
+            entry_is_script: false,
+            strict_any: std::env::var_os("SIMPLE_STRICT_ANY").is_some_and(|v| v != "0"),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -715,6 +774,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -774,6 +834,8 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            fn_param_array_elems: HashMap::new(),
+            method_param_array_elems: HashMap::new(),
             static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
@@ -785,6 +847,10 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             generic_identity_param: HashMap::new(),
+            unannotated_return_fns: HashMap::new(),
+            pending_uninferred_uses: Vec::new(),
+            entry_is_script: false,
+            strict_any: std::env::var_os("SIMPLE_STRICT_ANY").is_some_and(|v| v != "0"),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -826,6 +892,12 @@ impl Lowerer {
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub fn set_lenient_types(&mut self, lenient: bool) {
         self.lenient_types = lenient;
+    }
+
+    /// Make an untyped value at a typed use an error instead of a warning
+    /// (the `SIMPLE_STRICT_ANY=1` behaviour; see `implicit_generic.rs`).
+    pub fn set_strict_any(&mut self, strict: bool) {
+        self.strict_any = strict;
     }
 
     /// Attribute a name that the `lenient_types` fallback is about to lower to
@@ -1349,6 +1421,25 @@ impl Lowerer {
             .map(str::to_string)
     }
 
+    /// File a body-lowering diagnostic should name. Import flattening splices
+    /// an imported module's items into the entry unit while `current_file`
+    /// stays the ENTRY path, so a verdict raised while an imported function
+    /// lowers would name the wrong file; the flattener's owner attribute
+    /// (`flatten_owner_of`) still identifies the DEFINING module. Entry-module
+    /// functions and non-flattened units carry no attribute and keep
+    /// `current_file`. Same attribution policy as `record_private_ref`.
+    /// seed_lowering_error_names_entry_file_not_defining_module_2026-11-26
+    pub(super) fn body_diagnostic_file(&self) -> String {
+        match &self.current_function_owner {
+            Some(owner) => owner.clone(),
+            None => self
+                .current_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        }
+    }
+
     /// Return type of a call to extern `name` as declared by the CALLING
     /// module, when co-compiled modules declare `name` with different return
     /// types. `None` (keep the bare-name type) when every declaration agrees or
@@ -1435,7 +1526,36 @@ impl Lowerer {
         found
     }
 
-    fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
+    /// Call-site candidates for a bare `name(args)` whose module BOTH declares
+    /// a colliding `name` and selectively imports another module's `name`
+    /// (`use alpha.{same_name}` beside a local `fn same_name(n: i64)`).
+    ///
+    /// `flatten_owned_callable` rule 1 is name-only and returns the module's
+    /// own definition, so `same_name("x", "y")` used to run the `(i64)` body
+    /// with a text handle read as an integer. Both definitions are visible to
+    /// the caller; the arguments choose (`select_flatten_call_candidate`).
+    /// `None` when the module sees only one definition -- the existing rules
+    /// stand. Bug: seed_same_name_fn_binding_2026-11-27 (form 1).
+    pub(super) fn flatten_call_site_candidates(&self, name: &str) -> Option<[String; 2]> {
+        if !self.flatten_is_collision(name) {
+            return None;
+        }
+        let current = self.current_function_owner.as_deref();
+        if !self.flatten_owner_defines(current, name) {
+            return None;
+        }
+        let importer = current.unwrap_or("<entry>");
+        let (source_owner, source_name) = self
+            .flatten_owner_import_bindings
+            .get(importer)
+            .and_then(|bindings| bindings.get(name))
+            .and_then(|(owner, source)| self.flatten_reexport_definer(importer, owner, source))?;
+        let own = self.flatten_emitted_symbol(current, name);
+        let imported = self.flatten_emitted_symbol(Some(&source_owner), &source_name);
+        (own != imported).then_some([own, imported])
+    }
+
+    pub(super) fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
         self.flatten_fn_owners
             .get(name)
             .is_some_and(|owners| owners.iter().any(|o| o.as_deref() == owner))
@@ -1866,17 +1986,25 @@ impl Lowerer {
     pub(super) fn generic_identity_param_spec(
         f: &simple_parser::ast::FunctionDef,
     ) -> Option<GenericIdentityParamSpec> {
-        let Type::Simple(ret_param) = f.return_type.as_ref()? else {
-            return None;
+        let Some(Type::Simple(ret_param)) = f.return_type.as_ref() else {
+            return Self::implicit_identity_param_spec(f);
         };
         let generic_param_pos = f.generic_params.iter().position(|g| g == ret_param)?;
         let (index, param) = f.params.iter().enumerate().find(|(_, p)| {
             matches!(&p.ty, Some(Type::Simple(n)) if n == ret_param)
         })?;
+        let same_type_params = f
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| *i != index && matches!(&p.ty, Some(Type::Simple(n)) if n == ret_param))
+            .map(|(i, p)| (i, p.name.clone()))
+            .collect();
         Some(GenericIdentityParamSpec {
             index,
             name: param.name.clone(),
             generic_param_pos: Some(generic_param_pos),
+            same_type_params,
         })
     }
 
@@ -1888,11 +2016,17 @@ impl Lowerer {
         if let Some(spec) = Self::generic_identity_param_spec(f) {
             self.generic_identity_param.insert(key.to_string(), spec);
         }
+        if f.return_type.is_none() {
+            self.unannotated_return_fns.entry(key.to_string()).or_insert(None);
+        }
     }
 
     pub(super) fn record_generic_identity_param_alias(&mut self, original: &str, alias: &str) {
         if let Some(spec) = self.generic_identity_param.get(original).cloned() {
             self.generic_identity_param.insert(alias.to_string(), spec);
+        }
+        if let Some(verdict) = self.unannotated_return_fns.get(original).copied() {
+            self.unannotated_return_fns.insert(alias.to_string(), verdict);
         }
     }
 

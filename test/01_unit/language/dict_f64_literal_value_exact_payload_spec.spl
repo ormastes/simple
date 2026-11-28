@@ -1,0 +1,161 @@
+# @tag:in-development
+# Tracks: seed_jit_dict_f64_literal_value_read_loses_low_mantissa_bits_2026-11-27
+# FIXED in source 2026-11-27 (MirInst::BoxFloat on F32/F64 values in
+# src/compiler_rust/compiler/src/mir/lower/lowering_expr_collection.rs
+# `lower_dict_expr` and the .set/.insert rt_dict_set path in
+# lowering_expr_method.rs); stays tagged until a seed carrying it is deployed.
+#
+# A `{text: f64}` dict literal stores its values through `rt_dict_set`, which
+# takes TAGGED RuntimeValues, but the seed JIT dict-literal lowering passed the
+# RAW f64 bit-pattern. Every typed read (`d[k]`, `d.get(k)` with `??` /
+# `if val` / `.unwrap()` / `match`) decodes the stored word with UnboxFloat ->
+# rt_value_as_float, which reads a raw f64 bit-pattern as a legacy inline
+# TAG_FLOAT and shifts the payload, zeroing the low 3 mantissa bits
+# (`{"k": 0.1}` read back 0.09999999999999998 = 0x3fb9999999999998 instead of
+# 0x3fb999999999999a). `.insert`/`.set` shared the raw write; `d[k] = v`
+# (rt_index_set) already boxed and is the control.
+#
+# Re-verification recipe (from the repo root, bash):
+#   export SIMPLE_HIR_CACHE_DIR=$PWD/build/p3cache/dictf64/hir-cache \
+#          TMPDIR=$PWD/build/p3cache/dictf64/tmp SIMPLE_RUST_SEED_WARNING=0
+#   # RED — run the spec fixtures (the """ blocks below, written to .spl) with
+#   # a pre-fix seed in strict JIT mode; expect nonzero mismatches (jit) and
+#   # zero in interpreter mode:
+#   S=$PWD/build/p3cache/fresh-seed/simple.exe
+#   SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 "$S" run <fixture>.spl
+#   SIMPLE_EXECUTION_MODE=interpret "$S" run <fixture>.spl
+#   # Seed-side unit regression (in-process JIT, no fixtures):
+#   (cd src/compiler_rust && CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+#      CARGO_TARGET_DIR=$PWD/build/p3cache/dictf64/cargo-target \
+#      cargo test -p simple-compiler --test seed_jit_dict_f64_literal_value_read)
+#   # GREEN — scratch-build the fixed driver and use it as BOTH the spec runner
+#   # and SIMPLE_BINARY (the test runner refuses a SIMPLE_BINARY whose identity
+#   # differs from the invoking binary):
+#   (cd src/compiler_rust && CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+#      CARGO_TARGET_DIR=$PWD/build/p3cache/dictf64/cargo-target cargo build --release -p simple-driver)
+#   FIXED=$(find build/p3cache/dictf64/cargo-target/release -name simple.exe -path "*simple-driver*" | head -1)
+#   SIMPLE_BINARY="$FIXED" "$FIXED" test test/01_unit/language/dict_f64_literal_value_exact_payload_spec.spl
+# The sspec runner forces the interpreter for the spec itself; each fixture
+# runs through the compiler binary (`SIMPLE_BINARY` or `bin/simple`) in strict
+# JIT mode and in interpreter mode; both must report 0 mismatches.
+# Exactness: equal, same sign of zero, NaN stays NaN; the bits fixture compares
+# raw bit patterns (NaN payloads, heap-tag 0b001 and TAG_FLOAT 0b010 words).
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val FIXTURE = """fn same(g: f64, w: f64) -> bool:
+    if w != w:
+        return g != g
+    if w == 0.0:
+        return g == 0.0 and (1.0 / g) == (1.0 / w)
+    g == w
+
+fn miss(ok: bool) -> i64:
+    if ok:
+        return 0
+    1
+
+fn readers(x: f64) -> i64:
+    val d: {text: f64} = {"k": x}
+    var r = miss(same(d["k"], x))
+    val g: f64? = d.get("k")
+    r = r + miss(same(g ?? 9.0, x))
+    var iv = 9.0
+    if val v = g:
+        iv = v
+    r = r + miss(same(iv, x))
+    r = r + miss(same(g.unwrap(), x))
+    var mv = 9.0
+    match g:
+        Some(v): mv = v
+        None: mv = 8.0
+    r + miss(same(mv, x))
+
+fn inserts(x: f64) -> i64:
+    var d: {text: f64} = {}
+    d.insert("k", x)
+    var r = miss(same(d["k"], x))
+    val g: f64? = d.get("k")
+    r + miss(same(g ?? 9.0, x))
+
+fn main():
+    val total = readers(0.1) + readers(4.9e-324 * 2.0) * 32 + readers(1e-300) * 1024 + readers(-0.0) * 32768 + inserts(0.1) * 1048576
+    # f32 literal value via the f32-typed index read. (f32? `.get` rides the
+    # inline-f64 Option readers; seeded separately from this dict-write fix.)
+    val f32d: {text: f32} = {"k": 0.1}
+    var f = 0
+    if f32d["k"] != 0.1:
+        f = f + 1
+    print("mismatch {total} f32 {f}")
+"""
+
+val BITS_FIXTURE = """extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
+
+fn chk(bits: i64) -> i64:
+    val x = spl_bits_to_f64(bits)
+    val d: {text: f64} = {"k": x}
+    var r = 0
+    if spl_f64_to_bits(d["k"]) != bits:
+        r = r + 1
+    val g: f64? = d.get("k")
+    if spl_f64_to_bits(g ?? 9.0) != bits:
+        r = r + 2
+    if val v = g:
+        if spl_f64_to_bits(v) != bits:
+            r = r + 4
+    if spl_f64_to_bits(g.unwrap()) != bits:
+        r = r + 8
+    r
+
+fn chk_f32() -> i64:
+    # The literal 0.1 keeps its f64 bits (0x3FB999999999999A) in an f32-typed
+    # dict; the raw-store bug shifted them on readback (0x3FB9999999999998).
+    val d: {text: f32} = {"k": 0.1}
+    if spl_f64_to_bits(d["k"]) == spl_f64_to_bits(spl_bits_to_f64(4591870180066957722)):
+        return 0
+    16
+
+fn main():
+    val total = chk(9221120237041090565) + chk(1) * 32 + chk(2) * 512 + chk(-2251799813685243) * 8192 + chk_f32()
+    print("bits mismatch {total}")
+"""
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-dict-f64-exact"
+    dir_create_all(dir)
+    dir
+
+fn run_fixture(name: text, source: text, mode: text) -> (text, i64):
+    val path = work_dir() + "/" + name + "_" + mode + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", mode)
+    if mode == "jit":
+        env_set("SIMPLE_JIT_STRICT", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    (ran[0].trim(), ran[2])
+
+describe "typed {text: f64} dict literal value reads keep the exact payload":
+    it "reads every literal and insert value exactly on the JIT":
+        val (out, rc) = run_fixture("readers", FIXTURE, "jit")
+        assert_equal(rc, 0)
+        assert_equal(out, "mismatch 0 f32 0")
+
+    it "reads every literal and insert value exactly in the interpreter":
+        val (out, rc) = run_fixture("readers", FIXTURE, "interpret")
+        assert_equal(rc, 0)
+        assert_equal(out, "mismatch 0 f32 0")
+
+    it "keeps NaN payload and tag-pattern bits exactly on the JIT and in the interpreter":
+        val (jit_out, jit_rc) = run_fixture("bits", BITS_FIXTURE, "jit")
+        assert_equal(jit_rc, 0)
+        assert_equal(jit_out, "bits mismatch 0")
+        val (int_out, int_rc) = run_fixture("bits", BITS_FIXTURE, "interpret")
+        assert_equal(int_rc, 0)
+        assert_equal(int_out, "bits mismatch 0")

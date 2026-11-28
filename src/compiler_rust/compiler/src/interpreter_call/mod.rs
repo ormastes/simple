@@ -541,16 +541,18 @@ fn import_bound_candidate(
     name: &str,
     functions: &HashMap<String, Arc<FunctionDef>>,
     values: &[Value],
-) -> Option<Arc<FunctionDef>> {
+    named: bool,
+) -> Result<Option<Arc<FunctionDef>>, CompileError> {
     // The loader records root imports under the same <entry> owner used
     // for root function declarations. Top-level execution has no active
     // function owner, but its explicit import bindings still apply.
     let current = CURRENT_EXEC_MODULE
         .with(|cell| cell.borrow().clone())
         .unwrap_or_else(|| Arc::from("<entry>"));
-    if candidate_declared_by(&current, name, functions).is_some() {
-        return None;
-    }
+    // The caller's own declaration is ONE of the visible definitions, not a
+    // veto: when the module also imports `name`, the arguments choose
+    // (`own_vs_import_bound`). Bug: seed_same_name_fn_binding_2026-11-27.
+    let own = candidate_declared_by(&current, name, functions);
     if debug_dupdispatch() {
         let b = crate::interpreter::owner_bindings(&current);
         eprintln!(
@@ -559,8 +561,11 @@ fn import_bound_candidate(
             b.as_ref().and_then(|t| t.get(name).map(std::borrow::Cow::into_owned))
         );
     }
-    let (mut source_owner, mut source_name) =
-        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).map(std::borrow::Cow::into_owned))?;
+    let Some((mut source_owner, mut source_name)) =
+        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).map(std::borrow::Cow::into_owned))
+    else {
+        return Ok(None);
+    };
     // Walk re-export facades to the module that actually DECLARES the
     // function, mirroring the bounded chain walk HIR lowering performs in
     // `collect_flattened_import_aliases`. At each hop, a candidate declared
@@ -599,15 +604,68 @@ fn import_bound_candidate(
             _ => break,
         }
     }
-    let target = target?;
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    if let Some(own) = own {
+        return own_vs_import_bound(name, own, target, values, named);
+    }
     if debug_dupdispatch() {
         eprintln!(
             "[dupdispatch] import-bound name={name} current={current} source_owner={source_owner} source_name={source_name} target_owner={:?}",
             function_module_owner(&target)
         );
     }
-    overload_score(&target, values)?;
-    Some(target)
+    Ok(overload_score(&target, values).map(|_| target))
+}
+
+/// The caller declares `name` AND imports another module's `name`: both are
+/// visible, so the arguments choose. `Ok(None)` hands the call to the
+/// own-module-first selection (the own definition fits at least as well);
+/// `Ok(Some(import))` when only -- or best -- the import fits. Two distinct
+/// signatures that fit equally well are a compile error, the twin of the HIR
+/// lowerer's `select_flatten_call_candidate`.
+fn own_vs_import_bound(
+    name: &str,
+    own: Arc<FunctionDef>,
+    import: Arc<FunctionDef>,
+    values: &[Value],
+    named: bool,
+) -> Result<Option<Arc<FunctionDef>>, CompileError> {
+    if Arc::ptr_eq(&own, &import) {
+        return Ok(None);
+    }
+    // Named arguments do not rank (positional `values` misorder them): fit
+    // is arity-only and any two fitting candidates tie, mirroring the HIR
+    // lowerer.
+    let score = |f: &FunctionDef| {
+        if named {
+            let required = f.params.iter().filter(|p| p.default.is_none()).count();
+            (values.len() >= required && values.len() <= f.params.len()).then_some(0)
+        } else {
+            overload_score(f, values)
+        }
+    };
+    let Some(import_score) = score(&import) else {
+        return Ok(None);
+    };
+    let own_score = score(&own);
+    match own_score {
+        None => Ok(Some(import)),
+        Some(own_score) if own_score > import_score => Ok(None),
+        Some(own_score) if own_score < import_score => Ok(Some(import)),
+        Some(_) => {
+            let sig = |f: &FunctionDef| {
+                f.params.iter().map(|p| p.ty.as_ref().map_or("_".to_string(), |t| format!("{t:?}"))).collect::<Vec<_>>()
+            };
+            if sig(&own) == sig(&import) {
+                return Ok(None);
+            }
+            Err(CompileError::semantic(format!(
+                "ambiguous call to `{name}`: this module defines `{name}` and also imports one, and the arguments fit both definitions equally. Rename one definition or import the other under an alias. [compiler_cross_module_private_symbol_collision]"
+            )))
+        }
+    }
 }
 
 /// The extern an aliased import binds `name` to, if any: walk the calling
@@ -647,6 +705,84 @@ fn is_current_module_candidate(func: &Arc<FunctionDef>) -> bool {
         (Some(cur), Some(owner)) => cur == owner,
         _ => false,
     }
+}
+
+/// A discriminating class-argument position where every arity-compatible
+/// candidate declares a typed parameter that rejects the value. Returns the
+/// demangled class name only when the mismatch is provable at runtime: the
+/// value carries a concrete class identity (an aggregate class, never an
+/// erased/untyped value) and no fallback dispatch could legitimately accept
+/// it. The per-candidate comparison mirrors `overload_score`'s owner-scoped
+/// walk, so a candidate can never disagree with the score that rejected it.
+/// Bug: interpreter_wrong_owner_arg_overload_fallthrough_2026_11_27.
+fn provable_class_rejection(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<String> {
+    let owner_exact = crate::interpreter::renamed_classes_present()
+        && values.iter().any(|value| {
+            value
+                .aggregate_class()
+                .is_some_and(|class| class.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX))
+        });
+    let arity_ok = |func: &FunctionDef| {
+        let required = func.params.iter().filter(|p| p.default.is_none()).count();
+        (required..=func.params.len()).contains(&values.len())
+    };
+    for (index, value) in values.iter().enumerate() {
+        let Some(class_name) = value.aggregate_class() else {
+            continue;
+        };
+        let mut saw_typed = false;
+        let mut accepted = false;
+        for func in candidates {
+            if !arity_ok(func) {
+                continue;
+            }
+            let Some(param) = func.params.get(index) else {
+                continue;
+            };
+            let Some(ty) = &param.ty else {
+                // An untyped parameter accepts every value; this position
+                // cannot prove a mismatch.
+                accepted = true;
+                break;
+            };
+            saw_typed = true;
+            let owner = self::core::function_exec::function_module_owner(func);
+            let matched = if owner_exact {
+                crate::interpreter::with_exec_owner(owner, || value_matches_type(value, ty))
+            } else {
+                value_matches_type(value, ty)
+            };
+            if matched {
+                accepted = true;
+                break;
+            }
+        }
+        if saw_typed && !accepted {
+            return Some(crate::interpreter::flatten_owner_source_name(class_name).to_string());
+        }
+    }
+    None
+}
+
+/// Error for a call whose discriminating class-typed argument no
+/// arity-compatible overload accepts. Owner decision 2026-11-09 (no
+/// last-definition fallback): the lowering lanes report the analogous
+/// `AmbiguousCallable` at HIR time; this is the interpreter's counterpart.
+/// The candidate count is deliberately omitted: the registered overload set
+/// holds both a definition and its mangled `$dupN` twin, so a raw count
+/// disagrees with the "N co-compiled definitions" collision warning.
+fn no_matching_overload_error(name: &str, rejected_class: &str) -> CompileError {
+    let ctx = ErrorContext::new()
+        .with_code(codes::TYPE_MISMATCH)
+        .with_help(
+            "the argument's class is not the one any overload's parameter declares \
+             (another module's same-named class is a different type); pass an argument \
+             the overload accepts, or import the intended definition selectively",
+        );
+    CompileError::semantic_with_context(
+        format!("ambiguous call to `{name}`: argument of class `{rejected_class}` selects none of the overloads"),
+        ctx,
+    )
 }
 
 fn select_overload(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<Arc<FunctionDef>> {
@@ -1048,7 +1184,7 @@ fn evaluate_identifier_user_call(
             // An explicit `use m.{name}` in the calling module binds the
             // call to m's definition; only when no such binding resolves
             // does the historical score/tie selection below apply.
-            if let Some(func) = import_bound_candidate(name, functions, &evaluated_args) {
+            if let Some(func) = import_bound_candidate(name, functions, &evaluated_args, args.iter().any(|a| a.name.is_some()))? {
                 // A glob import binds the name; it does not make it visible.
                 // Judge the definition the binding resolved to (its own
                 // name), not the call-site spelling.
@@ -1081,14 +1217,28 @@ fn evaluate_identifier_user_call(
             // When no candidate scores (untyped/erased argument values), the
             // flat map below is last-registration-wins across modules; the
             // calling module's own definition is what native lowering binds.
+            // A class-typed argument rejected by every arity-compatible
+            // candidate is a provable mismatch, not an erased/untyped value:
+            // suppress the arity-only fallback below and report a type error
+            // instead of letting the Priority-5 flat map (last registration,
+            // no scoring) run some overload. Owner decision 2026-11-09 (no
+            // last-definition fallback); interpreter lane of
+            // interpreter_wrong_owner_arg_overload_fallthrough_2026_11_27.
+            let rejected_class = provable_class_rejection(&overloads, &evaluated_args);
             let selected = select_overload(&own, &evaluated_args)
                 .or_else(|| select_overload(&overloads, &evaluated_args))
                 .or_else(|| {
+                    if rejected_class.is_some() {
+                        return None;
+                    }
                     candidate_declared_by(&caller, name, functions).filter(|own| {
                         let required = own.params.iter().filter(|p| p.default.is_none()).count();
                         (required..=own.params.len()).contains(&evaluated_args.len())
                     })
                 });
+            if let Some(rejected_class) = rejected_class {
+                return Err(no_matching_overload_error(name, &rejected_class));
+            }
             if let Some(func) = selected {
                 gate_private_call(name, &func)?;
                 if debug_dupdispatch() {
@@ -1450,8 +1600,20 @@ pub(crate) fn evaluate_call(
         // short-circuits this by handling the DSL names directly and only returns
         // `Some` for names it actually recognizes, so non-DSL calls still fall
         // through to the user-function lookup unchanged.
-        if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
-            return Ok(result);
+        // A spec-DSL name the CALLING module declares itself (`fn context(v)`
+        // in a spec file) is that module's function, not the framework's: the
+        // DSL arm used to intercept it and evaluate to nil. `std.spec` defines
+        // the DSL names as real functions too, so "is user-defined" cannot be
+        // the test -- only the lexical caller's own declaration shadows.
+        // Bug: seed_same_name_fn_binding_2026-11-27 (form 2).
+        let caller_shadows_dsl = bdd::is_bdd_dsl_name(name) && {
+            let caller = lexical_caller_owner();
+            !bdd::is_spec_framework_owner(&caller) && candidate_declared_by(&caller, name, functions).is_some()
+        };
+        if !caller_shadows_dsl {
+            if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
+                return Ok(result);
+            }
         }
         phase_end(&pc::EVALCALL_NS_P3_BDD, t);
         return evaluate_identifier_user_call(name, args, env, functions, classes, enums, impl_methods);

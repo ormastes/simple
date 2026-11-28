@@ -4,7 +4,7 @@
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host, host_path_is_absolute}
 use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native}
-use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_capture_native_v1, process_environment_spawn_native_v1, process_capture_admitted_native_v1, process_capture_observed_native_v1}
+use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_capture_native_v1, process_capture_admitted_native_v1, process_capture_observed_native_v1}
 use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
@@ -986,6 +986,12 @@ extern fn rt_process_session_is_running(pid: i64) -> i64
 extern fn rt_process_kill_tree(pid: i64) -> i64
 @unsafe(reason: "child-side parent-death signal; 0 armed, -errno failed, -100000 no arm on this host", capabilities: [ffi])
 extern fn rt_child_set_pdeathsig(signo: i32) -> i64
+@unsafe(reason: "piped spawn with explicit child environment; PID > 0, -22 rejected, -1 spawn failure", capabilities: [ffi])
+extern fn rt_process_spawn_piped_environment_v1(cmd: text, args: [text], environment: [text], mode: i64) -> i64
+@unsafe(reason: "async spawn with explicit child environment into the rt_process_wait registry; PID > 0, -22 rejected, -1 spawn failure", capabilities: [ffi])
+extern fn rt_process_spawn_async_env_v1(cmd: text, args: [text], environment: [text], mode: i64) -> i64
+@unsafe(reason: "bounded piped-stream readiness; 1 ready, 0 timeout, -2 unknown, -3 not piped, -5 OS error, -22 invalid", capabilities: [ffi])
+extern fn rt_process_wait_readable_v1(pid: i64, stream: i64, timeout_ms: i64) -> i64
 @unsafe(reason: "raw piped-child spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
 extern fn rt_browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64
@@ -2038,14 +2044,14 @@ pub fn process_run_bounded_environment_v1(command: text, args: [text], environme
 
 @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_spawn_environment_overlay_native_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_spawn_environment_overlay_native_v1(command: text, args: [text], environment: [text]) -> i64:
-    if not host_is_windows_host(): return -95
-    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
-    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
-    if interpreted or jit: return -95
+    # The -95 this used to return under the interpreter/JIT was a missing
+    # backing, not a host limit: the (ptr, len) extern has no interpreter form.
+    # rt_process_spawn_async_env_v1 is the text-ABI twin every lane backs.
     # Match _process_spawn_async_raw: retain the existing shebang/POSIX-tool
     # routing policy; ordinary async does not call _resolve_process_cmd.
     val (resolved_command, resolved_arguments) = _resolve_posix_tool(command, args)
-    process_environment_spawn_native_v1(host_path_native(resolved_command), resolved_arguments, environment, 0)
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_async_env_v1(host_path_native(resolved_command), resolved_arguments, environment, 0)
 
 # Exact executable admission, independent of the running process timeout.
 # No shell/tool lookup. Admission is sampled AFTER governor wait; native capture
@@ -2637,6 +2643,70 @@ pub fn process_close_piped_result(pid: i64) -> Result<(), text>:
     if pid <= 0: return Err("invalid_process_handle")
     if not _process_close_piped_raw(pid): return Err("process_close_failed")
     Ok(())
+
+# Explicit child environment for piped spawn. Overlay keeps the parent
+# environment and replaces/adds the given keys; Replace passes exactly the
+# given entries. Keys are validated here and again by every runtime lane.
+pub enum ChildEnvironmentModeV1:
+    Overlay
+    Replace
+
+# @allow(primitive_api): pid is the same raw handle as the sibling piped API; timeout_ms is a bounded millisecond count
+pub fn process_spawn_piped_environment_result(cmd: text, args: [text], environment: [(text, text)], mode: ChildEnvironmentModeV1) -> Result<i64, text>:
+    if cmd == "": return Err("empty_process_command")
+    var entries: [text] = []
+    for pair in environment:
+        if not process_environment_key_valid_v1(pair.0) or pair.1.contains("\u{0}"):
+            return Err("invalid_child_environment_entry")
+        entries.push(pair.0 + "=" + pair.1)
+    val code = match mode:
+        ChildEnvironmentModeV1.Overlay: 0
+        ChildEnvironmentModeV1.Replace: 1
+    val pid = unsafe(capabilities: [ffi]): rt_process_spawn_piped_environment_v1(cmd, args, entries, code)
+    if pid == -22: return Err("invalid_child_environment")
+    if pid <= 0: return Err("process_spawn_failed")
+    Ok(pid)
+
+# Bounded read of a piped stream. Timeout, EOF and a chunk of data are
+# distinct variants; errors stay in Err.
+pub enum PipedReadV1:
+    Data(text)
+    Eof
+    Timeout
+
+# @allow(primitive_api): pid is the same raw handle as the sibling piped API; timeout_ms is a bounded millisecond count
+pub fn process_read_stdout_timeout_result(pid: i64, timeout_ms: i64) -> Result<PipedReadV1, text>:
+    if pid <= 0: return Err("invalid_process_handle")
+    if timeout_ms < 0: return Err("invalid_timeout")
+    val deadline = time_now_unix_micros() + timeout_ms * 1000
+    var remaining = timeout_ms
+    while true:
+        val ready = unsafe(capabilities: [ffi]): rt_process_wait_readable_v1(pid, 1, remaining)
+        if ready == 0: return Ok(PipedReadV1.Timeout)
+        if ready == -2: return Err("unknown_process_handle")
+        if ready == -3: return Err("stdout_not_available")
+        if ready != 1: return Err("process_wait_failed")
+        val chunk = _process_read_stdout_raw(pid)
+        if chunk != "": return Ok(PipedReadV1.Data(chunk))
+        val state = _process_stdout_state_raw(pid)
+        if state == 1: return Ok(PipedReadV1.Eof)
+        if state == -1: return Err("process_read_failed")
+        # Ready with no decodable bytes (e.g. a held UTF-8 tail): wait out the
+        # rest of the budget instead of reporting an early timeout.
+        remaining = (deadline - time_now_unix_micros()) / 1000
+        if remaining <= 0: return Ok(PipedReadV1.Timeout)
+    Ok(PipedReadV1.Timeout)
+
+# @allow(primitive_api): pid is the same raw handle as the sibling piped API; timeout_ms is a bounded millisecond count
+pub fn process_read_stderr_timeout_result(pid: i64, timeout_ms: i64) -> Result<PipedReadV1, text>:
+    if pid <= 0: return Err("invalid_process_handle")
+    if timeout_ms < 0: return Err("invalid_timeout")
+    val ready = unsafe(capabilities: [ffi]): rt_process_wait_readable_v1(pid, 2, timeout_ms)
+    if ready == -3: return Err("stderr_not_piped")
+    if ready == -2: return Err("unknown_process_handle")
+    if ready == 0: return Ok(PipedReadV1.Timeout)
+    # ponytail: stderr read itself lands with the stderr-pipe lane (gap 1).
+    Err("stderr_read_unavailable")
 
 pub fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Unix implementation using the native async process facade."""

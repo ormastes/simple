@@ -7,17 +7,20 @@
 
 """
 As a Simple developer whose test lane co-loads many modules at once,
-I want a loud diagnostic when two co-loaded modules each define a class
-with the same name, so that the resulting cross-module member
-mis-dispatch does not masquerade as "method not found" or
-"no field named ..." on a class that plainly has the member.
+I want two co-loaded modules that each define a class with the same name
+to keep their own classes, so that one module's method bodies never
+execute against instances of the other.
 
-Background: the interpreter keys its struct/class table on the BARE
-name, so a second module's same-named class clobbers the first and
-method bodies from one definition execute against instances of the
-other. Three co-loaded `StringInterner` and `FileLock` definitions broke
-test-DB persistence this exact way. See
-doc/08_tracking/bug/interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md
+Background: the interpreter's FLAT struct/class table is keyed on the BARE
+name, so a second module's same-named class replaced the first there and
+method bodies cross-dispatched (three co-loaded `StringInterner` and
+`FileLock` definitions broke test-DB persistence this way, see
+doc/08_tracking/bug/interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md).
+Owner decision 2026-11-27: a class is identified by its OWNER module. The
+collision is still recorded, the flat table keeps its last-write pick for
+callers that neither define nor import the name, and an owner-keyed table
+resolves each module's own class (bug
+pure_simple_interpreter_class_table_keyed_by_bare_name_2026_11_27).
 """
 # @req REQ-SSPEC-COMPILER
 
@@ -27,7 +30,10 @@ use std.spec.*
 use compiler.core.ast.{module_set_path, module_get_path}
 use compiler.core.interpreter.eval_tables.{
     struct_table_reset, struct_table_register, struct_table_lookup,
-    struct_table_collisions, struct_table_get_module
+    struct_table_collisions, struct_table_get_module,
+    struct_table_register_owned, struct_table_lookup_owned,
+    struct_resolve_for_caller, struct_decl_is_shared_name,
+    func_import_binding_reset, func_import_binding_register
 }
 
 # @manual_section "Class-name collision diagnostic"
@@ -54,7 +60,7 @@ describe "interpreter class/struct-name collision warning":
             i = i + 1
         assert_true(found)
 
-        step("last-write-wins is still the lookup behaviour being warned about")
+        step("the flat table alone still holds the last write")
         expect(struct_table_lookup("SpecSabotageCollider")).to_equal(202)  # oracle: 202 — named expected value from the requirement
         expect(struct_table_get_module("SpecSabotageCollider")).to_equal("spec/fixture/mod_b.spl")
 
@@ -78,3 +84,43 @@ describe "interpreter class/struct-name collision warning":
                 found = true
             i = i + 1
         assert_false(found)
+
+    it "resolves a shared class name by the caller's owner module":
+        # @req REQ-SSPEC-COMPILER
+        # Tracks: pure_simple_interpreter_class_table_keyed_by_bare_name_2026_11_27
+        step("register one class name from two owners in both tables")
+        struct_table_reset()
+        func_import_binding_reset()
+        struct_table_register("SpecOwnedThing", 301)
+        struct_table_register_owned("spec/fixture/own_a.spl", "SpecOwnedThing", 301)
+        struct_table_register("SpecOwnedThing", 302)
+        struct_table_register_owned("spec/fixture/own_b.spl", "SpecOwnedThing", 302)
+
+        step("both definitions stay reachable under their owner keys")
+        expect(struct_table_lookup("SpecOwnedThing")).to_equal(302)  # oracle: flat last write
+        expect(struct_table_lookup_owned("spec/fixture/own_a.spl", "SpecOwnedThing")).to_equal(301)
+        expect(struct_table_lookup_owned("spec/fixture/own_b.spl", "SpecOwnedThing")).to_equal(302)
+        assert_true(struct_decl_is_shared_name(301))
+        assert_true(struct_decl_is_shared_name(302))
+
+        step("each owner module and an aliasing importer resolve to their own class")
+        expect(struct_resolve_for_caller("spec/fixture/own_a.spl", "SpecOwnedThing")).to_equal(301)
+        expect(struct_resolve_for_caller("spec/fixture/own_b.spl", "SpecOwnedThing")).to_equal(302)
+        func_import_binding_register("spec/fixture/importer.spl", "SpecOwnedThing", "spec/fixture/own_a.spl")
+        func_import_binding_register("spec/fixture/importer.spl", "SpecOwnedThing:SpecLegacy", "spec/fixture/own_b.spl")
+        expect(struct_resolve_for_caller("spec/fixture/importer.spl", "SpecOwnedThing")).to_equal(301)
+        expect(struct_resolve_for_caller("spec/fixture/importer.spl", "SpecLegacy")).to_equal(302)
+
+        step("a caller that neither defines nor imports the name keeps the flat pick")
+        expect(struct_resolve_for_caller("spec/fixture/bystander.spl", "SpecOwnedThing")).to_equal(302)
+
+    it "keeps a single-owner class on the flat fast path":
+        # @req REQ-SSPEC-COMPILER
+        step("one owner: not shared, resolves for any caller")
+        struct_table_reset()
+        func_import_binding_reset()
+        struct_table_register("SpecLoneThing", 401)
+        struct_table_register_owned("spec/fixture/lone.spl", "SpecLoneThing", 401)
+        assert_false(struct_decl_is_shared_name(401))
+        expect(struct_resolve_for_caller("spec/fixture/elsewhere.spl", "SpecLoneThing")).to_equal(401)
+        expect(struct_resolve_for_caller("spec/fixture/elsewhere.spl", "SpecMissing")).to_equal(-1)

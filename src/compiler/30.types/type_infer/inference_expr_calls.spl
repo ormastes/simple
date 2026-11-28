@@ -32,15 +32,18 @@ impl HmInferContext:
                 for eff in callee_effects:
                     self.accumulate_effect(eff)
 
-                val expected_params = match resolved_callee.kind:
-                    case Function(params, _, _): Some(params)
-                    case _: None
+                val expected_params: [HirType] = match resolved_callee.kind:
+                    case HirTypeKind.Function(params, _, _): params
+                    case _: []
+                val has_expected_params: bool = match resolved_callee.kind:
+                    case HirTypeKind.Function(_, _, _): true
+                    case _: false
                 var arg_types: [HirType] = []
                 var i = 0
                 for raw_arg in args:
                     val arg: HirCallArg = raw_arg
-                    val arg_result = if expected_params.? and i < expected_params.unwrap().len():
-                        val expected_param: HirType = expected_params.unwrap()[i]
+                    val arg_result = if has_expected_params and i < expected_params.len():
+                        val expected_param: HirType = expected_params[i]
                         self.infer_expr(arg.value, InferMode.Check(expected_param))
                     else:
                         self.synthesize_expr(arg.value)
@@ -98,16 +101,105 @@ impl HmInferContext:
                 # Option accessors on a receiver that can never be optional.
                 # Mirrors infer_option_pattern's scrutinee rule (same bug row):
                 # the flat runtime encoding makes this undecidable at run time.
-                if method_name == "unwrap" or method_name == "unwrap_or" or method_name == "expect" or method_name == "is_some" or method_name == "is_none":
-                    val recv_resolved = self.resolve(receiver_ty)
+                val recv_resolved = self.resolve(receiver_ty)
+                val is_option_method_name = (method_name == "unwrap" or method_name == "unwrap_or" or method_name == "expect" or method_name == "is_some" or method_name == "is_none")
+                if is_option_method_name:
                     val never_optional = match recv_resolved.kind:
                         case Int(_, _) | Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str | HirTypeKind.Unit | Tuple(_) | Array(_, _) | Slice(_) | Dict(_, _) | Function(_, _, _): true
                         case Result(_, _): method_name == "is_some" or method_name == "is_none"
+                        case Named(sym, _):
+                            val sym_name = if self.symbol_names.contains_key(sym.id): self.symbol_names[sym.id] else: ""
+                            val sym_kind = if self.symbol_kinds.contains_key(sym.id): self.symbol_kinds[sym.id] else: ""
+                            if sym_name == "Option":
+                                false
+                            elif sym_name == "Result":
+                                method_name == "is_some" or method_name == "is_none"
+                            elif sym_kind == "struct" or sym_kind == "class" or sym_kind == "enum":
+                                val is_external_type = (self.external_type_symbols.contains_key(sym.id) and self.external_type_symbols[sym.id])
+                                if has_resolved_method or is_external_type:
+                                    false
+                                else:
+                                    val owner = if self.symbol_owners.contains_key(sym.id): self.symbol_owners[sym.id] else: ""
+                                    not self.has_declared_type_method(owner, sym_name, method_name)
+                            else:
+                                false
                         case _: false
                     if never_optional:
                         return Err(TypeInferError.Other(
                             "Option method '{method_name}' requires an optional receiver; found '{recv_resolved.kind}'",
                             span))
+                if not has_resolved_method:
+                    var opt_inner_opt: HirType? = None
+                    var is_result_recv = false
+                    var result_ok_opt: HirType? = None
+                    match recv_resolved.kind:
+                        case Optional(inner):
+                            opt_inner_opt = Some(inner)
+                        case Named(sym, type_args):
+                            if self.symbol_names.contains_key(sym.id):
+                                val sym_name = self.symbol_names[sym.id]
+                                if sym_name == "Option" and type_args.len() == 1:
+                                    opt_inner_opt = Some(type_args[0])
+                                elif sym_name == "Result" and type_args.len() == 2:
+                                    is_result_recv = true
+                                    result_ok_opt = Some(type_args[0])
+                        case Result(ok, _):
+                            is_result_recv = true
+                            result_ok_opt = Some(ok)
+                        case _: ()
+                    if val opt_inner = opt_inner_opt:
+                        if method_name == "is_some" or method_name == "is_none":
+                            if argument_count != 0:
+                                return Err(TypeInferError.Other("Option method '{method_name}' expects 0 arguments, found {argument_count}", span))
+                            return Ok(HirType(kind: HirTypeKind.Bool, span: span))
+                        if method_name == "unwrap":
+                            if argument_count != 0:
+                                return Err(TypeInferError.Other("Option method 'unwrap' expects 0 arguments, found {argument_count}", span))
+                            return Ok(self.resolve(opt_inner))
+                        if method_name == "expect":
+                            if argument_count != 1:
+                                return Err(TypeInferError.Other("Option method 'expect' expects 1 argument, found {argument_count}", span))
+                            val str_ty = HirType(kind: HirTypeKind.Str, span: span)
+                            match self.infer_expr(args[0].value, InferMode.Check(str_ty)):
+                                case Err(e):
+                                    return Err(TypeInferError.Other("Option method 'expect' message argument type mismatch: {e.message()}", span))
+                                case _: ()
+                            return Ok(self.resolve(opt_inner))
+                        if method_name == "unwrap_or":
+                            if argument_count != 1:
+                                return Err(TypeInferError.Other("Option method 'unwrap_or' expects 1 argument, found {argument_count}", span))
+                            match self.infer_expr(args[0].value, InferMode.Check(opt_inner)):
+                                case Err(e):
+                                    return Err(TypeInferError.Other("Option method 'unwrap_or' default argument type mismatch: {e.message()}", span))
+                                case _: ()
+                            return Ok(self.resolve(opt_inner))
+                    if is_result_recv:
+                        val result_ok = result_ok_opt ?? self.fresh_var(span)
+                        if method_name == "is_ok" or method_name == "is_err":
+                            if argument_count != 0:
+                                return Err(TypeInferError.Other("Result method '{method_name}' expects 0 arguments, found {argument_count}", span))
+                            return Ok(HirType(kind: HirTypeKind.Bool, span: span))
+                        if method_name == "unwrap":
+                            if argument_count != 0:
+                                return Err(TypeInferError.Other("Result method 'unwrap' expects 0 arguments, found {argument_count}", span))
+                            return Ok(self.resolve(result_ok))
+                        if method_name == "expect":
+                            if argument_count != 1:
+                                return Err(TypeInferError.Other("Result method 'expect' expects 1 argument, found {argument_count}", span))
+                            val str_ty = HirType(kind: HirTypeKind.Str, span: span)
+                            match self.infer_expr(args[0].value, InferMode.Check(str_ty)):
+                                case Err(e):
+                                    return Err(TypeInferError.Other("Result method 'expect' message argument type mismatch: {e.message()}", span))
+                                case _: ()
+                            return Ok(self.resolve(result_ok))
+                        if method_name == "unwrap_or":
+                            if argument_count != 1:
+                                return Err(TypeInferError.Other("Result method 'unwrap_or' expects 1 argument, found {argument_count}", span))
+                            match self.infer_expr(args[0].value, InferMode.Check(result_ok)):
+                                case Err(e):
+                                    return Err(TypeInferError.Other("Result method 'unwrap_or' default argument type mismatch: {e.message()}", span))
+                                case _: ()
+                            return Ok(self.resolve(result_ok))
                 var argument_index = 0
                 while argument_index < argument_count:
                     match self.synthesize_expr(args[argument_index].value):

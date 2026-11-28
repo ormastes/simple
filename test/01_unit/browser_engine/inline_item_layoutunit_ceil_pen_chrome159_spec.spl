@@ -1,0 +1,72 @@
+"""
+## Purpose and audience
+Purpose: HAND-OFF, EXPECTED RED, `@tag:in-development`. Chrome 159 stores an
+inline item's width rounded UP to a LayoutUnit (1/64 px) and starts the next
+item there. `inline_item_width_err_milli` (layout_foundation) carries the
+EXACT width past a one-run inline element, so a run after `<code>a</code>`
+(16 px DejaVu Sans Mono, 9.6328125 px exact, 9.640625 in Chrome) starts 1/128
+px early and a glyph one step under a quarter tie takes the lower LCD phase.
+Audience: the layout owner (the fix is in layout_foundation, not a page lane).
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, 16 px, `color:#172033` on white): three nowrap
+paragraphs at left 10 px, top 0 / 30 / 60 px. `getBoundingClientRect` of the
+`<code>`: `button` 57.796875, `audio` 48.171875 (exact 48.1640625), `a`
+9.640625 (exact 9.6328125); the dash after `a` starts at 24.078125.
+
+| pixel    | Chrome 159 | engine |
+|----------|------------|--------|
+| (151,72) | d39659 | a8573f |
+| (152,72) | 253479 | 2557ac |
+| (157,72) | 492646 | 2c2d66 |
+
+Not a one-line fix: the width in milli is itself a sum of milli-rounded
+advances (six mono glyphs sum to 57.798, not 57.796875), so a plain ceil steps
+`button` up a whole LayoutUnit, and the edge-space branches of the same
+function ceil the space separately from the text. A ceil in the one-run
+branch alone moved 1x overview 0.16 -> 0.19 (measured 2026-11-28). See
+doc/08_tracking/bug/db/web_render_inline_item_layoutunit_ceil_pen_2026-11-28.sdn.
+Tolerance: 8 levels per channel.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-METRICS-006 - a run after an inline item starts at the item's LayoutUnit width.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @tag:in-development
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val TOL: i64 = 8
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px/1.5 sans-serif;color:#172033\"><p style=\"margin:0;position:absolute;left:10px;top:0px;white-space:nowrap\"><code>button</code> — partial; values=element; owner=simple_web_html_layout</p><p style=\"margin:0;position:absolute;left:10px;top:30px;white-space:nowrap\"><code>audio</code> — partial; values=element; owner=simple_web_html_layout</p><p style=\"margin:0;position:absolute;left:10px;top:60px;white-space:nowrap\"><code>a</code> — renderable; values=element; owner=simple_web_html_layout</p></body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+fn _near(px: [u32], w: i32, x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * w + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+describe "run after an inline item starts at its LayoutUnit width (Chrome 159)":
+    it "AC-1: `e` of `renderable` after `<code>a</code>` takes Chrome's quarter phase":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, 600, 90, "cpu_simd")
+        expect(px.len()).to_equal(54000)
+        step("Chrome: (151,72) d39659 (152,72) 253479 (157,72) 492646")
+        expect(_near(px, 600, 151, 72, 0xd39659u32)).to_equal(true)
+        expect(_near(px, 600, 152, 72, 0x253479u32)).to_equal(true)
+        expect(_near(px, 600, 157, 72, 0x492646u32)).to_equal(true)

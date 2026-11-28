@@ -4,18 +4,14 @@
 # vertex+fragment source text. On a cache hit the stored ShaderArtifact is
 # returned without recompilation.
 #
-# SPIR-V path: delegates to rt_vulkan_compile_glsl (runtime extern, stage 0=vertex,
-#              1=fragment). Returns empty arrays when the runtime is absent.
+# SPIR-V path: no runtime entrypoint produces vertex/fragment SPIR-V bytes yet;
+#              returns an error artifact (SPIRV_BYTES_UNBACKED), never cached.
 # WGSL path:   delegates to wgsl_emit_vertex / wgsl_emit_fragment (pure text).
 
 use std.nogc_sync_mut.engine.render.shader.{ShaderSource}
 use std.nogc_sync_mut.engine.render.wgsl_emitter.{wgsl_emit_vertex, wgsl_emit_fragment}
 
-# ---------------------------------------------------------------------------
-# Extern: SPIR-V compilation (implemented by the Vulkan runtime layer)
-# ---------------------------------------------------------------------------
-
-extern fn rt_vulkan_compile_glsl(source: text, stage: i64) -> [u8]
+val SPIRV_BYTES_UNBACKED: text = "GLSL->SPIR-V byte compilation is not backed by the runtime"
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -212,20 +208,12 @@ fn shader_compiler_get_or_compile_spirv(compiler: ShaderCompiler, src: ShaderSou
         # Cache hit — return stored artifact
         return compiler.cache.artifacts[idx]
 
-    # Cache miss — compile via runtime extern
-    val spirv_vert = rt_vulkan_compile_glsl(src.vertex_code, 0)
-    val spirv_frag = rt_vulkan_compile_glsl(src.fragment_code, 1)
-
-    val artifact = ShaderArtifact(
-        spirv_vertex: spirv_vert,
-        spirv_fragment: spirv_frag,
-        wgsl_vertex: "",
-        wgsl_fragment: "",
-        is_compiled: spirv_vert.len() > 0 and spirv_frag.len() > 0,
-        error_msg: ""
-    )
-    compiler.cache.put(key, artifact)
-    artifact
+    # No runtime entrypoint yields vertex/fragment SPIR-V *bytes*:
+    # rt_vulkan_compile_glsl(text) -> i64 returns a compute-stage shader
+    # module handle (sffi_vulkan.spl). Report the gap instead of calling a
+    # phantom `(text, stage) -> [u8]` signature. Not cached: a future backing
+    # must not be masked by a stored failure.
+    ShaderArtifact.error(SPIRV_BYTES_UNBACKED)
 
 # ---------------------------------------------------------------------------
 # WGSL compilation

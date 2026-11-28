@@ -90,6 +90,229 @@ impl Lowerer {
         }
     }
 
+    fn is_slot_yielding_array_accessor(&self, expr: &HirExpr) -> bool {
+        if let HirExprKind::MethodCall {
+            receiver: collection,
+            method: accessor,
+            args: accessor_args,
+            ..
+        } = &expr.kind
+        {
+            let collection_shape = matches!(self.module.types.get(collection.ty), Some(HirType::Array { .. }));
+            return collection_shape
+                && expr.ty != TypeId::ANY
+                && ((accessor_args.is_empty() && matches!(accessor.as_str(), "pop" | "first" | "last"))
+                    || (accessor_args.len() == 1 && accessor == "remove"));
+        }
+        false
+    }
+
+    fn is_optional_typed_array_accessor(&self, expr: &HirExpr) -> bool {
+        if self.is_slot_yielding_array_accessor(expr) {
+            return true;
+        }
+        if let HirExprKind::MethodCall {
+            receiver: collection,
+            method: accessor,
+            args: accessor_args,
+            ..
+        } = &expr.kind
+        {
+            let collection_shape = matches!(self.module.types.get(collection.ty), Some(HirType::Array { .. }));
+            return collection_shape
+                && expr.ty != TypeId::ANY
+                && accessor_args.is_empty()
+                && matches!(accessor.as_str(), "min" | "max");
+        }
+        false
+    }
+
+    fn has_declared_user_method(&self, ty: TypeId, method: &str) -> bool {
+        let owner_name = match self.module.types.get(ty) {
+            Some(HirType::Struct { name, .. }) | Some(HirType::Enum { name, .. }) => Some(name.as_str()),
+            Some(HirType::Pointer { inner, .. }) => return self.has_declared_user_method(*inner, method),
+            _ => None,
+        };
+        let Some(owner) = owner_name else {
+            return false;
+        };
+        let key = format!("{owner}.{method}");
+        self.method_param_type_names.contains_key(&key)
+            || self.method_return_types.contains_key(&key)
+            || self.globals.contains_key(&key)
+    }
+
+    fn option_unwrap_or_expected_inner(&self, receiver: &HirExpr) -> Option<TypeId> {
+        if let Some(inner) = self.module.types.optional_inner(receiver.ty) {
+            return Some(inner);
+        }
+        if let Some(HirType::Enum { name, .. }) = self.module.types.get(receiver.ty) {
+            if name == "Option" {
+                return self.enum_variant_payload_type_for_builtin_method(receiver.ty, "Some");
+            }
+            if name == "Result" {
+                return self.enum_variant_payload_type_for_builtin_method(receiver.ty, "Ok");
+            }
+        }
+        if self.is_optional_typed_array_accessor(receiver) {
+            return Some(receiver.ty);
+        }
+        None
+    }
+
+    fn is_int_type_id(&self, ty: TypeId) -> bool {
+        matches!(
+            ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+        ) || matches!(self.module.types.get(ty), Some(HirType::Int { .. }))
+    }
+
+    fn is_float_type_id(&self, ty: TypeId) -> bool {
+        matches!(ty, TypeId::F32 | TypeId::F64)
+            || matches!(self.module.types.get(ty), Some(HirType::Float { .. }))
+    }
+
+    fn unwrap_or_default_compatible(&self, expected: TypeId, found: TypeId) -> bool {
+        if expected == found || expected == TypeId::ANY || found == TypeId::ANY {
+            return true;
+        }
+        if found == TypeId::NIL {
+            return self.module.types.optional_inner(expected).is_some()
+                || matches!(self.module.types.get(expected), Some(HirType::Enum { name, .. }) if name == "Option");
+        }
+        if expected == TypeId::VOID || found == TypeId::VOID {
+            return expected == found;
+        }
+        if expected == TypeId::BOOL || found == TypeId::BOOL {
+            return expected == TypeId::BOOL && found == TypeId::BOOL;
+        }
+        if self.is_int_type_id(expected) && self.is_int_type_id(found) {
+            return true;
+        }
+        if self.is_float_type_id(expected) && self.is_float_type_id(found) {
+            return true;
+        }
+        if self.is_int_type_id(expected) || self.is_float_type_id(expected) || self.is_int_type_id(found) || self.is_float_type_id(found) {
+            return false;
+        }
+        self.hir_types_compatible(expected, found)
+    }
+
+    fn validate_option_method_receiver(&self, receiver: &HirExpr, method: &str) -> LowerResult<()> {
+        if matches!(receiver.ty, TypeId::ANY | TypeId::NIL) {
+            return Ok(());
+        }
+        if self.module.types.optional_inner(receiver.ty).is_some() {
+            return Ok(());
+        }
+        if self.is_optional_typed_array_accessor(receiver) {
+            return Ok(());
+        }
+        let Some(ty) = self.module.types.get(receiver.ty) else {
+            return Ok(());
+        };
+        self.validate_option_method_hir_type(ty, method)
+    }
+
+    fn validate_option_method_hir_type(&self, ty: &HirType, method: &str) -> LowerResult<()> {
+        use crate::hir::lower::option_pattern_shape_diag::{never_option_type_name, SHAPE_ERROR_TAG};
+        match ty {
+            HirType::Any | HirType::Unknown | HirType::Nil => Ok(()),
+            HirType::Pointer { inner, .. } => {
+                if self.module.types.optional_inner(*inner).is_some()
+                    || self.has_declared_user_method(*inner, method)
+                {
+                    return Ok(());
+                }
+                if let Some(inner_ty) = self.module.types.get(*inner) {
+                    if matches!(inner_ty, HirType::Enum { .. } | HirType::Pointer { .. } | HirType::Any | HirType::Unknown) {
+                        return self.validate_option_method_hir_type(inner_ty, method);
+                    }
+                    if let Some(kind) = never_option_type_name(inner_ty) {
+                        return Err(LowerError::Unsupported(format!(
+                            "{SHAPE_ERROR_TAG}: Option method `{method}` requires an optional receiver; found `{kind}`"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            HirType::Enum { name, variants, .. } => {
+                if name == "Option" {
+                    return Ok(());
+                }
+                if name == "Result" {
+                    if matches!(method, "is_some" | "is_none") {
+                        return Err(LowerError::Unsupported(format!(
+                            "{SHAPE_ERROR_TAG}: Option method `{method}` requires an optional receiver; found `Result`"
+                        )));
+                    }
+                    return Ok(());
+                }
+                let has_user_method = self.method_param_type_names.contains_key(&format!("{name}.{method}"))
+                    || self.method_return_types.contains_key(&format!("{name}.{method}"))
+                    || self.globals.contains_key(&format!("{name}.{method}"));
+                let has_option_variants = matches!(method, "is_some" | "is_none")
+                    && variants.iter().any(|(v, _)| v == "Some" || v == "None");
+                if has_user_method || has_option_variants || variants.is_empty() {
+                    Ok(())
+                } else {
+                    Err(LowerError::Unsupported(format!(
+                        "{SHAPE_ERROR_TAG}: Option method `{method}` requires an optional receiver; found `enum {name}`"
+                    )))
+                }
+            }
+            HirType::Struct { name, .. } => {
+                let has_user_method = name == "Option"
+                    || self.method_param_type_names.contains_key(&format!("{name}.{method}"))
+                    || self.method_return_types.contains_key(&format!("{name}.{method}"))
+                    || self.globals.contains_key(&format!("{name}.{method}"));
+                if has_user_method {
+                    Ok(())
+                } else {
+                    Err(LowerError::Unsupported(format!(
+                        "{SHAPE_ERROR_TAG}: Option method `{method}` requires an optional receiver; found `struct {name}`"
+                    )))
+                }
+            }
+            other => {
+                if let Some(kind) = never_option_type_name(other) {
+                    Err(LowerError::Unsupported(format!(
+                        "{SHAPE_ERROR_TAG}: Option method `{method}` requires an optional receiver; found `{kind}`"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn validate_option_unwrap_or_args(&self, receiver: &HirExpr, hir_args: &[HirExpr]) -> LowerResult<()> {
+        use crate::hir::lower::option_pattern_shape_diag::SHAPE_ERROR_TAG;
+        if hir_args.len() != 1 || self.has_declared_user_method(receiver.ty, "unwrap_or") {
+            return Ok(());
+        }
+        let Some(expected) = self.option_unwrap_or_expected_inner(receiver) else {
+            return Ok(());
+        };
+        let found = hir_args[0].ty;
+        if !self.unwrap_or_default_compatible(expected, found) {
+            let expected_ty = self.module.types.get(expected);
+            let found_ty = self.module.types.get(found);
+            return Err(LowerError::Unsupported(format!(
+                "{SHAPE_ERROR_TAG}: `unwrap_or` default argument type mismatch: expected {:?}, found {:?}",
+                expected_ty, found_ty
+            )));
+        }
+        Ok(())
+    }
+
     /// #6953: `variant`'s index in the enum that owns it for a receiver of
     /// type `owner_ty` (or the enum named `enum_name`). A user enum declaring
     /// `Ok`/`None` answers its own index; the builtin Result/Option answers its
@@ -757,10 +980,12 @@ impl Lowerer {
         callee: &Expr,
         resolved_symbol: Option<&str>,
     ) -> Option<crate::hir::lower::lowerer::GenericIdentityParamSpec> {
+        // A resolved symbol names the exact function called; the bare callee
+        // name may belong to a same-named function of another module.
         if let Some(sym) = resolved_symbol {
-            if let Some(spec) = self.generic_identity_param.get(sym) {
-                return Some(spec.clone());
-            }
+            return (self.generic_identity_param.get(sym))
+                .or_else(|| self.resolve_function_alias(sym).and_then(|orig| self.generic_identity_param.get(orig)))
+                .cloned();
         }
         match callee {
             Expr::Identifier(name) => {
@@ -794,23 +1019,40 @@ impl Lowerer {
         ret: TypeId,
         ctx: &FunctionContext,
     ) -> TypeId {
-        if ret != TypeId::ANY {
+        if !matches!(ret, TypeId::ANY | TypeId::VOID) {
             return ret;
         }
         let (base_callee, explicit_type_args) = match callee {
             Expr::GenericInst { expr, type_args } => (expr.as_ref(), Some(type_args.as_slice())),
             other => (other, None),
         };
+        // A local of that name shadows the function.
+        if matches!(base_callee, Expr::Identifier(name) if ctx.local_map.contains_key(name)) {
+            return ret;
+        }
         let Some(spec) = self.lookup_generic_identity_param_spec(base_callee, resolved_symbol) else {
             return ret;
         };
-        let arg = args
-            .iter()
-            .find(|a| a.name.as_deref() == Some(spec.name.as_str()))
-            .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(spec.index));
-        if let Some(arg) = arg {
+        // `()` is what a call to an unannotated function declared further down
+        // is typed before its body is lowered; only that implicit shape counts.
+        if ret == TypeId::VOID && spec.generic_param_pos.is_some() {
+            return ret;
+        }
+        let arg_of = |index: usize, name: &str| {
+            args.iter()
+                .find(|a| a.name.as_deref() == Some(name))
+                .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(index))
+        };
+        if let Some(arg) = arg_of(spec.index, &spec.name) {
             if let Ok(ty) = self.infer_type(&arg.value, ctx) {
-                if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                // One type variable, one type: `max(0, x)` with `x: f64` does
+                // not instantiate `T` to the first argument's `i64`.
+                let agree = spec.same_type_params.iter().all(|(index, name)| {
+                    arg_of(*index, name)
+                        .and_then(|other| self.infer_type(&other.value, ctx).ok())
+                        .is_some_and(|other| other == ty || self.module.types.get(other) == self.module.types.get(ty))
+                });
+                if agree && self.is_instantiable_type(ty) {
                     return ty;
                 }
             }
@@ -823,6 +1065,11 @@ impl Lowerer {
                     }
                 }
             }
+        }
+        // Not instantiated: the erased identity still returns its argument as
+        // a tagged word, never `()`.
+        if ret == TypeId::VOID {
+            return TypeId::ANY;
         }
         ret
     }
@@ -1573,12 +1820,19 @@ impl Lowerer {
         if args.iter().all(|a| a.name.is_none() && !matches!(a.value, Expr::Spread(_))) {
             // The float-into-int check can only reject a float argument.
             let has_float_arg = hir_args.iter().any(|a| matches!(a.ty, TypeId::F32 | TypeId::F64));
+            // The `[u8]`-into-word-array check can only reject a `[u8]` argument.
+            let has_u8_array_arg = hir_args.iter().any(|a| self.is_u8_array_value(a));
             if let Some(HirType::Struct { name: owner, .. }) = self.module.types.get(receiver_hir.ty) {
                 let bare_owner = owner.rsplit('.').next().unwrap_or(owner).to_string();
                 let declared_here = self
                     .struct_decl_files
                     .get(&bare_owner)
                     .is_some_and(|decl_file| *decl_file == self.current_file);
+                if has_u8_array_arg {
+                    if let Some(row) = self.method_param_array_elems.get(&format!("{bare_owner}.{method}")) {
+                        self.reject_u8_arrays_in_row(row, &hir_args, &format!("{bare_owner}.{method}"))?;
+                    }
+                }
                 if declared_here || has_float_arg {
                     let slot_types: Vec<Option<TypeId>> = self
                         .method_param_type_names
@@ -1601,9 +1855,9 @@ impl Lowerer {
             // A trait-typed receiver is erased to ANY. A `val x: Trait` local
             // carries the exact declaring TraitDef; a parameter keeps only its
             // declared type name, resolved the same way.
-            if let (true, HirExprKind::Local(idx)) = (has_float_arg, &receiver_hir.kind) {
+            if let (true, HirExprKind::Local(idx)) = (has_float_arg || has_u8_array_arg, &receiver_hir.kind) {
                 let idx = *idx;
-                let trait_slots: Option<(String, Vec<Option<String>>)> = ctx
+                let trait_slots: Option<(String, Vec<Option<String>>, Vec<Option<TypeId>>)> = ctx
                     .locals
                     .get(idx)
                     .and_then(|l| {
@@ -1614,10 +1868,16 @@ impl Lowerer {
                     .and_then(|d| {
                         let m = d.declaration.methods.iter().find(|m| m.name == method)?;
                         let user = if m.params.first().is_some_and(|p| p.name == "self") { &m.params[1..] } else { &m.params[..] };
-                        (!user.iter().any(|p| p.variadic))
-                            .then(|| (d.declaration.name.clone(), user.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect()))
+                        (!user.iter().any(|p| p.variadic)).then(|| {
+                            (
+                                d.declaration.name.clone(),
+                                user.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect(),
+                                self.numeric_array_param_row(user),
+                            )
+                        })
                     });
-                if let Some((trait_name, names)) = trait_slots {
+                if let Some((trait_name, names, array_row)) = trait_slots {
+                    self.reject_u8_arrays_in_row(&array_row, &hir_args, &format!("{trait_name}.{method}"))?;
                     for (i, (arg, name)) in hir_args.iter().zip(names.iter()).enumerate() {
                         if let Some(pty) = name.as_deref().and_then(|n| self.module.types.lookup(n)) {
                             self.reject_float_for_int_slot(pty, arg, &format!("argument {} of `{trait_name}.{method}`", i + 1))?;
@@ -1918,13 +2178,18 @@ impl Lowerer {
             .method_return_types
             .iter()
             .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
-            .min_by_key(|(name, _)| name.len())
+            // Shortest name, ties by name: `method_return_types` is a HashMap, and
+            // a length-only key picked `A.pos` or `B.pos` by hash order per run.
+            .min_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
         {
             // A guess borrowed from some same-named method (`xs.join(",")` on an
             // untyped `xs` typed as an imported `A.join() -> text?`): flag it so
             // the caller can give it a private type id the Option->scalar
             // return rule skips.
             self.last_method_return_guessed.set(true);
+            if matches!(ret_ty, TypeId::F32 | TypeId::F64) {
+                self.guessed_float_in_function.set(true);
+            }
             return ret_ty;
         }
         // Builtin string methods that return a RAW native i64 (a code point /
@@ -2204,6 +2469,53 @@ impl Lowerer {
             }
         }
 
+        if matches!(method, "unwrap" | "unwrap_or" | "expect" | "is_some" | "is_none") {
+            self.validate_option_method_receiver(&receiver, method)?;
+            if method == "unwrap_or" {
+                self.validate_option_unwrap_or_args(&receiver, &hir_args)?;
+            }
+        }
+
+        // `f64?.unwrap_or(d)` on a local with a pure f64 default is the typed
+        // coalesce `if rt_is_some(c): <exact payload> else: d`. The dynamic
+        // method returns the raw payload word as an erased value, which
+        // decodes an explicit `Some(0.1)` as 0.09999999999999998; the typed
+        // form reads the exact bits and, for an inline `f64?` local, calls no
+        // runtime function and boxes nothing. `d` is a literal or a local, so
+        // evaluating it only on the None branch is unobservable.
+        // seed_jit_f64_option_unwrap_or_expect_try_readers_lossy_2026-11-27
+        if method == "unwrap_or"
+            && !crate::mir::float_option_inline::disabled()
+            && args.len() == 1
+            && self.module.types.optional_inner(receiver.ty) == Some(TypeId::F64)
+            && matches!(receiver.kind, HirExprKind::Local(_))
+            && matches!(args[0].value, ast::Expr::Float(_) | ast::Expr::Identifier(_))
+        {
+            let default = self.lower_expr(&args[0].value, ctx)?;
+            if default.ty == TypeId::F64 && matches!(default.kind, HirExprKind::Float(_) | HirExprKind::Local(_)) {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_is_some".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::BOOL,
+                        }),
+                        then_branch: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_self".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::F64,
+                        }),
+                        else_branch: Some(Box::new(default)),
+                    },
+                    ty: TypeId::F64,
+                }));
+            }
+        }
+
         if args.is_empty() {
             match method {
                 "ok" | "err" if matches!(self.module.types.get(receiver.ty), Some(HirType::Enum { name, .. }) if name == "Result") =>
@@ -2259,8 +2571,8 @@ impl Lowerer {
                     // (`StrictSdnReaderV1.byte_at`), so the rebuilt stage2
                     // AV'd in every native-build worker.
                     // doc/08_tracking/bug/stage2_new3_native_build_worker_av_c01_2026-11-07.md
-                    if receiver.ty == TypeId::STRING
-                        || self.module.types.optional_inner(receiver.ty) == Some(TypeId::STRING)
+                    if self.module.types.optional_inner(receiver.ty) == Some(TypeId::STRING)
+                        || (receiver.ty == TypeId::STRING && self.is_slot_yielding_array_accessor(&receiver))
                     {
                         return Ok(Some(HirExpr {
                             kind: HirExprKind::BuiltinCall {
@@ -2357,24 +2669,14 @@ impl Lowerer {
                     // `get`/`min`/`max` and dict accessors stay on the staged
                     // plan: they have no shared typed-unbox site to defer.
                     // doc/08_tracking/bug/stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md
-                    if let HirExprKind::MethodCall { receiver: collection, method: accessor, args: accessor_args, .. } = &receiver.kind {
-                        let collection_shape = matches!(
-                            self.module.types.get(collection.ty),
-                            Some(HirType::Array { .. })
-                        );
-                        if collection_shape
-                            && receiver.ty != TypeId::ANY
-                            && ((accessor_args.is_empty() && matches!(accessor.as_str(), "pop" | "first" | "last"))
-                                || (accessor_args.len() == 1 && accessor == "remove"))
-                        {
-                            return Ok(Some(HirExpr {
-                                kind: HirExprKind::BuiltinCall {
-                                    name: "rt_unwrap_or_trap".to_string(),
-                                    args: vec![receiver.clone()],
-                                },
-                                ty: receiver.ty,
-                            }));
-                        }
+                    if self.is_slot_yielding_array_accessor(&receiver) {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_trap".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: receiver.ty,
+                        }));
                     }
                 }
                 "unwrap_err" => {
@@ -2915,11 +3217,7 @@ impl Lowerer {
                         _ => None,
                     };
                     match element_ty {
-                        Some(elem) => Some(self.module.types.register(HirType::Pointer {
-                            kind: PointerKind::Shared,
-                            capability: ReferenceCapability::Shared,
-                            inner: elem,
-                        })),
+                        Some(elem) => Some(self.module.types.register_optional(elem)),
                         None => Some(TypeId::ANY),
                     }
                 }

@@ -9,9 +9,19 @@ the Rust seed rebinds text `.slice(a, b)` to `compiler.frontend.core.types.str_s
 function then returns 344 bytes starting `ect:` instead of 348 starting
 `project:`. "Name beyond byte 2048" was a
 coincidence of that one file. The manifest reorder below does avoid the failure,
-but only because strip returns the source unsliced when line 1 is content; it
-may be reverted once the `str_slice` workaround is in a rebuilt Stage 2. The
+but only because strip returns the source unsliced when line 1 is content. The
 original text follows unchanged.
+
+Workaround REMOVED 2026-11-28: the manifest reorder (`a17add1a2c0`) is reverted
+and the file is back to the essay-first layout (`project.name` at byte ~2150),
+and the `str_slice` source workaround in `src/compiler/10.frontend/core/types.spl`
+is reverted to `s[start:end_idx]`. Evidence that removal is safe: the seed fix
+(`af6ed58435c`, PR #12183) is an ancestor of bootstrap pin `f3cf72db4299`, whose
+rebuilt Stage 2 ran `test_runner_build` with the exact pre-fix failure step now
+passing — `library-unit-dynlib] units=4 reused=0 built=4` and
+`phase=link state=succeeded` for `simple_test_runner`
+(`build/bootstrap/pinned-src/pinned-f3cf72db4299/.simple/storage/build/bootstrap/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/logs/test_runner_build.log`);
+plus the seed fix's `numeric_receiver_resolution_tests` cargo unit tests (7/7).
 
 Addendum 2026-11-27 (seed fix): the resolver defect itself is now fixed in the
 Rust seed. `resolve_name_variants`
@@ -21,11 +31,11 @@ lowercase-joined lookups (`str_slice`, `strslice`) with
 `str.len`, ...) can no longer rebind to a same-spelled user free function; it
 falls through to the builtin lowering (`rt_slice_text_bytes`, ...), which is the
 behavior every small probe already had. Regression coverage:
-`numeric_receiver_resolution_tests` in the same file. End-to-end validation (a
-rebuilt Stage 2 running `test_runner_build`) is still pending a bootstrap lane;
-until then the `str_slice` source workaround in
-`src/compiler/10.frontend/core/types.spl` stays, and it is now belt-and-braces
-rather than load-bearing.
+`numeric_receiver_resolution_tests` in the same file. End-to-end validation
+landed 2026-11-28: the rebuilt Stage 2 at pin `f3cf72db4299` (which contains the
+seed fix) ran `test_runner_build` with the library-unit packaging step green
+(log cited above), so both workarounds were removed — see "Workaround REMOVED"
+above.
 
 ## Symptom
 

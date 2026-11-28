@@ -1,0 +1,93 @@
+# Regression pins for the review hard stop
+# simple_web_textarea_overlay_review_hard_stop_2026-07-27.
+#
+# Final review blocker 1: the CPU framebuffer owner (paint_raster) and the
+# Draw IR owner (paint_draw_ir) must both consume the text-control paint/clip
+# helpers from the renderer-neutral owner paint_text_control and must never
+# import each other (CPU pixels and Draw IR depend on a renderer-neutral
+# shared paint/clip owner, never on each other).
+#
+# Final review blocker 2: no owner declares a private rt_text_to_bytes /
+# rt_bytes_to_text runtime boundary; text conversions go through the text
+# facade (`.bytes()` and source-text slicing).
+#
+# The behavior of the moved helpers stays pinned by
+# input_text_overlay_plan_contract_spec.spl and simple_web_input_overlay_spec.spl;
+# this spec pins the owner graph itself so the reversal cannot regress.
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io.{file_read}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_text_control.{
+    html_image_fit_size, INPUT_PASSWORD_MASK_GLYPH
+}
+
+val DRAW_IR_PATH = "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl"
+val RASTER_PATH = "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl"
+val NEUTRAL_PATH = "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_text_control.spl"
+
+describe "text-control owner graph":
+    it "the Draw IR owner never imports the CPU framebuffer owner":
+        step("read the Draw IR owner source")
+        val src = file_read(DRAW_IR_PATH)
+        expect(src.contains("simple_web_html_layout_renderer_paint_raster")).to_equal(false)
+
+    it "the CPU framebuffer owner never imports the Draw IR owner":
+        step("read the CPU framebuffer owner source")
+        val src = file_read(RASTER_PATH)
+        expect(src.contains("simple_web_html_layout_renderer_paint_draw_ir")).to_equal(false)
+
+    it "both owners consume the renderer-neutral text-control owner":
+        step("read both owner sources")
+        expect(
+            file_read(DRAW_IR_PATH).contains(
+                "simple_web_html_layout_renderer_paint_text_control"
+            )
+        ).to_equal(true)
+        expect(
+            file_read(RASTER_PATH).contains(
+                "simple_web_html_layout_renderer_paint_text_control"
+            )
+        ).to_equal(true)
+
+    it "the neutral owner holds the shared text-control plan and image-fit helpers":
+        step("read the neutral owner source")
+        val src = file_read(NEUTRAL_PATH)
+        expect(src.contains("pub fn input_text_paint_plan_with_overlay")).to_equal(true)
+        expect(src.contains("pub struct InputTextPaintPlan")).to_equal(true)
+        expect(src.contains("pub fn input_text_visual_map")).to_equal(true)
+        expect(src.contains("pub fn input_accepts_text_overlay")).to_equal(true)
+        expect(src.contains("pub fn html_image_fit_size")).to_equal(true)
+
+describe "text-control runtime facade discipline":
+    it "no text-control owner declares a private rt text-bytes boundary":
+        step("read all three owner sources")
+        for path in [DRAW_IR_PATH, RASTER_PATH, NEUTRAL_PATH]:
+            val src = file_read(path)
+            expect(src.contains("rt_text_to_bytes")).to_equal(false)
+            expect(src.contains("rt_bytes_to_text")).to_equal(false)
+
+describe "neutral owner behavior parity":
+    it "html_image_fit_size keeps object-fit geometry for both painters":
+        step("fill and none pass box or image extents through")
+        val (fill_w, fill_h) = html_image_fit_size("fill", 100, 50, 10, 20)
+        expect(fill_w).to_equal(100)
+        expect(fill_h).to_equal(50)
+        val (none_w, none_h) = html_image_fit_size("none", 100, 50, 10, 20)
+        expect(none_w).to_equal(10)
+        expect(none_h).to_equal(20)
+        step("contain fits the image inside the box on one axis")
+        val (cw, ch) = html_image_fit_size("contain", 100, 50, 50, 50)
+        expect(cw).to_equal(50)
+        expect(ch).to_equal(50)
+        step("cover fills the box on one axis")
+        val (cow, coh) = html_image_fit_size("cover", 100, 50, 50, 50)
+        expect(cow).to_equal(100)
+        expect(coh).to_equal(100)
+        step("scale-down keeps an image that already fits")
+        val (sdw, sdh) = html_image_fit_size("scale-down", 100, 50, 40, 20)
+        expect(sdw).to_equal(40)
+        expect(sdh).to_equal(20)
+
+    it "the password mask glyph stays reachable from the neutral owner":
+        step("password mask glyph stays the Chrome bullet")
+        expect(INPUT_PASSWORD_MASK_GLYPH).to_equal("•")

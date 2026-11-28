@@ -1049,3 +1049,37 @@ untouched by `BF-1` file ownership):
 - `test/03_system/language/policy/option_if_while_bind_staged_spec.spl`
   (`@tag:in-development`) passes 2/3 (`while val` passes; static `if val v = o`
   on `i64?` still receives `E-TYPE-NIL-COMPARE` from `20.hir` desugaring).
+
+## 2026-11-27 - Pure-Simple driver/HM enforcement + Rust seed HIR & interpreter static pre-check (`work/w8-6-p1-option-non-option-scrutinee-20261127`)
+
+Closed the remaining frontend, driver, and Rust seed gaps so `Option` patterns (`Some`, `None`, `Option.Some`, `Option.None`, `nil`) on provably non-`Option` scrutinees and `.unwrap`/`.unwrap_or`/`.expect`/`.is_some`/`.is_none` receiver/default mismatches are rejected unconditionally:
+
+1. **Pure-Simple HM pattern & `unwrap_or` inference (`src/compiler/30.types/type_infer/inference_control.spl`, `inference_expr_calls.spl`, `type_infer_types.spl`, `hir_typecheck_consumer_v1.spl`):**
+   - `infer_option_pattern` now checks `HirTypeKind.Named(sym, args)`: admits `Named("Option", _)` (validating single type arg payload), rejects `Named` structs/classes and `Named("Result", _)` with `error[SPL-PAT-001]`, while preserving custom enums that define `Some`/`None`.
+   - `infer_pattern` treats `Enum` patterns with owner `Named("Option", _)` as builtin `Option` and rejects `Literal(NilLit)` via `E-TYPE-NIL-COMPARE` when the resolved non-optional expected type is non-optional.
+   - `infer_method_call` validates `.unwrap`, `.unwrap_or`, `.expect`, `.is_some`, `.is_none` on `Optional` / `Named("Option", _)`, `Result` / `Named("Result", _)` (rejecting `is_some`/`is_none` on `Result` and checking `.unwrap_or(default)` against the inner/`Ok` type), and `Named` local/project `struct`/`class`/`enum` receivers lacking user-defined methods of that name while preserving types with `HirClass.methods` / `HirImpl.methods` / implemented `HirTrait` methods (including across `project_modules` registered via `register_project_type_methods` in `collect_module_typecheck_receipt_v1`) and unloaded external imported types (`external_type_symbols`).
+2. **Pure-Simple driver advisory escalation (`src/compiler/80.driver/hir_typecheck_consumer_v1.spl`):**
+   - Extracted `OptionShapeSeverityVerdictV1` / `option_shape_severity_verdict_v1` and escalated `error[SPL-PAT-001]`, `Option method '`, `Option pattern '`, and `Result method 'unwrap_or' default argument type mismatch` unconditionally into `receipt.errors` even when `TypecheckPassSeverity` is `Advisory` (keeping `[E-TYPE-NIL-COMPARE]` on its existing pass-severity lane).
+3. **Rust seed HIR lowering & AST interpreter static guard (`src/compiler_rust/compiler/src/hir/lower/option_pattern_shape_diag.rs`, `stmt_lowering.rs`, `expr/control.rs`, `expr/mod.rs`, `expr/helpers.rs`, `type_resolver.rs`, `interpreter_eval.rs`, `interpreter_helpers/method_dispatch.rs`):**
+   - Unconditionally enabled `ShapeGate::Error` (`error[SPL-PAT-001]`) for `Some`/`None`/`nil` patterns on non-`Option` types (including `Void`, `Array`, `Slice`, `Tuple`, `LabeledTuple`, `Dict`, `Function`, `Simd`, non-`Option` structs, `Result`, and enums whose variants lack `Some`/`None` or when `Option.*` is written explicitly).
+   - Validated `.unwrap`, `.unwrap_or`, `.expect`, `.is_some`, `.is_none` receiver shapes and `.unwrap_or` default argument types in `lower_builtin_method_call` (preserving `Any`/`Optional`, `Result` for `unwrap`/`unwrap_or`/`expect`, user struct/enum methods, slot-yielding `Array.{pop,first,last,remove}`, and `is_optional_typed_array_accessor` for `Array.{min,max}` without altering MIR-deferred `rt_unwrap_or_trap` lowering).
+   - Preserved `Optional` provenance via `register_optional(...)` for `Array.{at,get}` (`expr/mod.rs`, `expr/helpers.rs`), `Dict` index optionalization (`expr/helpers.rs`), and `Type::Capability` (`type_resolver.rs`).
+   - Added `check_interpreter_option_shapes` in `evaluate_module_items` (`interpreter_eval.rs`) plus symmetric `Value::Nil` Option dispatch in `interpreter_helpers/method_dispatch.rs` so `interpreter` mode rejects `match 6: case Some(_):`, `6.unwrap_or(-99)`, `xs.len().unwrap_or(0)`, `if val Some(j) = 6:`, and `i64?.unwrap_or("bad")` while keeping untyped parameters (`AstShape::Unknown`), custom `Some`/`None` enums, custom methods, enum static methods returning `Option`/`T?` or unannotated values (via `is_enum_variant` / `infer_static_member_shape`), `Array.{at,get,min,max,pop}`, and `Dict.get` intact.
+
+Regression evidence:
+- Pure-Simple SSpec verification (`wa3_shared_bin/simple.exe test ... --mode=interpreter --clean`, `SIMPLE_LIB=src`, `SIMPLE_TEST_RUNNER_RUST=1`):
+  - `test/01_unit/compiler/type_infer/option_non_option_scrutinee_unwrap_or_repro_spec.spl`: 3/3 PASS
+  - `test/01_unit/compiler/driver/option_shape_advisory_escalation_spec.spl`: 3/3 PASS
+  - `test/01_unit/compiler/type_infer/option_pattern_scrutinee_spec.spl`: 6/6 PASS
+  - `test/01_unit/compiler/type_infer/option_method_receiver_spec.spl`: 2/2 PASS
+  - `test/01_unit/compiler/type_infer/option_while_val_and_receiver_regression_spec.spl`: 6/6 PASS
+  - `test/01_unit/compiler/config/chained_enum_method_spec.spl`: 31/31 PASS
+  - `test/01_unit/compiler/mir/array_at_native_lowering_spec.spl`: 10/10 PASS
+  - Total: **61/61 PASS** across 7 SSpec files.
+- Rust seed `simple-compiler` Cargo unit tests (`cargo test --jobs 2 -p simple-compiler --lib ...`):
+  - `option_non_option`: 8/8 PASS (`hir::lower` + `interpreter::evaluate_module` cases in `src/compiler_rust/compiler/src/hir/lower/tests/option_non_option_tests.rs`)
+  - `hir::lower::tests`: 457/457 PASS
+  - `interpreter_patterns::tests`: 41/41 PASS
+  - `impl_duplicate_check::tests`: 4/4 PASS
+- Pending verification (honest `fix-implemented-verification-pending` status): `cargo test -p simple-driver --lib exec_core::tests` skipped under host disk guard, and full native stage2/stage3 CLI rebuild / full-tree corpus census remain unverified in this sparse worktree.
+

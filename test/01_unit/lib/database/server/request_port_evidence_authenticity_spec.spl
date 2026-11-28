@@ -1,0 +1,405 @@
+"""
+## Purpose and audience
+
+Purpose: pin the fail-closed authenticity binding for database request-port
+evidence records (`std.database.server.request_port_evidence`): an evidence
+record is authentic only when an independent kernel observation binds every
+claimed counter to one owner (the server PID that owned the listening socket)
+and one secret (the exact wire bytes exchanged). Producer-authored counters
+alone — the record shape the generic external receipt admitted in the
+2026-11-27 probe for db_request_port_evidence_authenticity_2026-08-25 — must
+fail closed.
+
+Audience: database server maintainers and must-check evidence lane reviewers.
+"""
+
+# @cover src/lib/nogc_sync_mut/database/server/request_port_evidence.spl
+# @req doc/08_tracking/bug/db_request_port_evidence_authenticity_2026-08-25.md
+#
+# The gap, demonstrated live: a fabricated db-server-request-port bundle whose
+# ONLY substance is producer-authored acceptance counters
+# (producer_kind=real-loopback-wire-producer, acceptance.*=PASS) is admitted by
+# scripts/check/check-external-must-check-receipt.shs with no kernel-observed
+# I/O, no server-PID/socket owner, and no wire bytes at all. A coordinated fake
+# server/client pair can likewise own a listener while fabricating
+# query/result files without transferring those bytes over TCP.
+#
+# These scenarios encode the binding that closes the gap and prove each limb
+# fails closed on its own: no binding may be optional, defaulted, or inferred
+# from a counter.
+
+use std.spec
+use std.spec.step
+use std.database.server.request_port_evidence.{
+    DbKernelIoObservation, DbRequestPortAuthenticity, DbRequestPortEvidence,
+    DbRequestPortLifecycle, DbWireBytes, verify_request_port_authenticity
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+# --- probes: one fully-bound record, mutated per scenario -------------------
+
+fn probe_wire() -> DbWireBytes:
+    # "Q\0\x37" in, "R\0OK\x37" out — small but real byte strings.
+    DbWireBytes(query: [81u8, 0u8, 55u8], result: [82u8, 0u8, 79u8, 75u8, 55u8])
+
+fn probe_kernel() -> DbKernelIoObservation:
+    DbKernelIoObservation(
+        server_pid: 41001,
+        listener_owner_pid: 41001,
+        accept_observed: true,
+        read_observed: true,
+        write_observed: true,
+        read_bytes: 3,
+        write_bytes: 5
+    )
+
+fn probe_lifecycle() -> DbRequestPortLifecycle:
+    DbRequestPortLifecycle(
+        ready_ms: 10,
+        accept_ms: 20,
+        read_ms: 30,
+        write_ms: 40,
+        stop_start_ms: 50,
+        stop_done_ms: 60,
+        stop_budget_ms: 10000
+    )
+
+fn probe_evidence() -> DbRequestPortEvidence:
+    val wire = probe_wire()
+    val query_digest = sha256_u8_hex(wire.query)
+    val result_digest = sha256_u8_hex(wire.result)
+    DbRequestPortEvidence(
+        run_id: "probe-run",
+        server_pid: 41001,
+        listener_owner_pid: 41001,
+        wire: wire,
+        session_query_digest: query_digest,
+        session_result_digest: result_digest,
+        trace_query_digest: query_digest,
+        trace_result_digest: result_digest,
+        kernel: Some(probe_kernel()),
+        lifecycle: Some(probe_lifecycle())
+    )
+
+fn authenticity_tag(verdict: DbRequestPortAuthenticity) -> text:
+    match verdict:
+        DbRequestPortAuthenticity.Authentic:
+            "authentic"
+        DbRequestPortAuthenticity.UnboundKernelObservation(_d):
+            "unbound_kernel_observation"
+        DbRequestPortAuthenticity.UnboundLifecycle(_d):
+            "unbound_lifecycle"
+        DbRequestPortAuthenticity.OwnerBindingMismatch(_d):
+            "owner_binding_mismatch"
+        DbRequestPortAuthenticity.KernelIoUnobserved(_d):
+            "kernel_io_unobserved"
+        DbRequestPortAuthenticity.WireLengthMismatch(_d):
+            "wire_length_mismatch"
+        DbRequestPortAuthenticity.WireDigestMismatch(_d):
+            "wire_digest_mismatch"
+        DbRequestPortAuthenticity.UnorderedLifecycle(_d):
+            "unordered_lifecycle"
+        DbRequestPortAuthenticity.StopOverBudget(_d):
+            "stop_over_budget"
+
+describe "database request-port evidence authenticity binding":
+    it "admits a record whose every counter is bound to one owner and the exact wire bytes":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        """
+        The positive control: session claim, kernel trace, and the actual
+        wire bytes all agree on owner and content, the kernel observed the
+        full accept/read/write triple with matching byte counts, and the
+        lifecycle is monotonic with a bounded stop. Every other scenario
+        removes exactly one binding.
+        """
+        step("Verify the fully bound record")
+        val verdict = verify_request_port_authenticity(probe_evidence())
+        assert_true(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "authentic")
+
+    it "fails closed on the v1-shaped record: producer counters with no kernel observation":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        """
+        The regression case for the probe: the fabricated bundle the generic
+        external receipt admitted asserted producer_kind=real-loopback-wire-
+        producer and acceptance.*=PASS with NO kernel-observed accept/read/
+        write and no server-PID/socket owner at all. That record shape must
+        be inadmissible here — an absent binding is a rejection, never a
+        default.
+        """
+        step("Build the counter-only record the probe admitted")
+        val wire = probe_wire()
+        val counter_only = DbRequestPortEvidence(
+            run_id: "probe-run",
+            server_pid: 41001,
+            listener_owner_pid: 41001,
+            wire: wire,
+            session_query_digest: sha256_u8_hex(wire.query),
+            session_result_digest: sha256_u8_hex(wire.result),
+            trace_query_digest: sha256_u8_hex(wire.query),
+            trace_result_digest: sha256_u8_hex(wire.result),
+            kernel: nil,
+            lifecycle: nil
+        )
+
+        step("Reject it: no independent observation is bound")
+        val verdict = verify_request_port_authenticity(counter_only)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "unbound_kernel_observation")
+
+    it "fails closed when only the lifecycle timing is unbound":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        step("Drop the lifecycle binding from an otherwise authentic record")
+        val evidence = probe_evidence()
+        val unbound = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: evidence.listener_owner_pid,
+            wire: evidence.wire,
+            session_query_digest: evidence.session_query_digest,
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: evidence.trace_query_digest,
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: evidence.kernel,
+            lifecycle: nil
+        )
+
+        step("Reject it: monotonic stop-only timing is part of the contract")
+        val verdict = verify_request_port_authenticity(unbound)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "unbound_lifecycle")
+
+    it "fails closed when the kernel observation names a different socket owner":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        """
+        The coordinated-fake-pair shape: a listener IS owned, but by a
+        different process than the claimed server — an alias standing in so
+        the claimed server can assert wire counters it never produced. The
+        owner binding must be one identity, not "someone owned a socket".
+        """
+        step("Claim server 41001 while the kernel observed owner 99999")
+        val evidence = probe_evidence()
+        val aliased_kernel = DbKernelIoObservation(
+            server_pid: 41001,
+            listener_owner_pid: 99999,
+            accept_observed: true,
+            read_observed: true,
+            write_observed: true,
+            read_bytes: 3,
+            write_bytes: 5
+        )
+        val aliased = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: evidence.listener_owner_pid,
+            wire: evidence.wire,
+            session_query_digest: evidence.session_query_digest,
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: evidence.trace_query_digest,
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: Some(aliased_kernel),
+            lifecycle: evidence.lifecycle
+        )
+
+        step("Reject it: the observation is not bound to the claimed owner")
+        val verdict = verify_request_port_authenticity(aliased)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "owner_binding_mismatch")
+
+    it "fails closed when the claimed listener owner is not the claimed server":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        step("Claim listener owner 41002 against server 41001")
+        val evidence = probe_evidence()
+        val split = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: 41002,
+            wire: evidence.wire,
+            session_query_digest: evidence.session_query_digest,
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: evidence.trace_query_digest,
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: evidence.kernel,
+            lifecycle: evidence.lifecycle
+        )
+
+        step("Reject it: the claim does not name one owner")
+        val verdict = verify_request_port_authenticity(split)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "owner_binding_mismatch")
+
+    it "fails closed when any kernel I/O leg is only producer-reported":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        step("Keep every digest and count consistent but un-observe the write")
+        val evidence = probe_evidence()
+        val reported_only = DbKernelIoObservation(
+            server_pid: 41001,
+            listener_owner_pid: 41001,
+            accept_observed: true,
+            read_observed: true,
+            write_observed: false,
+            read_bytes: 3,
+            write_bytes: 5
+        )
+        val unobserved = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: evidence.listener_owner_pid,
+            wire: evidence.wire,
+            session_query_digest: evidence.session_query_digest,
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: evidence.trace_query_digest,
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: Some(reported_only),
+            lifecycle: evidence.lifecycle
+        )
+
+        step("Reject it: a counter without an observation is not evidence")
+        val verdict = verify_request_port_authenticity(unobserved)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "kernel_io_unobserved")
+
+    it "fails closed when the observed byte counts do not equal the wire bytes":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        step("Observe 2 read bytes against a 3-byte wire query")
+        val evidence = probe_evidence()
+        val short_kernel = DbKernelIoObservation(
+            server_pid: 41001,
+            listener_owner_pid: 41001,
+            accept_observed: true,
+            read_observed: true,
+            write_observed: true,
+            read_bytes: 2,
+            write_bytes: 5
+        )
+        val short = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: evidence.listener_owner_pid,
+            wire: evidence.wire,
+            session_query_digest: evidence.session_query_digest,
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: evidence.trace_query_digest,
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: Some(short_kernel),
+            lifecycle: evidence.lifecycle
+        )
+
+        step("Reject it: the observation cannot correspond to this exchange")
+        val verdict = verify_request_port_authenticity(short)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "wire_length_mismatch")
+
+    it "fails closed on fabricated query bytes: the session/trace digest outlives the wire":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        """
+        The fabrication at the heart of the bug: files are authored whose
+        bytes never crossed the wire, so the record's claimed digests match
+        the fabricated files while the real exchange (if any) carried
+        different bytes. Here the wire under verification carries the REAL
+        bytes [81,0,55] but the session claim still digests the fabricated
+        [0] file.
+        """
+        step("Claim the digest of a fabricated query file over the real wire bytes")
+        val evidence = probe_evidence()
+        val fabricated = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: evidence.listener_owner_pid,
+            wire: evidence.wire,
+            session_query_digest: sha256_u8_hex([0u8]),
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: evidence.trace_query_digest,
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: evidence.kernel,
+            lifecycle: evidence.lifecycle
+        )
+
+        step("Reject it: the claim is not bound to the wire secret")
+        val verdict = verify_request_port_authenticity(fabricated)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "wire_digest_mismatch")
+
+    it "fails closed when the session and trace claims disagree about the wire bytes":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        step("Make the trace digest a different exchange than the session digest")
+        val evidence = probe_evidence()
+        val disagreeing = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: evidence.listener_owner_pid,
+            wire: evidence.wire,
+            session_query_digest: evidence.session_query_digest,
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: sha256_u8_hex([7u8]),
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: evidence.kernel,
+            lifecycle: evidence.lifecycle
+        )
+
+        step("Reject it: session, trace, and wire must name one secret")
+        val verdict = verify_request_port_authenticity(disagreeing)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "wire_digest_mismatch")
+
+    it "fails closed on unordered lifecycle timestamps":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        step("Write the result before accepting the connection")
+        val evidence = probe_evidence()
+        val reordered = DbRequestPortLifecycle(
+            ready_ms: 10,
+            accept_ms: 20,
+            read_ms: 30,
+            write_ms: 15,
+            stop_start_ms: 50,
+            stop_done_ms: 60,
+            stop_budget_ms: 10000
+        )
+        val unordered = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: evidence.listener_owner_pid,
+            wire: evidence.wire,
+            session_query_digest: evidence.session_query_digest,
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: evidence.trace_query_digest,
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: evidence.kernel,
+            lifecycle: Some(reordered)
+        )
+
+        step("Reject it: the lifecycle is not monotonic")
+        val verdict = verify_request_port_authenticity(unordered)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "unordered_lifecycle")
+
+    it "fails closed when the stop interval exceeds its budget":
+        # @req: REQ-DB-REQUEST-PORT-AUTH-001
+        step("Stop after 200 ms against a 100 ms budget")
+        val evidence = probe_evidence()
+        val slow = DbRequestPortLifecycle(
+            ready_ms: 10,
+            accept_ms: 20,
+            read_ms: 30,
+            write_ms: 40,
+            stop_start_ms: 50,
+            stop_done_ms: 250,
+            stop_budget_ms: 100
+        )
+        val over = DbRequestPortEvidence(
+            run_id: evidence.run_id,
+            server_pid: evidence.server_pid,
+            listener_owner_pid: evidence.listener_owner_pid,
+            wire: evidence.wire,
+            session_query_digest: evidence.session_query_digest,
+            session_result_digest: evidence.session_result_digest,
+            trace_query_digest: evidence.trace_query_digest,
+            trace_result_digest: evidence.trace_result_digest,
+            kernel: evidence.kernel,
+            lifecycle: Some(slow)
+        )
+
+        step("Reject it: stop must be bounded")
+        val verdict = verify_request_port_authenticity(over)
+        assert_false(verdict.is_authentic())
+        assert_equal(authenticity_tag(verdict), "stop_over_budget")

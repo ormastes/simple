@@ -22,7 +22,7 @@ mod process_bytes_windows;
 
 #[path = "process_environment_v1.rs"]
 mod process_environment_v1;
-pub use process_environment_v1::{rt_process_run_bounded_environment_tuple_v1, rt_process_run_bounded_admitted_tuple_v1, rt_process_run_bounded_observed_tuple_v1, rt_process_spawn_async_environment_v1, rt_windows_pty_owner_thread_guard_v1, rt_windows_pipe_file_mode_v1};
+pub use process_environment_v1::{rt_process_run_bounded_environment_tuple_v1, rt_process_run_bounded_admitted_tuple_v1, rt_process_run_bounded_observed_tuple_v1, rt_process_spawn_async_environment_v1, rt_process_spawn_async_env_v1, rt_windows_pty_owner_thread_guard_v1, rt_windows_pipe_file_mode_v1};
 
 fn lexer_source_cache() -> &'static RwLock<String> {
     static CACHE: OnceLock<RwLock<String>> = OnceLock::new();
@@ -681,6 +681,11 @@ fn finish_child_output_bounded_mode(
     let mut status = None;
     let mut stdout_bytes = None;
     let mut stderr_bytes = None;
+    // Poll interval backs off from 100 us to the old fixed 10 ms. A fixed
+    // 10 ms sleep made every short child (`true`, `git --version`) pay ~10 ms
+    // of pure latency: 100 bounded children took 1.1-1.3 s vs 0.22 s from sh
+    // (doc/08_tracking/bug/process_run_bounded_spawn_overhead_2026-11-27.md).
+    let mut pause = Duration::from_micros(100);
 
     loop {
         if status.is_none() {
@@ -764,7 +769,8 @@ fn finish_child_output_bounded_mode(
                 true,
             ));
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(10));
     }
 }
 
@@ -2319,7 +2325,7 @@ extern "C" fn restore_terminal_at_exit() {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
+pub extern "C" fn rt_terminal_enable_raw_mode() -> bool {
     #[cfg(unix)]
     {
         use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
@@ -2327,12 +2333,12 @@ pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
         let fd = unsafe { BorrowedFd::borrow_raw(0) };
         let orig = match tcgetattr(fd) {
             Ok(t) => t,
-            Err(_) => return RuntimeValue::from_bool(false),
+            Err(_) => return false,
         };
         let mut raw = orig.clone();
         cfmakeraw(&mut raw);
         if tcsetattr(fd, SetArg::TCSANOW, &raw).is_err() {
-            return RuntimeValue::from_bool(false);
+            return false;
         }
         let slot = SAVED_TERMIOS.get_or_init(|| std::sync::Mutex::new(None));
         if let Ok(mut guard) = slot.lock() {
@@ -2342,28 +2348,28 @@ pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
         INSTALL_EXIT_RESTORE.call_once(|| unsafe {
             libc::atexit(restore_terminal_at_exit);
         });
-        RuntimeValue::from_bool(true)
+        true
     }
     #[cfg(not(unix))]
     {
-        RuntimeValue::from_bool(true)
+        true
     }
 }
 
 #[no_mangle]
-pub extern "C" fn rt_terminal_is_tty() -> RuntimeValue {
+pub extern "C" fn rt_terminal_is_tty() -> bool {
     use std::io::IsTerminal;
-    RuntimeValue::from_bool(std::io::stdin().is_terminal())
+    std::io::stdin().is_terminal()
 }
 
 #[no_mangle]
-pub extern "C" fn rt_terminal_stdout_is_tty() -> RuntimeValue {
+pub extern "C" fn rt_terminal_stdout_is_tty() -> bool {
     use std::io::IsTerminal;
-    RuntimeValue::from_bool(std::io::stdout().is_terminal())
+    std::io::stdout().is_terminal()
 }
 
 #[no_mangle]
-pub extern "C" fn rt_terminal_disable_raw_mode() -> RuntimeValue {
+pub extern "C" fn rt_terminal_disable_raw_mode() -> bool {
     #[cfg(unix)]
     {
         use nix::sys::termios::{tcsetattr, SetArg};
@@ -2375,13 +2381,13 @@ pub extern "C" fn rt_terminal_disable_raw_mode() -> RuntimeValue {
             Err(_) => None,
         };
         match saved {
-            Some(orig) => RuntimeValue::from_bool(tcsetattr(fd, SetArg::TCSANOW, &orig).is_ok()),
-            None => RuntimeValue::from_bool(true),
+            Some(orig) => tcsetattr(fd, SetArg::TCSANOW, &orig).is_ok(),
+            None => true,
         }
     }
     #[cfg(not(unix))]
     {
-        RuntimeValue::from_bool(true)
+        true
     }
 }
 
@@ -2591,6 +2597,51 @@ mod tests {
             assert!(stderr.ends_with("ERRTAIL"));
             assert!(stderr.contains("[output truncated: 198990 bytes omitted]"));
         }
+    }
+
+    /// The wait loop must not add a fixed poll quantum to a child that has
+    /// already exited: the reader threads start inside the loop, so the first
+    /// poll always misses and the old loop always slept a full 10 ms.
+    /// doc/08_tracking/bug/process_run_bounded_spawn_overhead_2026-11-27.md
+    #[test]
+    fn bounded_wait_adds_no_fixed_poll_quantum() {
+        let mut samples = Vec::new();
+        for _ in 0..9 {
+            #[cfg(unix)]
+            let mut cmd = std::process::Command::new("true");
+            #[cfg(windows)]
+            let mut cmd = {
+                let mut c = std::process::Command::new("cmd");
+                c.args(["/c", "exit", "0"]);
+                c
+            };
+            let child = cmd
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            // Let it exit, so only the wait loop's own latency is timed.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let t0 = std::time::Instant::now();
+            let (_, _, code, timed_out) = finish_child_output_bounded_mode(
+                child,
+                10_000,
+                4096,
+                false,
+                #[cfg(windows)]
+                None,
+            )
+            .unwrap();
+            samples.push(t0.elapsed());
+            assert_eq!((code, timed_out), (0, false));
+        }
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        eprintln!("[perf] bounded wait latency median={median:?} all={samples:?}");
+        // The fixed-quantum loop can never finish under 10 ms (measured min
+        // 10.4 ms), so ONE fast sample proves the quantum is gone; using the
+        // minimum keeps the check stable on an oversubscribed host.
+        assert!(samples[0] < std::time::Duration::from_millis(9), "min {:?} all={samples:?}", samples[0]);
     }
 
     #[test]

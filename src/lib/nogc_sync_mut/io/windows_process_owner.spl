@@ -193,8 +193,8 @@ fn windows_process_build_command_line_v1(program: text, args: [text]) -> Result<
 fn windows_process_request_valid_v1(request: WindowsProcessRequestV1) -> text:
     if not windows_process_path_valid_v1(request.program) or not windows_process_path_valid_v1(request.directory):
         return "Windows owner requires absolute drive-rooted program and cwd"
-    if not windows_process_path_valid_v1(request.stdout_path) or not windows_process_path_valid_v1(request.stderr_path) or request.stdout_path == request.stderr_path:
-        return "Windows owner requires separate absolute stream paths"
+    if not windows_process_path_valid_v1(request.stdout_path) or not windows_process_path_valid_v1(request.stderr_path):
+        return "Windows owner requires absolute stream paths"
     # Match the builder contract: zero explicitly means no process deadline;
     # positive declared budgets extend through seven days. Cancellation remains
     # separately bounded and authoritative through the retained JobObject.
@@ -523,8 +523,11 @@ fn _windows_process_admit_core_v1(request: WindowsProcessRequestV1, memory_limit
         volatile_write_u32(security + windows_abi_security_attributes_inherit_offset(), 1)
         val stdin_handle = _windows_process_file_v1(heap, "NUL", 2147483648u32, 3u32, security, 3u32)
         val stdout_handle = _windows_process_file_v1(heap, request.stdout_path, 1073741824u32, 1u32, security, 1u32)
-        val stderr_handle = _windows_process_file_v1(heap, request.stderr_path, 1073741824u32, 1u32, security, 1u32)
-        handles = [stdin_handle, stdout_handle, stderr_handle]
+        # Equal stream paths mean one combined stream: one handle serves as both
+        # stdout and stderr so writes interleave in order (no positional clobber).
+        val combined_stream = request.stdout_path == request.stderr_path
+        val stderr_handle = if combined_stream: stdout_handle else: _windows_process_file_v1(heap, request.stderr_path, 1073741824u32, 1u32, security, 1u32)
+        handles = if combined_stream: [stdin_handle, stdout_handle] else: [stdin_handle, stdout_handle, stderr_handle]
         for handle in handles:
             if handle == 0: error = "cannot create exact inherited stream handles"
         if error == "":
@@ -535,7 +538,8 @@ fn _windows_process_admit_core_v1(request: WindowsProcessRequestV1, memory_limit
             windows_abi_write_ptr(startup + windows_abi_startupinfo_std_error_offset(), stderr_handle)
             windows_abi_write_ptr(allowed_handles, stdin_handle)
             windows_abi_write_ptr(allowed_handles + windows_abi_pointer_bytes(), stdout_handle)
-            windows_abi_write_ptr(allowed_handles + windows_abi_pointer_bytes() * 2, stderr_handle)
+            if not combined_stream:
+                windows_abi_write_ptr(allowed_handles + windows_abi_pointer_bytes() * 2, stderr_handle)
             val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, size_slot)
             val required = windows_abi_read_ptr(size_slot)
             if required <= 0 or required > 1048576:
@@ -548,7 +552,7 @@ fn _windows_process_admit_core_v1(request: WindowsProcessRequestV1, memory_limit
                     error = "attribute-list initialization failed"
                 else:
                     attributes_initialized = true
-                    if windows_abi_update_proc_thread_attribute(attributes, 131074, allowed_handles, windows_abi_pointer_bytes() * 3) == 0:
+                    if windows_abi_update_proc_thread_attribute(attributes, 131074, allowed_handles, windows_abi_pointer_bytes() * handles.len()) == 0:
                         error = "handle allowlist admission failed"
                     windows_abi_write_ptr(startup + windows_abi_startupinfoex_attr_list_offset(), attributes)
     val limits_bytes = windows_abi_job_extended_limit_size()
@@ -743,7 +747,26 @@ fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, t
         return Err("job memory accounting unavailable")
     Ok(peak)
 
+@unsafe(reason: "reads the memory limit back from the retained live JobObject", capabilities: [ffi, raw_ptr])
+fn windows_process_memory_limit_v1(lease: WindowsProcessLeaseV1) -> Result<i64, text>:
+    if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
+    val state = _windows_process_slots_v1[lease.slot]
+    if state.closed: return Err("Windows owner already collected")
+    val limits_bytes = windows_abi_job_extended_limit_size()
+    val information = windows_abi_heap_alloc(state.heap, limits_bytes)
+    if information == 0: return Err("job memory query allocation failed")
+    val queried = QueryInformationJobObject(state.job, 9, information, limits_bytes as u32, 0)
+    val flags = if queried != 0: volatile_read_u32(information + windows_abi_job_limit_flags_offset()) else: 0
+    val limit = if queried != 0: windows_abi_read_ptr(information + windows_abi_job_memory_limit_offset()) else: -1
+    val released = windows_abi_heap_free(state.heap, information)
+    if queried == 0 or released == 0 or limit < 0:
+        return Err("job memory limit unavailable")
+    # JOB_OBJECT_LIMIT_JOB_MEMORY (0x200) must be set, or the limit field is meaningless.
+    if (flags & 512) == 0: return Ok(0)
+    Ok(limit)
+
 export windows_process_start_with_memory_v1, windows_process_peak_memory_v1
+export windows_process_memory_limit_v1
 export WindowsProcessAdmissionV1, windows_process_admit_v1, windows_process_admit_with_reserve_v1
 export windows_available_memory_headroom_v1, windows_capacity_headroom_v1, windows_headroom_from_snapshot_v1
 export WindowsProcessContainExtrasV1, windows_process_admit_contained_v1

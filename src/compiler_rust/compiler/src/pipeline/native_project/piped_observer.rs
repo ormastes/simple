@@ -3,13 +3,17 @@ use object::{Object, ObjectSymbol};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const OBSERVERS: [&str; 2] = [
+const OBSERVERS: [&str; 4] = [
     "rt_process_stdout_state",
     "rt_process_piped_exit_status_value",
+    "rt_process_spawn_piped_environment_v1",
+    "rt_process_wait_readable_v1",
 ];
-const C_CONTRACT: [&str; 6] = [
+const C_CONTRACT: [&str; 8] = [
     "simple_piped_owner_observe_v1",
     "simple_piped_receipt_new_v1",
+    "simple_piped_owner_spawn_environment_v1",
+    "simple_piped_owner_wait_readable_v1",
     "rt_array_new",
     "rt_array_push",
     "rt_array_free",

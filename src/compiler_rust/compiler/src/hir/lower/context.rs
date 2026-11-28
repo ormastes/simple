@@ -65,6 +65,11 @@ pub(super) struct FunctionContext {
     /// is the only place `T? as <numeric>` is admitted
     /// (nil-only-in-unsafe, bug optional_as_cast_yields_zero_2026_11_09).
     pub unsafe_depth: usize,
+    /// Locals (by index) whose type could not be inferred because they hold an
+    /// unannotated parameter or the result of an uninstantiated unannotated
+    /// function; the value names the origin and the callee still to be judged
+    /// (see `implicit_generic.rs`).
+    pub uninferred_locals: HashMap<usize, (String, Option<String>)>,
 }
 
 impl FunctionContext {
@@ -85,6 +90,7 @@ impl FunctionContext {
             lambda_local_fn_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
             unsafe_depth: 0,
+            uninferred_locals: HashMap::new(),
         }
     }
 
@@ -106,6 +112,7 @@ impl FunctionContext {
             lambda_local_fn_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
             unsafe_depth: 0,
+            uninferred_locals: HashMap::new(),
         }
     }
 

@@ -1,0 +1,180 @@
+#!/bin/sh
+# Pin for x86_bootstrap_rust_authority_tuple_recompilation_cost_2026-08-22
+# (warm-reuse half): driver/build.rs must only emit
+# `cargo:rerun-if-changed=<test root>` for roots that exist. Cargo cannot
+# stably fingerprint a missing rerun-if-changed path, so watching the dead
+# legacy root test/unit/lib/std left the driver (seed bin) dirty on EVERY
+# authority invocation, warm or cold — recompiling and thin-LTO relinking the
+# most expensive unit in the tuple each time. Text contract on the real
+# build.rs (brace-depth check that the root watch sits inside the
+# `test_root.exists()` gate); no compiler. POSIX sh + awk only.
+#
+# Usage:
+#   driver-watch-root-gate-test.shs              check the real driver/build.rs
+#   driver-watch-root-gate-test.shs --file PATH  check PATH instead
+#   driver-watch-root-gate-test.shs --selftest   run fixture self-test
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+SELF=$ROOT/scripts/bootstrap/tests/driver-watch-root-gate-test.shs
+
+# check_build_rs PATH -> prints "gate check ok" and returns 0, or prints a
+# FAIL line on stderr and returns 1.
+check_build_rs() {
+    build_rs=$1
+    [ -f "$build_rs" ] || { echo "FAIL: missing $build_rs" >&2; return 1; }
+    awk '
+    function fail(msg) { print "FAIL: " msg > "/dev/stderr"; failed = 1; exit 1 }
+    BEGIN {
+        marker = "fn generate_test_file"
+        endmark = "/// Convert a file path to a valid Rust test function name."
+        watch = "println!(\"cargo:rerun-if-changed={}\", test_root.display());"
+        gate = "if test_root.exists()"
+        src = ""
+    }
+    { src = src $0 "\n" }
+    END {
+        if (failed) exit 1
+        start = index(src, marker)
+        if (start == 0) fail("generate_test_file not found")
+        endpos = index(src, endmark)
+        if (endpos == 0) fail("end marker (Convert a file path ... doc comment) not found")
+        if (endpos <= start) fail("end marker precedes generate_test_file")
+        body = substr(src, start, endpos - start)
+
+        watch_at = index(body, watch)
+        if (watch_at == 0) fail("root rerun-if-changed emission not found")
+
+        # First line carrying the gate; its block opens at that line'"'"'s first "{".
+        gate_open = 0
+        n = split(body, lines, "\n")
+        pos = 1
+        for (i = 1; i <= n; i++) {
+            if (gate_open == 0 && index(lines[i], gate) > 0) {
+                b = index(lines[i], "{")
+                if (b == 0) fail("test_root.exists() gate line has no opening brace")
+                gate_open = pos + b - 1
+            }
+            pos += length(lines[i]) + 1
+        }
+        if (gate_open == 0) fail("no test_root.exists() gate in generate_test_file")
+        if (gate_open >= watch_at) fail("root watch emitted before any existence gate")
+
+        # The gate block must still be open at every character up to the watch.
+        depth = 0
+        for (p = gate_open; p < watch_at; p++) {
+            c = substr(body, p, 1)
+            if (c == "{") depth++
+            else if (c == "}") depth--
+            if (depth <= 0) fail("root watch is not inside the test_root.exists() gate")
+        }
+
+        # The .spl-file walk must sit behind the same gate (it is the block tail).
+        if (index(substr(body, gate_open), "WalkDir::new(test_root)") == 0)
+            fail(".spl walk missing after the gate")
+        print "gate check ok"
+    }
+    ' "$build_rs"
+}
+
+write_fixture() {
+    # write_fixture PATH MODE ; MODE = pass | outside | nogate
+    out=$1
+    mode=$2
+    {
+        printf '%s\n' 'fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {'
+        printf '%s\n' '    generated.push_str("fn init_test_coverage() {\n");'
+        printf '%s\n' '    if !test_root.exists() {'
+        printf '%s\n' '        generated.push_str("// none\n");'
+        printf '%s\n' '    }'
+        case $mode in
+            pass)
+                printf '%s\n' '    if test_root.exists() {'
+                printf '%s\n' '        println!("cargo:rerun-if-changed={}", test_root.display());'
+                printf '%s\n' '        for entry in WalkDir::new(test_root) {'
+                printf '%s\n' '            println!("cargo:rerun-if-changed={}", entry.path().display());'
+                printf '%s\n' '        }'
+                printf '%s\n' '    }'
+                ;;
+            outside)
+                printf '%s\n' '    if test_root.exists() {'
+                printf '%s\n' '        for entry in WalkDir::new(test_root) {'
+                printf '%s\n' '            println!("cargo:rerun-if-changed={}", entry.path().display());'
+                printf '%s\n' '        }'
+                printf '%s\n' '    }'
+                printf '%s\n' '    println!("cargo:rerun-if-changed={}", test_root.display());'
+                ;;
+            nogate)
+                printf '%s\n' '    println!("cargo:rerun-if-changed={}", test_root.display());'
+                printf '%s\n' '    for entry in WalkDir::new(test_root) {'
+                printf '%s\n' '        println!("cargo:rerun-if-changed={}", entry.path().display());'
+                printf '%s\n' '    }'
+                ;;
+        esac
+        printf '%s\n' '}'
+        printf '\n'
+        printf '%s\n' '/// Convert a file path to a valid Rust test function name.'
+        printf '%s\n' 'fn path_to_test_name() {}'
+    } > "$out"
+}
+
+run_selftest() {
+    TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/driver-watch-root-gate.XXXXXX")
+    trap 'rm -rf "${TMP_DIR:?}"' EXIT INT TERM
+    st_fail=0
+
+    expect() {
+        # expect NAME WANT(pass|fail) FILE
+        name=$1
+        want=$2
+        file=$3
+        if out=$(sh "$SELF" --file "$file" 2>&1); then rc=0; else rc=$?; fi
+        if [ "$want" = pass ]; then
+            if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^STATUS: PASS driver watch-root gate$'; then
+                echo "selftest ok: $name (PASS as expected)"
+            else
+                echo "selftest FAIL: $name expected PASS, got rc=$rc: $out" >&2
+                st_fail=1
+            fi
+        else
+            if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q '^FAIL: '; then
+                echo "selftest ok: $name (FAIL as expected: $(printf '%s\n' "$out" | grep '^FAIL: ' | head -1))"
+            else
+                echo "selftest FAIL: $name expected FAIL, got rc=$rc: $out" >&2
+                st_fail=1
+            fi
+        fi
+    }
+
+    write_fixture "$TMP_DIR/pass.rs" pass
+    write_fixture "$TMP_DIR/outside.rs" outside
+    write_fixture "$TMP_DIR/nogate.rs" nogate
+
+    expect real-shape pass "$TMP_DIR/pass.rs"
+    expect watch-outside-gate fail "$TMP_DIR/outside.rs"
+    expect no-gate fail "$TMP_DIR/nogate.rs"
+    expect missing-file fail "$TMP_DIR/does-not-exist.rs"
+
+    rm -rf "${TMP_DIR:?}"
+    trap - EXIT INT TERM
+    if [ "$st_fail" -ne 0 ]; then
+        echo "STATUS: FAIL driver watch-root gate selftest" >&2
+        exit 1
+    fi
+    echo 'STATUS: PASS driver watch-root gate selftest (4 fixtures)'
+}
+
+BUILD_RS=$ROOT/src/compiler_rust/driver/build.rs
+case "${1:-}" in
+    --selftest) run_selftest; exit 0 ;;
+    --file)
+        [ $# -ge 2 ] || { echo "FAIL: --file needs a path" >&2; exit 2; }
+        BUILD_RS=$2 ;;
+    "") ;;
+    *) echo "FAIL: unknown argument: $1" >&2; exit 2 ;;
+esac
+
+if ! check_build_rs "$BUILD_RS"; then
+    echo "STATUS: FAIL driver watch-root gate" >&2
+    exit 1
+fi
+echo 'STATUS: PASS driver watch-root gate'

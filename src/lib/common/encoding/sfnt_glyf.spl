@@ -2506,15 +2506,25 @@ fn _aaa_flush(o: [i64]):
     val row = 24 + w + y * (w + 32)
     var x = 0
     while x < w:
-        var a = o[8 + x]
-        if a != 0:
-            if a > 247: a = 255
-            if a == 255:
-                o[row + x] = 255
-            elif a >= 8:
-                o[row + x] = a + (((((255 - a) * o[row + x]) + 128) * 257) >> 16)
-            o[8 + x] = 0
-        x = x + 1
+        # Untouched samples go four at a time: accumulated values are never
+        # negative, and the 16 slots after the row are zero padding (a
+        # counter or the outside of a 64 px gray glyph is most of the row).
+        if o[8 + x] + o[9 + x] + o[10 + x] + o[11 + x] == 0:
+            x = x + 4
+        else:
+            if o[8 + x] == 0:
+                x = x + 1
+            else:
+                # A touched run is walked without the group test.
+                while x < w and o[8 + x] != 0:
+                    var a = o[8 + x]
+                    if a > 247: a = 255
+                    if a == 255:
+                        o[row + x] = 255
+                    elif a >= 8:
+                        o[row + x] = a + (((((255 - a) * o[row + x]) + 128) * 257) >> 16)
+                    o[8 + x] = 0
+                    x = x + 1
     o[6] = -1
 
 fn _aaa_check_y(o: [i64], y: i64):
@@ -2893,11 +2903,16 @@ fn _aaa_trap_row(o: [i64], y: i64, ul0: i64, ur0: i64, ll0: i64, lr0: i64, ldy: 
             if sx >= o[4] and sx + sn <= o[5]:
                 var si = 8 + sx
                 val stop = si + sn
-                val sat = o[3] == 1
-                while si < stop:
-                    val st = o[si] + full
-                    o[si] = if sat: (if st > 255: 255 else: st) else: (st - (st >> 8)) & 255
-                    si = si + 1
+                if o[3] == 1:
+                    while si < stop:
+                        val st = o[si] + full
+                        o[si] = if st > 255: 255 else: st
+                        si = si + 1
+                else:
+                    while si < stop:
+                        val st = o[si] + full
+                        o[si] = (st - (st >> 8)) & 255
+                        si = si + 1
     if lr > jr:
         val len = (lr - jr + 65535) >> 16
         if len == 1:
@@ -2965,6 +2980,166 @@ fn _aaa_trap_row(o: [i64], y: i64, ul0: i64, ur0: i64, ll0: i64, lr0: i64, ldy: 
             _aaa_trap_row_general(o, y, jr, ur, jr, lr, 2147483647, rdy, full, nrb)
 
 
+# `_aaa_trap_row` for the gray phase record/replay route only: SafeRLE,
+# non-convex (saturating accumulate), no mask plane; the row check is made
+# once per call. Derived line for line from `_aaa_trap_row`: change both.
+fn _aaa_trap_row_gray(o: [i64], y: i64, ul0: i64, ur0: i64, ll0: i64, lr0: i64, ldy: i64, rdy: i64, full: i64, nrb: bool):
+    if y < 0 or y >= o[1] or ul0 > ur0: return
+    var ul = ul0
+    var ur = ur0
+    var ll = ll0
+    var lr = lr0
+    if ll > lr:
+        # approximate intersection of the crossing edges
+        var a = ul
+        var b = ll
+        if a > b:
+            a = ll
+            b = ul
+        var c = ur
+        var d = lr
+        if c > d:
+            c = lr
+            d = ur
+        if c > a: a = c
+        if d < b: b = d
+        ll = (a + b) / 2
+        lr = ll
+    if ul == ur and ll == lr: return
+    if ul > ll:
+        val t = ul
+        ul = ll
+        ll = t
+    if ur > lr:
+        val t = ur
+        ur = lr
+        lr = t
+    val jl = ((ll + 65535) >> 16) << 16
+    val jr = (ur >> 16) << 16
+    if jl > jr:
+        _aaa_trap_row_general(o, y, ul, ur, ll, lr, ldy, rdy, full, nrb)
+        return
+    val real = full == 255 and not nrb
+    val w = o[0]
+    val rbase = 24 + w + y * (w + 32)
+    if not real and y != o[6]:
+        _aaa_flush(o)
+        o[6] = y
+    if ul < jl:
+        val len = (jl - ul + 65535) >> 16
+        if len == 1:
+            val a = (((jl - ul + jl - ll) / 2) >> 8) & 255
+            val px1 = ul >> 16
+            val pa1 = if real: a else: (a * full) >> 8
+            if real:
+                if pa1 != 0 and px1 >= 0 and px1 < w:
+                    val pi1 = rbase + px1
+                    if pa1 == 255:
+                        o[pi1] = 255
+                    else:
+                        o[pi1] = pa1 + (((((255 - pa1) * o[pi1]) + 128) * 257) >> 16)
+            else:
+                if px1 >= o[4] and px1 < o[5]:
+                    val pt1 = o[8 + px1] + pa1
+                    o[8 + px1] = if pt1 > 255: 255 else: pt1
+        elif len == 2:
+            val first = jl - 65536 - ul
+            val px2 = ul >> 16
+            val pa2 = ((((first >> 11) * (first >> 11) * (ldy >> 11)) >> 8) & 255)
+            if real:
+                if pa2 != 0 and px2 >= 0 and px2 < w:
+                    val pi2 = rbase + px2
+                    if pa2 == 255:
+                        o[pi2] = 255
+                    else:
+                        o[pi2] = pa2 + (((((255 - pa2) * o[pi2]) + 128) * 257) >> 16)
+            else:
+                if px2 >= o[4] and px2 < o[5]:
+                    val pt2 = o[8 + px2] + pa2
+                    o[8 + px2] = if pt2 > 255: 255 else: pt2
+            val px3 = (ul >> 16) + 1
+            val pa3 = (full - (((((ll - ul - first) >> 11) * ((ll - ul - first) >> 11) * (ldy >> 11)) >> 8) & 255)) & 255
+            if real:
+                if pa3 != 0 and px3 >= 0 and px3 < w:
+                    val pi3 = rbase + px3
+                    if pa3 == 255:
+                        o[pi3] = 255
+                    else:
+                        o[pi3] = pa3 + (((((255 - pa3) * o[pi3]) + 128) * 257) >> 16)
+            else:
+                if px3 >= o[4] and px3 < o[5]:
+                    val pt3 = o[8 + px3] + pa3
+                    o[8 + px3] = if pt3 > 255: 255 else: pt3
+        else:
+            _aaa_trap_row_general(o, y, ul, jl, ll, jl, ldy, 2147483647, full, nrb)
+    if jl < jr:
+        # blitFull: whole pixels of strip alpha `full`.
+        val sx = jl >> 16
+        val sn = (jr - jl) >> 16
+        if real:
+            var si = rbase + sx
+            val stop = si + sn
+            while si < stop:
+                o[si] = 255
+                si = si + 1
+        else:
+            if sx >= o[4] and sx + sn <= o[5]:
+                var si = 8 + sx
+                val stop = si + sn
+                while si < stop:
+                    val st = o[si] + full
+                    o[si] = if st > 255: 255 else: st
+                    si = si + 1
+    if lr > jr:
+        val len = (lr - jr + 65535) >> 16
+        if len == 1:
+            val a = (((ur - jr + lr - jr) / 2) >> 8) & 255
+            val px4 = jr >> 16
+            val pa4 = if real: a else: (a * full) >> 8
+            if real:
+                if pa4 != 0 and px4 >= 0 and px4 < w:
+                    val pi4 = rbase + px4
+                    if pa4 == 255:
+                        o[pi4] = 255
+                    else:
+                        o[pi4] = pa4 + (((((255 - pa4) * o[pi4]) + 128) * 257) >> 16)
+            else:
+                if px4 >= o[4] and px4 < o[5]:
+                    val pt4 = o[8 + px4] + pa4
+                    o[8 + px4] = if pt4 > 255: 255 else: pt4
+        elif len == 2:
+            val first = jr + 65536 - ur
+            val px5 = jr >> 16
+            val pa5 = (full - ((((first >> 11) * (first >> 11) * (rdy >> 11)) >> 8) & 255)) & 255
+            if real:
+                if pa5 != 0 and px5 >= 0 and px5 < w:
+                    val pi5 = rbase + px5
+                    if pa5 == 255:
+                        o[pi5] = 255
+                    else:
+                        o[pi5] = pa5 + (((((255 - pa5) * o[pi5]) + 128) * 257) >> 16)
+            else:
+                if px5 >= o[4] and px5 < o[5]:
+                    val pt5 = o[8 + px5] + pa5
+                    o[8 + px5] = if pt5 > 255: 255 else: pt5
+            val px6 = (jr >> 16) + 1
+            val pa6 = (((((lr - ur - first) >> 11) * ((lr - ur - first) >> 11) * (rdy >> 11)) >> 8) & 255)
+            if real:
+                if pa6 != 0 and px6 >= 0 and px6 < w:
+                    val pi6 = rbase + px6
+                    if pa6 == 255:
+                        o[pi6] = 255
+                    else:
+                        o[pi6] = pa6 + (((((255 - pa6) * o[pi6]) + 128) * 257) >> 16)
+            else:
+                if px6 >= o[4] and px6 < o[5]:
+                    val pt6 = o[8 + px6] + pa6
+                    o[8 + px6] = if pt6 > 255: 255 else: pt6
+        else:
+            _aaa_trap_row_general(o, y, jr, ur, jr, lr, 2147483647, rdy, full, nrb)
+
+
+
 # --- edge list -----------------------------------------------------------------
 
 fn _aaa_insert_after(e: [i64], c: i64, after: i64):
@@ -2996,7 +3171,10 @@ fn _aaa_cross(e: [i64], c: i64, ny: i64, nn: i64, fwd: bool) -> i64:
     if guard >= 0 and e[a] + e[a + 1] > e[b] + e[b + 1]: ny + 16384 else: nn
 
 # aaa_walk_edges (non-convex, nonzero winding).
-fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, right_clip: i64, skip_cross: bool):
+fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, right_clip: i64, skip_cross: bool, rec: [i64]):
+    # `rec` non-empty: record every trapezoid row (gray phase replay).
+    var rec_on = rec.len() > 0
+    if rec_on: rec[0] = 0
     e[0] = left_clip
     e[2] = left_clip
     e[24] = right_clip
@@ -3022,6 +3200,8 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
         var left = left_clip
         var left_dy = 0
         var prev_rite = left_clip >> 16
+        var first_span = 1
+        var left_raw = left_clip
         nn = 2147483647
         var ys = 0
         if ((next_y - y) & 16384) != 0:
@@ -3052,10 +3232,41 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                         if e[n + 4] < next_y:
                             val ndx = if e[n + 1] < 0: 0 - e[n + 1] else: e[n + 1]
                             nrb = nx_x + 65536 >= e[n] - ndx
-                _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                if rec_on:
+                    # Phase replay record (see `_gray_aaa_replay`): raw, unclamped
+                    # x, so another quarter phase re-derives the clamps and `nrb`.
+                    val rn = rec[0]
+                    val rb = 6 + rn * 11
+                    if rb + 11 <= rec.len():
+                        var nb2 = 0
+                        if full == 255:
+                            val rnx = e[curr + 21]
+                            if e[rnx + 4] < next_y:
+                                val rndx = if e[rnx + 1] < 0: 0 - e[rnx + 1] else: e[rnx + 1]
+                                if nx_x + 65536 >= e[rnx] - rndx: nb2 = 1
+                        rec[rb] = ry
+                        rec[rb + 1] = left_raw
+                        rec[rb + 2] = cx
+                        rec[rb + 3] = lx
+                        rec[rb + 4] = nx_x
+                        rec[rb + 5] = left_dy
+                        rec[rb + 6] = e[curr + 6]
+                        rec[rb + 7] = full
+                        rec[rb + 8] = first_span
+                        rec[rb + 9] = 0
+                        rec[rb + 10] = nb2
+                        rec[0] = rn + 1
+                    else:
+                        rec[0] = -1
+                        rec_on = false
+                    first_span = 0
+                    _aaa_trap_row_gray(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                else:
+                    _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
                 prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
             elif inside and not was_in:
                 left = if cx > left_clip: cx else: left_clip
+                if rec_on: left_raw = cx
                 left_dy = e[curr + 6]
                 left_e = curr
             val nxt = e[curr + 21]
@@ -3095,6 +3306,9 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                 if p >= 0 and e[left_e + 4] < next_y:
                     val ldx = if e[left_e + 1] < 0: 0 - e[left_e + 1] else: e[left_e + 1]
                     nrb = e[p] + 65536 >= lx - ldx
+            if rec_on:
+                rec[0] = -1
+                rec_on = false
             _aaa_trap_row(o, ry, left, right_clip, if lx > left_clip: lx else: left_clip, right_clip, left_dy, 0, full, nrb)
         y = next_y
         if y >= stop_fixed: break
@@ -3398,12 +3612,16 @@ fn _aaa_fat_row(o: [i64], l: i64, r: i64, y: i64, pl: f64, pr: f64, pv: f64):
     _aaa_real(o, r - 1, y, _aaa_scalar_alpha((((pr * pv) as f32) as f64)))
 
 # Skia AAA fill of `commands` (font units, y up) into an A8 mask of `aw` x `h`
-# samples: x' = 4 (x*scale + phase) - 4 (x0 + 1), y' = top - y*scale, every
-# step in f32 as SkScalerContext (`((v as f32) as f64)` rounds to f32; 4x is
-# exact in f32, so it is not rounded separately). Returns the blitter state; the mask is
-# o[o[7] + y * (aw + 32) + x].
-fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, top: f64, aw: i64, h: i64) -> [i64]:
-    val cx = ((0 - (x0 + 1)) * 4) as f64
+# samples at `per_px` samples per pixel, as GenerateImageFromPath does. LCD
+# (per_px 4): x' = 4 (x*scale + phase) - 4 (x0 + 1). Gray A8 (per_px 1):
+# x' = (x*scale + phase) - x0. y' = top - y*scale. Every step is in f32 as
+# SkScalerContext (`((v as f32) as f64)` rounds to f32; 4x is exact in f32, so
+# it is not rounded separately). `rec` non-empty: the non-convex SafeRLE walk
+# records its trapezoid rows there (rec[0] stays -1 on every other route).
+# Returns the blitter state; the mask is o[o[7] + y * (aw + 32) + x].
+fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, top: f64, aw: i64, h: i64, per_px: i64, rec: [i64]) -> [i64]:
+    val cx = if per_px == 4: ((0 - (x0 + 1)) * 4) as f64 else: (0 - x0) as f64
+    val sx = per_px as f64
     var pv: [i64] = []
     var px: [f64] = []
     var py: [f64] = []
@@ -3419,13 +3637,13 @@ fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, t
             pv.push(2)
         val ax = (((command.x1 * scale) as f32) as f64)
         val ay = (((command.y1 * scale) as f32) as f64)
-        px.push((((4.0 * ((((ax + phase) as f32) as f64)) + cx) as f32) as f64))
+        px.push((((sx * ((((ax + phase) as f32) as f64)) + cx) as f32) as f64))
         py.push((((top - ay) as f32) as f64))
         if command.verb == SFNT_GLYF_QUAD:
             pv.push(3)
             val bx = (((command.x2 * scale) as f32) as f64)
             val by = (((command.y2 * scale) as f32) as f64)
-            px.push((((4.0 * ((((bx + phase) as f32) as f64)) + cx) as f32) as f64))
+            px.push((((sx * ((((bx + phase) as f32) as f64)) + cx) as f32) as f64))
             py.push((((top - by) as f32) as f64))
     val np = pv.len()
     var o: [i64] = [0; 8 + aw + (aw + 32) * h]
@@ -3533,7 +3751,16 @@ fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, t
     if convex and n >= 2:
         _aaa_walk_convex(e, o, stop_y, left_b, right_b)
     else:
-        _aaa_walk(e, o, start_y, stop_y, left_b, right_b, np > (irb - irt) * 2)
+        if use_mask or convex or rec.len() == 0:
+            val no_rec: [i64] = []
+            _aaa_walk(e, o, start_y, stop_y, left_b, right_b, np > (irb - irt) * 2, no_rec)
+        else:
+            # Path sample bounds in 16.16 and the row count, for the replay's
+            # own ir and blitter choice.
+            rec[1] = _floor_glyf(px.min() * 65536.0)
+            rec[2] = _ceil_glyf(px.max() * 65536.0)
+            rec[3] = irb - irt
+            _aaa_walk(e, o, start_y, stop_y, left_b, right_b, np > (irb - irt) * 2, rec)
     _aaa_flush(o)
     o
 
@@ -3566,7 +3793,7 @@ fn _lcd_aaa_phase0(outline: SfntLcdOutline) -> [i64]:
     if val Some(hit) = _lcd_aaa_memo.get(key):
         return hit
     val frame = sfnt_lcd_outline_frame(outline, 0)
-    var mask = _lcd_aaa_mask(outline.slo_commands, outline.slo_scale, 0.0, frame[2], 0.0 - outline.slo_raster_top, frame[0] * 4 - 8, frame[1])
+    var mask = _lcd_aaa_mask(outline.slo_commands, outline.slo_scale, 0.0, frame[2], 0.0 - outline.slo_raster_top, frame[0] * 4 - 8, frame[1], 4, [])
     mask.push(frame[2])
     if _lcd_aaa_memo.len() >= 1024: _lcd_aaa_memo = {}
     _lcd_aaa_memo[key] = mask
@@ -3783,8 +4010,11 @@ pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<
 # `sfnt_gray_glyph_outline` (same vertical frame and unhinted outline as
 # `sfnt_render_glyph_into`). Horizontally the outline keeps its true
 # pen-relative x (`slg_bearing_x` names column 0, shifted right by phase_q/4
-# px) and coverage is the exact pixel area (one area sample per pixel), not
-# the 4x4 supersample's 17 levels. `slg_rgb` is empty.
+# px) and coverage is Skia's analytic AA fill of the path at one sample per
+# pixel (`_lcd_aaa_mask`, per_px 1: Chrome's GenerateImageFromPath for A8;
+# gray_glyph_round_aaa_chrome159_spec). The float exact-area accumulator used
+# before cut curves into a quarter of Skia's chords at this scale, so round
+# shoulders were light and counters dark. `slg_rgb` is empty.
 # Metrics of the cell `sfnt_gray_outline_raster` builds at `phase_q`, without
 # the raster: [width, height, bearing_x, bearing_y], or [] where the raster
 # answers None.
@@ -3802,6 +4032,60 @@ pub fn sfnt_gray_outline_frame(outline: SfntLcdOutline, phase_q: i64) -> [i64]:
         return []
     [width, height, x0, outline.slo_bearing_y]
 
+# Trapezoid rows of a gray outline's non-convex AAA walk, by outline identity
+# (slo_key): [count or -1, min x, max x (16.16, recorded frame), rows, phase,
+# frame x0, then 11 values per row: y, span left x, rite x, left edge's next
+# x, rite edge's next x (all raw 16.16, unclamped), left dy, rite dy, strip
+# alpha, first-span-of-strip flag, 0, neighbour-too-close flag]. A quarter
+# phase moves every x by the same fixed amount and leaves the walk (strips,
+# edge order, y) unchanged, so only the clamps, the real-blitter test and the
+# per-pixel coverage are redone. Bounded: dropped whole at 512 outlines or at
+# the slot budget below.
+var _gray_aaa_recs: Dict<text, [i64]> = {}
+# Slots (i64) held by `_gray_aaa_recs`. A 64 px glyph records ~1.2k slots; a
+# 512 px one ~10x that, so the count cap alone does not bound the memo.
+# ponytail: 2,000,000 slots = 16 MB of i64 payload, ~1600 body-text outlines or
+# ~160 display-size ones; the memo is dropped whole when a record would pass it.
+val _GRAY_AAA_REC_SLOT_BUDGET: i64 = 2000000
+var _gray_aaa_rec_slots: i64 = 0
+
+# Replay recorded trapezoid rows shifted by `shift` (16.16) into a fresh
+# SafeRLE blitter state of `aw` x `h`: the writes `_aaa_walk` makes at that
+# phase (clip 0..aw, `nrb` and the previous span's right end re-derived as in
+# the walker).
+fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64) -> [i64]:
+    var o: [i64] = [0; 8 + aw + (aw + 32) * h]
+    o[0] = aw
+    o[1] = h
+    o[3] = 1
+    o[4] = irl
+    o[5] = irr
+    o[6] = -1
+    o[7] = 24 + aw
+    val right_clip = aw << 16
+    val n = rec[0]
+    var prev_rite = 0
+    var i = 0
+    var rb = 6
+    while i < n:
+        val full = rec[rb + 7]
+        val left_raw = rec[rb + 1] + shift
+        val cx = rec[rb + 2] + shift
+        val lx = rec[rb + 3] + shift
+        val nx_x = rec[rb + 4] + shift
+        val left = if left_raw > 0: left_raw else: 0
+        val rite = if cx < right_clip: cx else: right_clip
+        if rec[rb + 8] == 1: prev_rite = 0
+        var nrb = false
+        if full == 255:
+            nrb = rec[rb + 10] == 1 or prev_rite > (left >> 16) or prev_rite > (lx >> 16)
+        _aaa_trap_row_gray(o, rec[rb], left, rite, if lx > 0: lx else: 0, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
+        if full == 255: prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
+        rb = rb + 11
+        i = i + 1
+    _aaa_flush(o)
+    o
+
 # reason: SFNT selector/size scalars and Skia's quarter-pixel index are the
 # font-table domain; consumed by text_layout/font_renderer.spl.
 # @allow(primitive_api)
@@ -3814,28 +4098,58 @@ pub fn sfnt_gray_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option
     val width = frame[0]
     val height = frame[1]
     val x0 = frame[2]
-    val stride = width + 2
-    val cells = _area_cells(outline.slo_commands, scale, x0 as f64 - phase, outline.slo_raster_top, stride, height, 1)
+    # A quarter phase is a sub-sample shift at one sample per pixel, so each
+    # phase is its own fill (the LCD phase-0 memo does not carry over). The
+    # walk itself only translates: the first phase drawn records its
+    # trapezoid rows and the other phases replay them shifted.
+    val key = outline.slo_key
+    var mask: [i64] = []
+    var known = false
+    if val Some(rec) = _gray_aaa_recs.get(key):
+        known = true
+        if rec[0] > 0:
+            val shift = (phase_q - rec[4]) * 16384 - (x0 - rec[5]) * 65536
+            val irl = (rec[1] + shift) >> 16
+            val irr = (rec[2] + shift + 65535) >> 16
+            val irw = irr - irl
+            # Same blitter as a direct fill: a small path takes the mask plane.
+            if not (irw <= 32 and ((irw + 3) / 4 * 4) * rec[3] <= 1024):
+                mask = _gray_aaa_replay(rec, shift, width, height, irl, irr)
+    if mask.len() == 0:
+        if known:
+            mask = _lcd_aaa_mask(outline.slo_commands, scale, phase, x0, 0.0 - outline.slo_raster_top, width, height, 1, [])
+        else:
+            var rec: [i64] = [0; 6 + 11 * (height * 12 + 8)]
+            rec[0] = -1
+            rec[4] = phase_q
+            rec[5] = x0
+            mask = _lcd_aaa_mask(outline.slo_commands, scale, phase, x0, 0.0 - outline.slo_raster_top, width, height, 1, rec)
+            val used = if rec[0] > 0: 6 + 11 * rec[0] else: 1
+            var keep: [i64] = [0; used]
+            if used > 1: keep.write_span(rec, 0, 0, used)
+            else: keep[0] = -1
+            if _gray_aaa_recs.len() >= 512 or _gray_aaa_rec_slots + used > _GRAY_AAA_REC_SLOT_BUDGET:
+                _gray_aaa_recs = {}
+                _gray_aaa_rec_slots = 0
+            _gray_aaa_rec_slots = _gray_aaa_rec_slots + used
+            _gray_aaa_recs[key] = keep
+    val stride = width + 32
+    # Ink lies inside the path's sample bounds (mask[4]..mask[5]).
+    val lo = if mask[4] > 0: mask[4] else: 0
+    val hi = if mask[5] < width: mask[5] else: width
     var gray: [u8] = [0u8; width * height]
-    var y: i64 = 0
-    while y < height:
-        var acc = 0.0
-        var x: i64 = 0
-        val row_at = y * stride
-        val gi = y * width
-        # A zero cell leaves `acc`, so the pixel keeps the previous value.
-        var v: u8 = 0u8
-        while x < width:
-            val cell = cells[row_at + x]
-            if cell != 0.0:
-                acc = acc + cell
-                var cov = if acc < 0.0: 0.0 - acc else: acc
-                if cov > 1.0: cov = 1.0
-                v = (cov * 255.0 + 0.5) as u8
-            if v != 0u8:
-                gray[gi + x] = v
-            x = x + 1
-        y = y + 1
+    # One span per row: a per-pixel copy was a fifth of the cold cell on the
+    # interpreter lane (mask values are 0..255).
+    val span = hi - lo
+    if span > 0:
+        var m = mask[7] + lo
+        var gi = lo
+        var y: i64 = 0
+        while y < height:
+            gray.write_span(mask, gi, m, span)
+            m = m + stride
+            gi = gi + width
+            y = y + 1
     Some(SfntLcdGlyph(
         slg_width: width, slg_height: height, slg_advance: 0,
         slg_bearing_x: x0, slg_bearing_y: outline.slo_bearing_y,

@@ -1,0 +1,170 @@
+"""
+## Purpose and audience
+Purpose: Pin how an `<svg>`'s fractional used size and a `vertical-align:
+middle` atomic interact with the rest of layout, against Chrome 159 at k=4 and
+k=1: max-height clamping, border and padding, a `display:block` svg feeding the
+block cursor, middle boxes with margins or taller than the line, an auto width
+derived from a fractional height through the viewBox ratio, the half-px
+rounding rule at k=1, a middle box beside a top-aligned one, and a floated svg
+feeding the float context, and a min/max clamp that drops the fraction
+(the viewBox then scales to the clamped box). Companion of
+`svg_fractional_size_and_middle_4x_chrome159_spec` (the base cases) and
+`float_fractional_height_clear_chrome159_spec`.
+Audience: web renderer replaced-element layout and inline vertical-align.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window 400 CSS
+px wide, Liberation Sans 16px/1.5. Each case is its own 60px block. Rows /
+columns are the device rows / columns whose pixel is exactly the colour, on a
+CSS column / row scaled by k. Every expectation is Chrome's measured value.
+
+Red on base 8b2da8a67a1 (k=4 unless noted): bordered svg rect 252..331 /
+101..260 and line 240..369; block svg 480..559 / 0..159 and next block at 560;
+height-derived width 1222..1269 / 89..280 (k=1 columns 22..69); 20.5px svg
+1440..1519 (k=1 360..379); 12.5px svg top 1702; middle beside top 1928..2011;
+floated svg 2160..2239 / 0..159 and clear at 2240.
+"""
+
+"""
+Traceability: REQ-WEB-SVG-FRACTIONAL-SIZE-001 — an inline svg keeps its fractional used size and its vertical-align position at device scale.
+"""
+# @tag: unit, browser_engine, device_scale, layout, svg, float, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 720
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:60px}}</style></head><body><div class=\"b\"><div style=\"background:#ffe0e0\">ab <svg width=\"40\" height=\"20.75\" style=\"max-height:20px\"><rect width=\"100\" height=\"100\" fill=\"#ff0000\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0ffe0\">ab <svg width=\"40.5\" height=\"20.3\" style=\"border:1px solid #00aa00;padding:2px\"><rect width=\"100\" height=\"100\" fill=\"#00ff00\"></rect></svg> cd</div></div><div class=\"b\"><svg width=\"40.5\" height=\"20.3\" style=\"display:block\"><rect width=\"100\" height=\"100\" fill=\"#0000ff\"></rect></svg><div style=\"height:5px;background:#000088\"></div></div><div class=\"b\"><div style=\"background:#ffe0ff\">ab <span style=\"display:inline-block;width:40px;height:20px;margin:3px 0 5px;background:#ff00ff;vertical-align:middle\"></span> cd</div></div><div class=\"b\"><div style=\"background:#e0ffff\">ab <span style=\"display:inline-block;width:40px;height:41px;background:#00c0c0;vertical-align:middle\"></span> cd</div></div><div class=\"b\"><div style=\"background:#ffffe0\">ab <svg height=\"12.25\" viewBox=\"0 0 4 1\"><rect width=\"4\" height=\"1\" fill=\"#ffa000\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#eeeeee\">ab <svg width=\"40\" height=\"20.5\"><rect width=\"100\" height=\"100\" fill=\"#777777\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#dddddd\">ab <svg width=\"40\" style=\"height:12.5px\"><rect width=\"100\" height=\"100\" fill=\"#444444\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#ccddee\">ab <svg width=\"40\" height=\"21\" style=\"vertical-align:middle\"><rect width=\"100\" height=\"100\" fill=\"#112233\"></rect></svg> <svg width=\"30\" height=\"41\" style=\"vertical-align:top\"><rect width=\"100\" height=\"100\" fill=\"#332211\"></rect></svg></div></div><div class=\"b\"><svg width=\"40.5\" height=\"20.3\" style=\"float:left\"><rect width=\"100\" height=\"100\" fill=\"#aa5500\"></rect></svg><div style=\"clear:both;height:5px;background:#bb6600\"></div></div><div class=\"b\"><div style=\"background:#f0e0e0\">ab <svg width=\"40\" viewBox=\"0 0 2 1\" style=\"height:20.75px;max-height:20px\"><rect width=\"2\" height=\"1\" fill=\"#c81010\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0f0e0\">ab <svg width=\"50\" viewBox=\"0 0 3 1\" style=\"max-height:16px\"><rect width=\"3\" height=\"1\" fill=\"#10c810\"></rect></svg> cd</div></div></body></html>"
+
+var g_px4: [u32] = []
+var g_px1: [u32] = []
+
+fn _px(k: i32) -> [u32]:
+    if k == 4:
+        if g_px4.len() == 0:
+            g_px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        return g_px4
+    if g_px1.len() == 0:
+        g_px1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+    g_px1
+
+# "first..last" device rows on CSS column css_x whose pixel is exactly rgb.
+fn _rows(k: i32, css_x: i32, rgb: u32) -> text:
+    val px = _px(k)
+    val w = CSS_W * k
+    val x = css_x * k
+    var first = -1
+    var last = -1
+    var y = 0
+    while y < CSS_H * k:
+        if (px[y * w + x] & 0xFFFFFFu32) == rgb:
+            if first < 0:
+                first = y
+            last = y
+        y = y + 1
+    "{first}..{last}"
+
+# "first..last" device columns on CSS row css_y whose pixel is exactly rgb.
+fn _cols(k: i32, css_y: i32, rgb: u32) -> text:
+    val px = _px(k)
+    val w = CSS_W * k
+    val y = css_y * k
+    var first = -1
+    var last = -1
+    var x = 0
+    while x < w:
+        if (px[y * w + x] & 0xFFFFFFu32) == rgb:
+            if first < 0:
+                first = x
+            last = x
+        x = x + 1
+    "{first}..{last}"
+
+describe "An svg's fractional size and a middle box meet clamps, borders, the block cursor and floats (Chrome 159)":
+    it "AC-1: max-height at the whole px clamps the fraction away (height 20.75, max-height 20px)":
+        expect(_rows(4, 40, 0xFF0000u32)).to_equal("0..79")
+        expect(_rows(4, 250, 0xFFE0E0u32)).to_equal("0..105")
+        expect(_rows(1, 40, 0xFF0000u32)).to_equal("0..19")
+        expect(_rows(1, 250, 0xFFE0E0u32)).to_equal("0..26")
+
+    it "AC-2: a border and padding move the 40.5 x 20.3 content box, not its fractions":
+        expect(_rows(4, 40, 0x00FF00u32)).to_equal("252..332")
+        expect(_cols(4, 70, 0x00FF00u32)).to_equal("101..262")
+        expect(_rows(4, 40, 0x00AA00u32)).to_equal("240..344")
+        expect(_cols(4, 70, 0x00AA00u32)).to_equal("89..274")
+        expect(_rows(4, 250, 0xE0FFE0u32)).to_equal("240..370")
+        expect(_rows(1, 40, 0x00FF00u32)).to_equal("63..82")
+        expect(_cols(1, 70, 0x00FF00u32)).to_equal("25..65")
+        expect(_rows(1, 40, 0x00AA00u32)).to_equal("60..85")
+        expect(_cols(1, 70, 0x00AA00u32)).to_equal("22..68")
+        expect(_rows(1, 250, 0xE0FFE0u32)).to_equal("60..92")
+
+    it "AC-3: a display:block svg hands its fraction to the block cursor (next block on device row 561)":
+        expect(_rows(4, 20, 0x0000FFu32)).to_equal("480..560")
+        expect(_cols(4, 130, 0x0000FFu32)).to_equal("0..161")
+        expect(_rows(4, 20, 0x000088u32)).to_equal("561..580")
+        expect(_rows(1, 20, 0x0000FFu32)).to_equal("120..139")
+        expect(_cols(1, 130, 0x0000FFu32)).to_equal("0..40")
+        expect(_rows(1, 20, 0x000088u32)).to_equal("140..144")
+
+    it "AC-4: a middle box with margins, and one taller than the line":
+        expect(_rows(4, 40, 0xFF00FFu32)).to_equal("732..811")
+        expect(_rows(4, 250, 0xFFE0FFu32)).to_equal("720..831")
+        expect(_rows(4, 40, 0x00C0C0u32)).to_equal("960..1123")
+        expect(_rows(4, 250, 0xE0FFFFu32)).to_equal("960..1123")
+        expect(_rows(1, 40, 0xFF00FFu32)).to_equal("183..202")
+        expect(_rows(1, 250, 0xFFE0FFu32)).to_equal("180..207")
+        expect(_rows(1, 40, 0x00C0C0u32)).to_equal("240..280")
+        expect(_rows(1, 250, 0xE0FFFFu32)).to_equal("240..280")
+
+    it "AC-5: an auto width follows the exact height through the viewBox ratio (12.25 x 4 = 49)":
+        expect(_rows(4, 40, 0xFFA000u32)).to_equal("1221..1269")
+        expect(_cols(4, 310, 0xFFA000u32)).to_equal("89..284")
+        expect(_rows(4, 250, 0xFFFFE0u32)).to_equal("1200..1295")
+        expect(_rows(1, 40, 0xFFA000u32)).to_equal("305..316")
+        expect(_cols(1, 310, 0xFFA000u32)).to_equal("22..70")
+        expect(_rows(1, 250, 0xFFFFE0u32)).to_equal("300..323")
+
+    it "AC-6: half a px: 20.5px above the strut paints 21 rows at k=1, 12.5px below it 12":
+        expect(_rows(4, 40, 0x777777u32)).to_equal("1440..1521")
+        expect(_rows(4, 250, 0xEEEEEEu32)).to_equal("1440..1547")
+        expect(_rows(4, 40, 0x444444u32)).to_equal("1700..1749")
+        expect(_rows(4, 250, 0xDDDDDDu32)).to_equal("1680..1775")
+        expect(_rows(1, 40, 0x777777u32)).to_equal("360..380")
+        expect(_rows(1, 250, 0xEEEEEEu32)).to_equal("360..387")
+        expect(_rows(1, 40, 0x444444u32)).to_equal("425..436")
+        expect(_rows(1, 250, 0xDDDDDDu32)).to_equal("420..443")
+
+    it "AC-7: a middle box beside a top-aligned one centres on the device baseline":
+        expect(_rows(4, 40, 0x112233u32)).to_equal("1931..2014")
+        expect(_rows(4, 80, 0x332211u32)).to_equal("1920..2083")
+        expect(_rows(4, 250, 0xCCDDEEu32)).to_equal("1920..2083")
+        expect(_rows(1, 40, 0x112233u32)).to_equal("482..502")
+        expect(_rows(1, 80, 0x332211u32)).to_equal("480..520")
+        expect(_rows(1, 250, 0xCCDDEEu32)).to_equal("480..520")
+
+    it "AC-8: a floated svg hands its fraction to the float context (clear on device row 2241)":
+        expect(_rows(4, 20, 0xAA5500u32)).to_equal("2160..2240")
+        expect(_cols(4, 550, 0xAA5500u32)).to_equal("0..161")
+        expect(_rows(4, 20, 0xBB6600u32)).to_equal("2241..2260")
+        expect(_rows(1, 20, 0xAA5500u32)).to_equal("540..559")
+        expect(_cols(1, 550, 0xAA5500u32)).to_equal("0..40")
+        expect(_rows(1, 20, 0xBB6600u32)).to_equal("560..564")
+
+    it "AC-9: a clamped size scales the viewBox to the clamp (max-height 20px over 20.75px; max-height 16px over a 16.656px ratio)":
+        expect(_rows(4, 40, 0xC81010u32)).to_equal("2400..2479")
+        expect(_cols(4, 610, 0xC81010u32)).to_equal("89..248")
+        expect(_rows(4, 250, 0xF0E0E0u32)).to_equal("2400..2505")
+        expect(_rows(4, 40, 0x10C810u32)).to_equal("2646..2709")
+        expect(_cols(4, 670, 0x10C810u32)).to_equal("93..284")
+        expect(_rows(4, 250, 0xE0F0E0u32)).to_equal("2640..2735")
+        expect(_rows(1, 40, 0xC81010u32)).to_equal("600..619")
+        expect(_cols(1, 610, 0xC81010u32)).to_equal("22..61")
+        expect(_rows(1, 250, 0xF0E0E0u32)).to_equal("600..626")
+        expect(_rows(1, 40, 0x10C810u32)).to_equal("661..676")
+        expect(_cols(1, 670, 0x10C810u32)).to_equal("23..70")
+        expect(_rows(1, 250, 0xE0F0E0u32)).to_equal("660..683")

@@ -1,0 +1,31 @@
+# std.spec's own wrappers (`skip_on_linux`, `test`, `example`, ...) declare
+# spec-DSL words and call `it` from inside the framework; the "a module's own
+# function beats the DSL word" rule must not apply to the framework itself.
+# Bug: doc/08_tracking/bug/seed_same_name_fn_binding_2026-11-27.md (review).
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+fn run_fixture() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=interpreter " + bin +
+        " run test/01_unit/compiler/pipeline/fixtures/spec_wrapper_dsl_fixture.spl 2>&1"
+    process_run("sh", ["-c", cmd]).0
+
+describe "spec-DSL caller gate exempts std.spec":
+    # @manual scenario evidence
+    it "runs a skip_on_linux wrapper case as an example":
+        # @req REQ-SSPEC-UNIT
+        step("Run the wrapper fixture on the interpreter")
+        val out = run_fixture()
+        expect(out).to_contain("SPEC FILE VERDICT:")
+        expect(out.contains("outside an it block")).to_equal(false)
+        # On Linux "a" is skipped; elsewhere it runs and fails on purpose.
+        if is_linux():
+            expect(out.contains("executed=0")).to_equal(false)
+            expect(out).to_contain("failed=0")
+        else:
+            expect(out).to_contain("executed=2")
+            expect(out).to_contain("failed=1")

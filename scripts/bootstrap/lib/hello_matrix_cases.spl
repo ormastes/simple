@@ -1,0 +1,185 @@
+# Matrix.lane / Matrix.interpreter / Matrix.prior_native_inputs of the
+# phase-3 Hello matrix twin. Receipts and failure reasons follow
+# hello-sanity-matrix.py.
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_copy, is_file, is_dir, time_now_monotonic_ms}
+use scripts.bootstrap.lib.hello_matrix_policy.{SdnField, EnvPair, sdn_s, sdn_i, sdn_b, sdn_set, sdn_parse_raw, env_put, env_value, has_text, interpreter_argv, interpreter_env, EXPECTED_STDOUT, FIXTURES}
+use scripts.bootstrap.lib.hello_matrix_quote.{shlex_split}
+use scripts.bootstrap.lib.hello_matrix_run.{MatrixContext, RunResult, digest, join, write_sdn, mkdir_exclusive, elapsed_text}
+use scripts.bootstrap.lib.hello_matrix_lane.{compile, check_executable, replay, shared_provider, pending_cleanup, _run, _fields, _q, _leaf}
+
+# Reuse options shared by every lane (args.reuse_*).
+pub struct ReuseOptions:
+    build: text
+    shared: text
+    interpreter: text
+
+pub fn _get(f: [EnvPair], key: text) -> text:
+    env_value(f, key)
+
+pub fn _same_runtime(ctx: MatrixContext, path: text) -> bool:
+    val f = _fields(path)
+    if f.len() != ctx.runtime_hashes.len(): return false
+    for p in ctx.runtime_hashes:
+        if _get(f, p.key) != _q(p.value): return false
+    true
+
+pub fn prior_native_inputs(ctx: MatrixContext, reuse: ReuseOptions, name: text) -> Result<text, text>:
+    val prior = if name == "shared-library" and reuse.shared != "": reuse.shared else: reuse.build
+    val fields = _fields(join(prior, "identity.sdn"))
+    if _get(fields, "compiler_sha256") != _q(ctx.sha) or _get(fields, "phase") != "{ctx.phase}":
+        return Err("prior matrix compiler/phase identity mismatch")
+    val route = if _get(fields, "compile_route") == "": _q("coordinator") else: _get(fields, "compile_route")
+    if route != _q(ctx.compile_route):
+        return Err("prior matrix compilation route mismatch")
+    if not _same_runtime(ctx, join(prior, "runtime-inputs.sdn")):
+        return Err("prior matrix runtime authority mismatch")
+    for fixture in ["single.spl", "main.spl", "provider.spl"]:
+        if _get(fields, fixture.replace(".", "_") + "_sha256") != _q(digest(join(join(ctx.root, FIXTURES), fixture))):
+            return Err("prior matrix fixture identity mismatch")
+    var argv_file = join(join(prior, name), "provider.argv.txt")
+    if not file_exists(argv_file): argv_file = join(join(prior, name), "provider-object.argv.txt")
+    val command = match shlex_split(file_read(argv_file)):
+        case Ok(c): c
+        case Err(e): return Err(e)
+    val actual_route = if has_text(command, "--entry"): "coordinator" else: "positional"
+    if actual_route != ctx.compile_route:
+        return Err("prior matrix compiler argv route mismatch")
+    var backend = ""
+    for i in 0..(command.len() - 1):
+        if command[i] == "--backend" and backend == "": backend = command[i + 1]
+    if backend != ctx.backend:
+        return Err("prior matrix backend mismatch")
+    if name != "shared-library" or reuse.shared != "":
+        val jobs = if name != "shared-library": ["provider", "main-object", "capture-hosted-link"] else: ["provider-object", "link-provider-shared", "main-object", "capture-hosted-link"]
+        for job in jobs:
+            val jf = _fields(join(join(prior, name), job + ".sdn"))
+            if _get(jf, "exit_code") != "0" or _get(jf, "compiler_sha256") != _q(ctx.sha):
+                return Err("prior native compilation did not pass with exact producer")
+            for stream in ["stdout", "stderr"]:
+                if _get(jf, stream + "_sha256") != _q(digest(join(join(prior, name), job + "." + stream))):
+                    return Err("prior native compilation stream identity mismatch")
+    Ok(join(prior, name))
+
+pub fn _lane_body(ctx: MatrixContext, reuse: ReuseOptions, name: text, lane: text) -> Result<text, text>:
+    val w = ctx.windows
+    val output = join(lane, if w: "hello.exe" else: "hello")
+    val fx = FIXTURES
+    if name == "one-source":
+        val e = compile(ctx, lane, "single", join(fx, "single.spl"), output, [], [])
+        if e != "": return Err(e)
+    else:
+        var prior = ""
+        if reuse.build != "" or (name == "shared-library" and reuse.shared != ""):
+            prior = match prior_native_inputs(ctx, reuse, name):
+                case Ok(p): p
+                case Err(e): return Err(e)
+        val reusable_shared = name == "shared-library" and reuse.shared != ""
+        val provider_leaf = if name == "two-objects": (if w: "provider.obj" else: "provider.o") elif name == "static-library": (if w: "hello.lib" else: "libhello.a") else: (if w: "hello.dll" else: "libhello.so")
+        var provider = join(lane, provider_leaf)
+        val flag = if name == "two-objects": "--emit-object" elif name == "static-library": "--emit-archive" else: "--emit-shared"
+        var main = join(lane, if w: "main.obj" else: "main.o")
+        val reuse_inputs = prior != "" and (name != "shared-library" or reusable_shared)
+        if reusable_shared:
+            file_copy(join(prior, provider_leaf), provider)
+            if w:
+                for suffix in ["hello.lib", "hello.dll.a", "libhello.dll.a"]:
+                    if file_exists(join(prior, suffix)): file_copy(join(prior, suffix), join(lane, suffix))
+        elif name == "shared-library":
+            val provider_object = join(lane, if w: "provider.obj" else: "provider.o")
+            var e = compile(ctx, lane, "provider-object", join(fx, "provider.spl"), provider_object, ["--emit-object"], [])
+            if e == "": e = shared_provider(ctx, lane, provider_object, provider)
+            if e != "": return Err(e)
+        elif prior != "":
+            provider = join(prior, provider_leaf)
+        else:
+            val e = compile(ctx, lane, "provider", join(fx, "provider.spl"), provider, [flag], [])
+            if e != "": return Err(e)
+        if reuse_inputs:
+            main = join(prior, _leaf(main))
+        else:
+            val e = compile(ctx, lane, "main-object", join(fx, "main.spl"), main, ["--emit-object"], [])
+            if e != "": return Err(e)
+        var link_provider = provider
+        if w and name == "shared-library":
+            var imports: [text] = []
+            for leaf in ["hello.lib", "hello.dll.a", "libhello.dll.a"]:
+                if is_file(join(lane, leaf)): imports.push(join(lane, leaf))
+            if imports.len() != 1:
+                return Err("expected one genuine DLL import library from compiler shared emission")
+            link_provider = imports[0]
+        var capture = join(lane, "link.tar")
+        var captured_output = join(lane, if w: "capture-program.exe" else: "capture-program")
+        var capture_env = [EnvPair(key: "SIMPLE_LINK_OBJECTS", value: link_provider), EnvPair(key: if w: "LLD_REPRODUCE" else: "SIMPLE_NATIVE_LINK_REPRODUCE_PATH", value: capture)]
+        if reuse_inputs:
+            capture = join(prior, "link.tar")
+            captured_output = join(prior, _leaf(captured_output))
+        else:
+            val e = compile(ctx, lane, "capture-hosted-link", join(fx, "main.spl"), captured_output, [], capture_env)
+            if e != "": return Err(e)
+        val e = replay(ctx, lane, main, link_provider, capture, output, captured_output)
+        if e != "": return Err(e)
+        if name == "shared-library":
+            val needed = _run(ctx, lane, "dynamic-needed", if w: ["llvm-readobj", "--coff-imports", output] else: ["readelf", "-d", output], [], "", 0)
+            if not needed.ok: return Err(needed.error)
+            val missing = if w: not needed.stdout.lower().contains("hello.dll") else: (not needed.stdout.contains("NEEDED") or not needed.stdout.contains("libhello.so"))
+            if missing: return Err("shared executable lacks provider dynamic dependency")
+            val symbols = _run(ctx, lane, "provider-symbols", if w: ["llvm-readobj", "--coff-exports", provider] else: ["nm", "-D", "--defined-only", provider], [], "", 0)
+            if not symbols.ok: return Err(symbols.error)
+            if not symbols.stdout.contains("hello_value"): return Err("shared provider export hello_value is missing")
+    val e = check_executable(ctx, lane, output)
+    if e != "": return Err(e)
+    Ok(digest(output))
+
+# Matrix.lane: always writes result.sdn (or <name>.failure.sdn) and RESULT.
+pub fn run_lane(ctx: MatrixContext, reuse: ReuseOptions, name: text) -> text:
+    val lane = join(ctx.out, name)
+    val started = time_now_monotonic_ms()
+    var values = [sdn_i("phase", ctx.phase), sdn_s("compiler_sha256", ctx.sha), sdn_s("compile_route", ctx.compile_route), sdn_s("status", "FAIL")]
+    var reason = ""
+    match mkdir_exclusive(lane):
+        case Err(e): reason = e
+        case Ok(_):
+            match _lane_body(ctx, reuse, name, lane):
+                case Ok(sha):
+                    values = sdn_set(values, sdn_s("status", "PASS"))
+                    values = sdn_set(values, sdn_s("executable_sha256", sha))
+                case Err(e): reason = e
+    if reason != "":
+        values = sdn_set(values, sdn_s("reason", reason))
+        if pending_cleanup(): values = sdn_set(values, sdn_s("status", "RUNNING_FINALIZATION"))
+    values = sdn_set(values, SdnField(key: "elapsed_seconds", kind: "i", value: elapsed_text(time_now_monotonic_ms() - started)))
+    if is_dir(lane): write_sdn(ctx, join(lane, "result.sdn"), values)
+    else: write_sdn(ctx, join(ctx.out, name + ".failure.sdn"), values)
+    var status = "FAIL"
+    for f in values:
+        if f.key == "status": status = f.value
+    print("RESULT " + name + " " + status + " " + reason)
+    status
+
+pub fn run_interpreter(ctx: MatrixContext, reuse: ReuseOptions) -> text:
+    val lane = join(ctx.out, "interpreter")
+    mkdir_exclusive(lane)
+    var values = [sdn_i("phase", ctx.phase), sdn_s("compiler_sha256", ctx.sha), sdn_s("status", "FAIL")]
+    var status = "FAIL"
+    var reason = ""
+    if reuse.interpreter != "":
+        reason = "prior interpreter evidence reuse is not supported by the phase-3 twin"
+    else:
+        val env = interpreter_env(ctx.phase)
+        var mode: [SdnField] = []
+        for p in env: mode.push(sdn_s(p.key, p.value))
+        write_sdn(ctx, join(lane, "interpreter-mode.sdn"), mode)
+        val r = _run(ctx, lane, "run", interpreter_argv(ctx.phase, ctx.compiler, ctx.windows), env, "", 30)
+        if not r.ok: reason = r.error
+        elif r.stdout != EXPECTED_STDOUT or r.stderr != "": reason = "interpreter stdout/stderr differs from exact Hello oracle"
+        else: status = "PASS"
+    if status != "PASS":
+        values = sdn_set(values, sdn_s("reason", reason))
+        val log = join(lane, "run.log")
+        if file_exists(log) and file_read(log).contains("unknown command 'run'"):
+            status = "UNSUPPORTED"
+            values = sdn_set(values, sdn_s("reason", "exact phase compiler has no run/interpreter command; no fallback owner"))
+    values = sdn_set(values, sdn_s("status", status))
+    write_sdn(ctx, join(lane, "result.sdn"), values)
+    print("RESULT interpreter " + status)
+    status

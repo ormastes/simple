@@ -750,21 +750,34 @@ SplArray *rt_linux_group_parent_acquire_profiled_at_v3(const char *path,uint64_t
  * finish kills the engine group it made: no half-filled group stays alive.
  * The engine group takes no limit of its own; it stays under the delegated
  * root's. Its owner finds it by this fixed name and retires it. */
+/* A requested move that did not happen is reported as the leader's exit code:
+ * the residue then dies with the helper group, so a leader that exited 0 would
+ * otherwise look like a clean start. Both values are above every wait status
+ * (0..255) and inside the observation's exit bound. PERMISSION is EACCES, EPERM
+ * or EROFS on making the engine group or on writing a member into it. */
+#define RT_LG_RESIDUE_MOVE_FAILED_EXIT 1000
+#define RT_LG_RESIDUE_MOVE_PERMISSION_EXIT 1001
+static int rt_lg_residue_refusal(int error) {
+    return error == EACCES || error == EPERM || error == EROFS ?
+        RT_LG_RESIDUE_MOVE_PERMISSION_EXIT : RT_LG_RESIDUE_MOVE_FAILED_EXIT;
+}
+
+/* 0 when every member was moved, else one of the two exit codes above. */
 static int rt_lg_move_residue_v3(RtLinuxGroup *owner) {
     static char members[65536];
     char name[80], events[256], *line, *end;
-    int engine = -1, frozen = 0, moved = 0;
-    if (!rt_lg_delegation.active || !owner->stream_mode || owner->stream_identity[0] == 0) return 0;
+    int engine = -1, frozen = 0, refusal = RT_LG_RESIDUE_MOVE_FAILED_EXIT;
+    if (!rt_lg_delegation.active || !owner->stream_mode || owner->stream_identity[0] == 0) return refusal;
     snprintf(name, sizeof(name), "simple-engine-%s", owner->stream_identity);
-    if (!rt_lg_write_at(owner->group_fd, "cgroup.freeze", "1")) return 0;
+    if (!rt_lg_write_at(owner->group_fd, "cgroup.freeze", "1")) return refusal;
     for (int attempt = 0; attempt < 200 && !frozen; attempt++) {
-        if (!rt_lg_read_at(owner->group_fd, "cgroup.events", events, sizeof(events))) return 0;
+        if (!rt_lg_read_at(owner->group_fd, "cgroup.events", events, sizeof(events))) return refusal;
         frozen = strstr(events, "frozen 1\n") != NULL;
         if (!frozen) (void)poll(NULL, 0, 5);
     }
-    if (!frozen) return 0;
+    if (!frozen) return refusal;
     /* Never adopt an existing directory: its membership is not this group's. */
-    if (mkdirat(rt_lg_delegation.root_fd, name, 0700) != 0) return 0;
+    if (mkdirat(rt_lg_delegation.root_fd, name, 0700) != 0) return rt_lg_residue_refusal(errno);
     engine = openat(rt_lg_delegation.root_fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (engine < 0) goto undo;
     members[0] = 0;
@@ -776,18 +789,21 @@ static int rt_lg_move_residue_v3(RtLinuxGroup *owner) {
         *end++ = 0;
         if (!rt_lg_number(line, &member) || member <= 0) goto undo;
         /* A member that is already gone has nothing to move. */
-        if (!rt_lg_write_at(engine, "cgroup.procs", line) && errno != ESRCH) goto undo;
+        if (!rt_lg_write_at(engine, "cgroup.procs", line) && errno != ESRCH) {
+            refusal = rt_lg_residue_refusal(errno);
+            goto undo;
+        }
     }
     members[0] = 0;
     if (rt_lg_read_at(owner->group_fd, "cgroup.procs", members, sizeof(members)) || errno != ENODATA) goto undo;
-    moved = 1;
+    refusal = 0;
 undo:
-    if (!moved) {
+    if (refusal) {
         if (engine >= 0) (void)rt_lg_write_at(engine, "cgroup.kill", "1");
         (void)unlinkat(rt_lg_delegation.root_fd, name, AT_REMOVEDIR);
     }
     if (engine >= 0) close(engine);
-    return moved;
+    return refusal;
 }
 
 static int rt_lg_poll(RtLinuxGroup *owner) {
@@ -824,7 +840,7 @@ static int rt_lg_poll(RtLinuxGroup *owner) {
     if (owner->leader_reaped && populated && owner->residue_move && !owner->residue_done) {
         owner->residue_done = 1;
         if (owner->exit_code == 0 && !owner->timed_out && !owner->cancelled && !owner->kill_pending)
-            (void)rt_lg_move_residue_v3(owner);
+            owner->exit_code = rt_lg_move_residue_v3(owner);
         if (!rt_lg_populated(owner->group_fd, &populated)) return EIO;
     }
     /* Retire remaining descendants even when resource telemetry fails.

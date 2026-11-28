@@ -2100,6 +2100,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_once_new",
     "rt_option_map",
     "rt_option_float_bits",
+    "rt_option_float_pack",
+    "rt_option_float_tag",
     "rt_package_chmod",
     "rt_package_copy_file",
     "rt_package_create_symlink",
@@ -2614,6 +2616,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_opt_i64_to_string",
     "rt_i64_to_hex",
     "rt_opt_value_to_string",
+    "rt_opt_f64_value_to_string",
     "rt_file_delete", // -> rt_file_remove
     "rt_neighbor_load",
     "rt_print",   // -> rt_print_value
@@ -2744,6 +2747,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_run_bounded_environment_tuple_v1",
     "rt_process_run_bounded_admitted_tuple_v1",
     "rt_process_spawn_async_environment_v1",
+    "rt_process_spawn_async_env_v1",
     "rt_pty_close",
     "rt_pty_exit_code_v1",
     "rt_pty_hangup",

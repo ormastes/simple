@@ -321,6 +321,46 @@ fn qualified_method_owner_matches(owner: &str, candidate: &str, method: &str) ->
 // same builtin-collision name set for its own defense-in-depth guard (bug
 // simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision) instead
 // of maintaining a second, potentially-drifting list.
+/// A bare (erased-receiver) method call naming a builtin that exists ONLY on
+/// `text`: `x.byte_len()` / `x.char_count()`.
+///
+/// Name-based resolution below is receiver-type-blind and unit-wide: a bare
+/// `byte_len` binds to the one `<module>__byte_len` declared anywhere in the
+/// unit, or to the bare project import-map entry, whether or not the calling
+/// module imported it. A free `fn byte_len(data: [u8])` in an unrelated module
+/// therefore captured `fn f(x): x.byte_len()` for a text `x`
+/// (seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28;
+/// the LLVM lane's half of this is `is_text_builtin_method_call` in
+/// pipeline/native_project/mangle.rs).
+pub(crate) fn is_bare_text_only_builtin_method(method: &str, arg_count: usize) -> bool {
+    arg_count == 0 && matches!(method, "byte_len" | "char_count")
+}
+
+/// True when the calling module's use map carries `method` itself, or a type
+/// that owns a method of that name (`ByteBuf.byte_len`).
+pub(crate) fn use_map_brings_method_into_scope(
+    use_map: &std::collections::HashMap<String, String>,
+    method: &str,
+) -> bool {
+    use_map
+        .keys()
+        .any(|raw| raw == method || raw.strip_suffix(method).is_some_and(|owner| owner.ends_with('.')))
+}
+
+/// True when the calling module defines `method` (a free function or a type's
+/// method) or its use map brings it into scope. A function that merely exists
+/// elsewhere in the unit is not in scope for an erased receiver.
+fn bare_method_is_in_scope<M: Module>(ctx: &InstrContext<'_, M>, method: &str) -> bool {
+    if use_map_brings_method_into_scope(ctx.use_map, method) {
+        return true;
+    }
+    let defined_here =
+        |id: FuncId| crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, id).0 != Linkage::Import;
+    ctx.func_ids.get(method).is_some_and(|id| defined_here(*id))
+        || resolve_unique_module_qualified_func(ctx, method).is_some_and(defined_here)
+        || ctx.func_ids.iter_method_suffix(method).any(|(_, id)| defined_here(*id))
+}
+
 pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) -> bool {
     matches!(
         (method, arg_count),
@@ -1093,6 +1133,18 @@ pub(crate) fn compile_method_call_static<M: Module>(
             return Ok(());
         }
     }
+    // Text-only builtins on an erased receiver: the builtin wins unless the
+    // calling module itself defines or imports a same-named function/method.
+    if is_bare_text_only_builtin_method(erasure_stripped, args.len()) && !bare_method_is_in_scope(ctx, erasure_stripped)
+    {
+        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, erasure_stripped, args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result);
+                ctx.vreg_types.insert(*d, TypeId::I64);
+            }
+            return Ok(());
+        }
+    }
     let receiver_ty = ctx.vreg_types.get(&receiver).copied();
     let allow_qualified_builtin = matches!(
         receiver_ty,
@@ -1738,6 +1790,38 @@ pub(crate) fn compile_method_call_static<M: Module>(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28
+    /// (Cranelift half): a bare erased-receiver `.byte_len()` / `.char_count()`
+    /// takes the text builtin unless the calling module brought a same-named
+    /// function or an owning type into scope.
+    #[test]
+    fn bare_text_only_builtin_method_needs_an_in_scope_user_definition() {
+        assert!(is_bare_text_only_builtin_method("byte_len", 0));
+        assert!(is_bare_text_only_builtin_method("char_count", 0));
+        // A call with arguments is not the text builtin.
+        assert!(!is_bare_text_only_builtin_method("byte_len", 1));
+        // Qualified names carry receiver-type evidence and take other paths.
+        assert!(!is_bare_text_only_builtin_method("str.byte_len", 0));
+        assert!(!is_bare_text_only_builtin_method("ByteBuf.byte_len", 0));
+        // `len` is shared with collections and has its own routing.
+        assert!(!is_bare_text_only_builtin_method("len", 0));
+
+        let mut use_map: HashMap<String, String> = HashMap::new();
+        // Importing something else from the defining module is not scope.
+        use_map.insert("lb_read_u8".to_string(), "os__kernel__loader__byte_utils__lb_read_u8".to_string());
+        use_map.insert("sub_byte_len".to_string(), "lib__x__sub_byte_len".to_string());
+        assert!(!use_map_brings_method_into_scope(&use_map, "byte_len"));
+
+        let mut free_fn = use_map.clone();
+        free_fn.insert("byte_len".to_string(), "os__kernel__loader__byte_utils__byte_len".to_string());
+        assert!(use_map_brings_method_into_scope(&free_fn, "byte_len"));
+        assert!(!use_map_brings_method_into_scope(&free_fn, "char_count"));
+
+        let mut owned = use_map.clone();
+        owned.insert("ByteBuf.byte_len".to_string(), "lib__common__buf__ByteBuf.byte_len".to_string());
+        assert!(use_map_brings_method_into_scope(&owned, "byte_len"));
+    }
 
     #[test]
     fn qualified_receiver_matches_complete_owner_not_trait_substring() {

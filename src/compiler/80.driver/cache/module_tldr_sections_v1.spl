@@ -57,6 +57,37 @@ fn _tldr_member_header_v1(line: text) -> bool:
     val t = line.trim()
     val d = _tldr_strip_pub_v1(t)
     d.starts_with("fn ") or d.starts_with("me ") or d.starts_with("static fn ")
+
+# Net `(` minus `)` on one line, outside `"` literals and `#` comments. A
+# member header whose parameter list spans lines has a positive delta.
+# reason: a signed paren count over raw source text has no domain type
+@allow(primitive_api)
+pub fn module_tldr_paren_delta_v1(line: text) -> i64:
+    var depth = 0
+    var in_str = false
+    var escaped = false
+    var i = 0
+    val n = line.byte_len()
+    while i < n:
+        val b = line.byte_at(i)
+        if in_str:
+            if escaped:
+                escaped = false
+            elif b == 92:
+                escaped = true
+            elif b == 34:
+                in_str = false
+        elif b == 34:
+            in_str = true
+        elif b == 35:
+            return depth
+        elif b == 40:
+            depth = depth + 1
+        elif b == 41:
+            depth = depth - 1
+        i = i + 1
+    depth
+
 fn _tldr_block_end_v1(lines: [text], start: i64) -> i64:
     var end = start + 1
     while end < lines.len() and (lines[end] == "" or lines[end].starts_with(" ") or
@@ -83,8 +114,18 @@ pub fn module_tldr_block_at_v1(lines: [text], index: i64, kind: text) -> text:
     var block: [text] = [head]
     var j = start + 1
     while j <= last:
-        if kind != "impl" or _tldr_member_header_v1(lines[j]):
+        if kind != "impl":
             block.push(lines[j])
+        elif _tldr_member_header_v1(lines[j]):
+            # Keep the continuation lines of a multi-line parameter list, or
+            # the stub reads `me f(` followed by the next member and fails
+            # to parse (the summary surface then falls back to a full parse).
+            block.push(lines[j])
+            var depth = module_tldr_paren_delta_v1(lines[j])
+            while depth > 0 and j + 1 <= last:
+                j = j + 1
+                block.push(lines[j])
+                depth = depth + module_tldr_paren_delta_v1(lines[j])
         j = j + 1
     block.join("\n")
 
@@ -150,4 +191,5 @@ pub fn module_tldr_sections_parse_v1(text: text) -> ([text], i64):
     (entries, pos)
 
 export module_tldr_section_kind_v1, module_tldr_sections_of_source_v1, module_tldr_block_at_v1
+export module_tldr_paren_delta_v1
 export module_tldr_sections_render_v1, module_tldr_sections_parse_v1

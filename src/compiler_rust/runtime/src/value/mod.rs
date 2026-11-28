@@ -134,7 +134,8 @@ pub use channels::RuntimeChannel;
 
 // Re-export collection SFFI functions
 pub use collections::{
-    rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_extend_i64, rt_array_free, rt_array_free_deep,
+    rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_extend_i64, rt_array_fill_span, rt_array_free,
+    rt_array_free_deep,
     rt_array_first, rt_array_get, rt_array_get_i64_raw, rt_array_get_text, rt_array_header_ptr, rt_array_len,
     rt_array_len_safe, rt_arm_array_get_byte_u32, rt_arm_array_len_u32, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw,
     rt_array_reserve, rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
@@ -260,6 +261,8 @@ pub use objects::{
     rt_option_map,
     rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some,
     rt_option_float_bits,
+    rt_option_float_pack,
+    rt_option_float_tag,
     rt_unwrap_or_self, rt_unwrap_or_trap, rt_unwrap_or_value, rt_expect_or_trap, rt_heap_ref_wellformed,
 };
 
@@ -378,7 +381,7 @@ pub use sffi::{
     rt_stdout_write, rt_value_format_string, rt_value_to_string, rt_opt_bool_to_string, rt_opt_f64_to_string,
     rt_opt_i64_to_string,
     rt_i64_to_hex,
-    rt_opt_value_to_string,
+    rt_opt_value_to_string, rt_opt_f64_value_to_string,
 };
 
 // Re-export log SFFI functions

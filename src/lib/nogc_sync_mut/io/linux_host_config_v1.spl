@@ -1,0 +1,129 @@
+# Orchestrator Host unit configuration (owner decision 2026-11-28).
+#
+# The Host unit carries no `SIMPLE_*` environment entry: the broker rule
+# (`linux_fresh_epoch_broker_environment_v1`) refuses every such key. What the unit used to hand over
+# through `EnvironmentFile`/`Environment` is one flat SDN object in a root-owned file at a fixed path.
+# The reader takes no path, key or default from the process environment and fails closed with a typed
+# refusal. Record: doc/08_tracking/bug/container_fresh_route_helper_home_2026-11-27.md
+use std.common.sdn.strict_v1.sdn_parse_strict_bytes_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.nogc_sync_mut.io.file_ops.file_exists
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
+
+pub val LINUX_HOST_CONFIG_PATH_V1 = "/etc/simple-host/host.sdn"
+
+val LINUX_HOST_CONFIG_KEYS_V1 = ["provisionInputDir", "provisionDispatchRoot", "provisionController",
+    "provisionKeyStore", "provisionOutputStore", "provisionApprover", "attachReady", "attachAttach",
+    "attachInvoke", "attachDetach", "serviceInstallFixtureParent", "caretSshConfig", "caretSshContext",
+    "caretSshServer", "caretSshProfile", "caretSshRequest"]
+
+pub enum LinuxHostConfigErrorV1:
+    Path
+    Missing
+    DirectoryUntrusted(text)
+    Unreadable(text)
+    OwnerOrMode
+    Unparsable(text)
+    Shape
+    UnknownKey(text)
+    Value(text)
+
+pub struct LinuxHostConfigV1:
+    entries: Dict<text, text>
+
+# @allow(primitive_api) reason: stable refusal code text for logs and spec verdicts
+pub fn linux_host_config_error_code_v1(error: LinuxHostConfigErrorV1) -> text:
+    match error:
+        case LinuxHostConfigErrorV1.Path: "host-config-path"
+        case LinuxHostConfigErrorV1.Missing: "host-config-missing"
+        case LinuxHostConfigErrorV1.DirectoryUntrusted(code): "host-config-directory-untrusted:" + code
+        case LinuxHostConfigErrorV1.Unreadable(code): "host-config-unreadable:" + code
+        case LinuxHostConfigErrorV1.OwnerOrMode: "host-config-owner-or-mode"
+        case LinuxHostConfigErrorV1.Unparsable(code): "host-config-unparsable:" + code
+        case LinuxHostConfigErrorV1.Shape: "host-config-shape"
+        case LinuxHostConfigErrorV1.UnknownKey(key): "host-config-unknown-key:" + key
+        case LinuxHostConfigErrorV1.Value(key): "host-config-value:" + key
+
+# A key the file does not carry reads as empty; the caller decides whether that blocks it.
+# @allow(primitive_api) reason: key is one of the closed SDN key names; the value is path or name text
+pub fn linux_host_config_text_v1(config: LinuxHostConfigV1, key: text) -> text:
+    if config.entries.contains_key(key): config.entries[key] else: ""
+
+# The custody decision over what the retained descriptor reported and the bytes read through it:
+# regular file, owner `required_uid` (0 on the installed route), mode exactly 0644 or 0444, one flat
+# object of known keys with non-empty single-line text values.
+# @allow(primitive_api) reason: owner, mode and bytes are the retained descriptor's own observation
+pub fn linux_host_config_decide_v1(owner_uid: u32, required_uid: u32, mode: u32,
+        bytes: [u8]) -> Result<LinuxHostConfigV1, LinuxHostConfigErrorV1>:
+    if owner_uid != required_uid or (mode != 33188u32 and mode != 33060u32):
+        return Err(LinuxHostConfigErrorV1.OwnerOrMode)
+    val parsed = sdn_parse_strict_bytes_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 2, max_nodes: 64))
+    if parsed.is_err(): return Err(LinuxHostConfigErrorV1.Unparsable(parsed.unwrap_err().code))
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields):
+            var entries: Dict<text, text> = {}
+            for key in fields.keys():
+                if not LINUX_HOST_CONFIG_KEYS_V1.contains(key): return Err(LinuxHostConfigErrorV1.UnknownKey(key))
+                match fields[key]:
+                    case SdnValue.String(value):
+                        if (value == "" or value.byte_len() > 4096 or value.contains("\n") or
+                                value.contains("\u0000")):
+                            return Err(LinuxHostConfigErrorV1.Value(key))
+                        entries[key] = value
+                    case _: return Err(LinuxHostConfigErrorV1.Value(key))
+            Ok(LinuxHostConfigV1(entries: entries))
+        case _: Err(LinuxHostConfigErrorV1.Shape)
+
+fn host_config_read_v1(path: text, root_only: bool) -> Result<LinuxHostConfigV1, LinuxHostConfigErrorV1>:
+    val cut = path.last_index_of("/")
+    if (cut < 1 or not path.starts_with("/") or path.ends_with("/") or path.contains("//") or
+            path.contains("/./") or path.contains("/../") or path.contains("\u0000") or path.byte_len() > 4096):
+        return Err(LinuxHostConfigErrorV1.Path)
+    if not file_exists(path): return Err(LinuxHostConfigErrorV1.Missing)
+    val opened = retained_directory_open_trusted_v1(path.substring(0, cut))
+    if opened.is_err(): return Err(LinuxHostConfigErrorV1.DirectoryUntrusted(opened.unwrap_err()))
+    var directory = opened.unwrap()
+    val decided = host_config_read_held_v1(directory, path.substring(cut + 1), root_only)
+    val closed = directory.close()
+    if decided.is_ok() and not closed: return Err(LinuxHostConfigErrorV1.Unreadable("directory-close"))
+    decided
+
+fn host_config_read_held_v1(directory: RetainedDirectoryOwnerV1, leaf: text,
+        root_only: bool) -> Result<LinuxHostConfigV1, LinuxHostConfigErrorV1>:
+    val held = directory.open_file(leaf, 65536u64)
+    if held.is_err(): return Err(LinuxHostConfigErrorV1.Unreadable(held.unwrap_err()))
+    var file = held.unwrap()
+    val metadata = file.security_metadata_v1()
+    if metadata.is_err():
+        val dropped = file.close()
+        return Err(LinuxHostConfigErrorV1.Unreadable(metadata.unwrap_err()))
+    val read = file.read_all_bounded_v1(65536)
+    val closed = file.close()
+    if read.is_err(): return Err(LinuxHostConfigErrorV1.Unreadable(read.unwrap_err()))
+    if not closed: return Err(LinuxHostConfigErrorV1.Unreadable("file-close"))
+    val required = if root_only: 0u32 else: metadata.unwrap().effective_uid
+    linux_host_config_decide_v1(metadata.unwrap().owner_uid, required, metadata.unwrap().mode, read.unwrap())
+
+# The installed route: the fixed path, owned by root. No environment fallback.
+pub fn linux_host_config_load_v1() -> Result<LinuxHostConfigV1, LinuxHostConfigErrorV1>:
+    host_config_read_v1(LINUX_HOST_CONFIG_PATH_V1, true)
+
+# A path a test lane injects: the file must be owned by the caller's own effective uid and otherwise
+# passes the same mode, parse and key rules.
+# @allow(primitive_api) reason: one canonical absolute path chosen by the test lane
+pub fn linux_host_config_load_injected_v1(path: text) -> Result<LinuxHostConfigV1, LinuxHostConfigErrorV1>:
+    host_config_read_v1(path, false)
+
+# Unit custody: the Host unit's `Environment` property must name no `SIMPLE_*` key. (`EnvironmentFile`
+# content is not in that property; the broker rule refuses it when the broker observes its environ.)
+# @allow(primitive_api) reason: entries are systemd's `Environment` assignments as the manager reports them
+pub fn linux_host_unit_environment_custody_v1(entries: [text]) -> Result<(), text>:
+    for entry in entries:
+        if entry.starts_with("SIMPLE_"):
+            return Err("fresh-epoch-host-unit-environment-unsupported:" + entry.split("=")[0])
+    Ok(())
+
+export LINUX_HOST_CONFIG_PATH_V1, LinuxHostConfigErrorV1, LinuxHostConfigV1, linux_host_config_error_code_v1,
+    linux_host_config_text_v1, linux_host_config_decide_v1, linux_host_config_load_v1,
+    linux_host_config_load_injected_v1, linux_host_unit_environment_custody_v1

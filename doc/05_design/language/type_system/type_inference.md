@@ -1,5 +1,12 @@
 # Type Inference Design
 
+> **Superseded for direction (2026-11-27):** this note describes the early
+> `simple-type` crate and its "Current State" section is historical. The
+> approved rules (inference tiers, implicit generics, `any` only in `unsafe`
+> and script mode) are in
+> [no_any_inference_generics.md](no_any_inference_generics.md); the staged
+> work is in `doc/03_plan/language/type_system/no_any_inference_plan.md`.
+
 ## Goals
 - Hindley–Milner-style local inference for lets/functions.
 - Support pattern matching, arrays, tuples, calls, and builtins (`send`/`recv`/`reply`/`join`/`spawn`).

@@ -1132,6 +1132,38 @@ fn eval_ordered_cmp_on_values(
     result
 }
 
+/// Every name `eval_bdd_builtin` intercepts. Kept beside the match so the
+/// caller-shadowing gate in `evaluate_call` (a module's own same-named
+/// function beats the DSL) stays a cheap set probe on the call hot path;
+/// `bdd_dsl_names_cover_builtin_arms` pins the two together.
+const BDD_DSL_NAMES: &[&str] = &[
+    "describe", "context", "feature", "scenario", "it", "slow_it", "limited_it", "step", "planned",
+    "pending", "pending_it", "skip", "skip_it", "skip_context", "expect", "shared_examples",
+    "it_behaves_like", "include_examples", "after_all", "before_each", "after_each", "context_def",
+    "given_lazy", "given", "let_lazy", "get_let", "has_let", "resource", "get_resource", "has_resource",
+    "cleanup_resource", "cleanup_all_resources", "be_true", "be_false", "contain", "include", "eq",
+    "to_equal", "to_be", "to_contain", "to_include", "be_close_to", "assert_true", "assert_false",
+    "assert_nil", "assert_not_nil", "assert_equal", "assert_eq", "assert_not_equal", "assert_ne",
+    "assert_contains", "fail", "fail_assertion", "fail_test", "__bdd_register_group",
+    "__bdd_get_all_groups",
+];
+
+pub(crate) fn is_bdd_dsl_name(name: &str) -> bool {
+    static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| BDD_DSL_NAMES.iter().copied().collect()).contains(name)
+}
+
+/// True for a module of the spec framework itself (`std.spec`: a
+/// `src/lib/**/spec.spl` facade or anything under `src/lib/**/spec/`). Its
+/// wrappers (`test`, `example`, `specify`, `skip_on_*`) declare DSL words AND
+/// call `it`/`describe` expecting the DSL, so the caller-shadowing gate must
+/// not apply to it.
+pub(crate) fn is_spec_framework_owner(owner: &str) -> bool {
+    let owner = format!("/{}", owner.replace('\\', "/"));
+    is_std_spec_owner(&owner)
+        || (owner.contains("/lib/") && (owner.ends_with("/spec.spl") || owner.contains("/spec/")))
+}
+
 pub(super) fn eval_bdd_builtin(
     name: &str,
     args: &[Argument],
@@ -2905,5 +2937,28 @@ mod totals_tests {
         assert!(matches!(rt_bdd_failed_total(&[]).unwrap(), Value::Int(1)));
         clear_bdd_state();
         assert!(matches!(rt_bdd_executed_total(&[]).unwrap(), Value::Int(0)));
+    }
+}
+
+#[cfg(test)]
+mod dsl_name_tests {
+    /// `BDD_DSL_NAMES` gates the caller-shadowing rule; every quoted arm name
+    /// of `eval_bdd_builtin` must be listed, or a spec's own same-named
+    /// function would be intercepted again (seed_same_name_fn_binding_2026-11-27).
+    #[test]
+    fn bdd_dsl_names_cover_builtin_arms() {
+        let src = include_str!("bdd.rs");
+        let start = src.find("pub(super) fn eval_bdd_builtin(").unwrap();
+        let body = &src[start..];
+        let body = &body[..body.find("        _ => Ok(None),").unwrap()];
+        for line in body.lines() {
+            let t = line.trim_start();
+            if line.starts_with("        \"") && t.contains("=>") {
+                let arms = &t[..t.find("=>").unwrap()];
+                for name in arms.split('|').map(|s| s.trim().trim_matches('"')) {
+                    assert!(super::is_bdd_dsl_name(name), "BDD arm `{name}` missing from BDD_DSL_NAMES");
+                }
+            }
+        }
     }
 }

@@ -14,7 +14,8 @@ use compiler.hir.hir_types.{HirTypeKind}
 # Effect inference methods are in inference_effects.spl.
 
 use compiler.hir.hir.*
-use compiler.hir.hir_definitions.{HirBlock, HirStmt, HirParam, HirConst}
+use compiler.hir.hir_definitions.{HirBlock, HirStmt, HirParam, HirConst, HirClass, HirImpl, HirTrait}
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use compiler.frontend.core.lexer.*
 use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
@@ -32,6 +33,45 @@ fn option_pattern_shown(variant: text) -> text:
     if variant == "None":
         return "None"
     "{variant}(_)"
+
+fn hm_canonical_owner_text(raw: text) -> text:
+    if raw == "":
+        return ""
+    hir_symbol_owner_module(raw)
+
+fn hm_module_owner_name(module: HirModule) -> text:
+    val by_name = hm_canonical_owner_text(module.name)
+    if by_name != "":
+        return by_name
+    hm_canonical_owner_text(module.path)
+
+fn hm_symbol_explicit_owner(sym: HirSymbol) -> text:
+    if sym.declaration_owner_v1 != "":
+        return hm_canonical_owner_text(sym.declaration_owner_v1)
+    if val dm = sym.defining_module:
+        if dm != "":
+            return hm_canonical_owner_text(dm)
+    ""
+
+fn hm_module_symbol_owner(module: HirModule, sym_id: i64, fallback_owner: text) -> text:
+    if val sym = module.symbols.get_symbol_raw(sym_id):
+        val explicit_owner = hm_symbol_explicit_owner(sym)
+        if explicit_owner != "":
+            return explicit_owner
+    fallback_owner
+
+fn hm_module_symbol_name(module: HirModule, sym_id: i64) -> text:
+    if val sym = module.symbols.get_symbol_raw(sym_id):
+        return sym.name
+    ""
+
+fn hm_trait_method_names(hir_trait: HirTrait) -> [text]:
+    var names: [text] = []
+    for m in hir_trait.methods:
+        names = names.push(m.name)
+    for d in hir_trait.defaults:
+        names = names.push(d.name)
+    names
 
 impl HmInferContext:
     # =========================================================================
@@ -645,9 +685,24 @@ impl HmInferContext:
             case Ref(inner, _):
                 self.infer_option_pattern(variant, payload, inner, span)
             # Named scrutinees may be user enums whose variants happen to be
-            # named Some or None. HIR does not yet expose enum ownership to the
-            # inference context, so retain those until ownership is explicit.
-            case Named(_, _) | Any | Error:
+            # named Some or None. Structs/classes and Result can never be Option,
+            # while a Named("Option", [inner]) resolves to Optional(inner).
+            case Named(sym, type_args):
+                val sym_name = if self.symbol_names.contains_key(sym.id): self.symbol_names[sym.id] else: ""
+                if sym_name == "Option":
+                    if type_args.len() == 1:
+                        return self.infer_optional_pattern_payload(variant, payload, type_args[0], span)
+                    return Ok(())
+                if self.symbol_kinds.contains_key(sym.id):
+                    val sym_kind = self.symbol_kinds[sym.id]
+                    if sym_kind == "struct" or sym_kind == "class" or (sym_kind == "enum" and sym_name == "Result"):
+                        val shown_name = if sym_name != "": sym_name else: "{resolved.kind}"
+                        return Err(TypeInferError.Other(
+                            "error[SPL-PAT-001]: pattern `{option_pattern_shown(variant)}` expects Option<T>, found '{shown_name}' (Option pattern '{variant}' requires an optional scrutinee)\n  fix: the value is never nil -- bind it directly (`val j = x`) or remove the pattern; if absence is intended, make the subject `T?` and use `if val j = x:`",
+                            span
+                        ))
+                Ok(())
+            case Any | Error:
                 Ok(())
             case _:
                 Err(TypeInferError.Other(
@@ -665,6 +720,21 @@ impl HmInferContext:
                 self.bind_mono(name, expected)
                 Ok(())
             case Literal(expr):
+                match expr.kind:
+                    case NilLit:
+                        val resolved_nil_expected = self.resolve(expected)
+                        val is_named_option = match resolved_nil_expected.kind:
+                            case Named(sym, _):
+                                self.symbol_names.contains_key(sym.id) and self.symbol_names[sym.id] == "Option"
+                            case _: false
+                        if not is_named_option and self.nil_compare_is_non_optional(resolved_nil_expected):
+                            val nil_type_name = self.nil_compare_type_name(resolved_nil_expected)
+                            val nil_kind_word = self.nil_compare_kind_word(resolved_nil_expected)
+                            return Err(TypeInferError.Other(
+                                "[E-TYPE-NIL-COMPARE] `case nil:` on a {nil_kind_word} declared non-optional (`{nil_type_name}`) in function '{self.current_fn_name}': the declared type excludes nil, and under staged-native codegen `case nil:` can never match; if nil can arrive here, declare the subject `{nil_type_name}?`, otherwise drop the `case nil:` arm",
+                                pattern.span
+                            ))
+                    case _: pass
                 match self.infer_expr(expr, InferMode.Check(expected)):
                     case Ok(_): Ok(())
                     case Err(e): Err(e)
@@ -684,10 +754,13 @@ impl HmInferContext:
             case Enum(owner, variant, payload):
                 # Unqualified builtin Option patterns arrive with an Error
                 # owner because Optional is a type shape rather than a named
-                # user enum. Keep named owners untouched so a user enum may
-                # legitimately define Some/None variants.
+                # user enum; explicit `Option.Some` / `Option.None` arrive with
+                # Named("Option", _). Keep other named owners untouched so a
+                # user enum may legitimately define Some/None variants.
                 val builtin_option_shape = match owner.kind:
                     case Error | Optional(_): variant == "Some" or variant == "None"
+                    case Named(owner_sym, _):
+                        (variant == "Some" or variant == "None") and self.symbol_names.contains_key(owner_sym.id) and self.symbol_names[owner_sym.id] == "Option"
                     case _: false
                 if builtin_option_shape:
                     self.infer_option_pattern(variant, payload, expected, pattern.span)
@@ -847,7 +920,9 @@ impl HmInferContext:
         self.trait_solver = TraitSolver.create_with_symbols(module.symbols)
         self.collect_traits_from_module(module)
         self.collect_impls_from_module(module)
+        self.register_module_type_methods(module)
         self._register_module_symbols(module)
+        self._bind_imported_function_symbols(module)
         self.module_env_vars = self.env_free_var_ids()
         self.module_env_vars_ready = true
 
@@ -901,8 +976,116 @@ impl HmInferContext:
         # After all type inference, solve dimension constraints
         self.check_dim_constraints()
 
+    me register_type_method_owner(owner: text, type_name: text, method_name: text):
+        if type_name == "" or method_name == "":
+            return
+        self.declared_type_methods["{owner}::{type_name}::{method_name}"] = true
+
+    me register_named_type_method_v1(type_name: text, method_name: text):
+        self.register_type_method_owner("", type_name, method_name)
+
+    fn has_declared_type_method(owner: text, type_name: text, method_name: text) -> bool:
+        if type_name == "" or method_name == "":
+            return false
+        val exact_key = "{owner}::{type_name}::{method_name}"
+        if self.declared_type_methods.contains_key(exact_key):
+            return self.declared_type_methods[exact_key]
+        false
+
+    me _record_module_owner_aliases(module: HirModule):
+        val by_name = hm_canonical_owner_text(module.name)
+        val by_path = hm_canonical_owner_text(module.path)
+        if by_name != "":
+            self.loaded_owner_modules[by_name] = true
+        if by_path != "":
+            self.loaded_owner_modules[by_path] = true
+
+    me _register_owner_method_aliases(module: HirModule, sym_id: i64, type_name: text, method_name: text):
+        val mod_owner = hm_module_owner_name(module)
+        val owner = hm_module_symbol_owner(module, sym_id, mod_owner)
+        self.register_type_method_owner(owner, type_name, method_name)
+        val by_path = hm_canonical_owner_text(module.path)
+        if by_path != "" and by_path != owner:
+            var explicit_owner = ""
+            if val sym = module.symbols.get_symbol_raw(sym_id):
+                explicit_owner = hm_symbol_explicit_owner(sym)
+            if explicit_owner == "":
+                self.register_type_method_owner(by_path, type_name, method_name)
+
+    me register_module_type_methods_with_traits(module: HirModule, project_trait_methods: Dict<text, [text]>):
+        self._record_module_owner_aliases(module)
+        val mod_owner = hm_module_owner_name(module)
+        val by_path = hm_canonical_owner_text(module.path)
+        var local_trait_methods: Dict<text, [text]> = {}
+        for hir_trait in module.traits.values():
+            val t_names = hm_trait_method_names(hir_trait)
+            val t_owner = hm_module_symbol_owner(module, hir_trait.symbol.id, mod_owner)
+            local_trait_methods["{t_owner}::{hir_trait.name}"] = t_names
+            if by_path != "" and by_path != t_owner:
+                var t_explicit = ""
+                if val t_sym = module.symbols.get_symbol_raw(hir_trait.symbol.id):
+                    t_explicit = hm_symbol_explicit_owner(t_sym)
+                if t_explicit == "":
+                    local_trait_methods["{by_path}::{hir_trait.name}"] = t_names
+        for cls in module.classes.values():
+            for method_name in cls.methods.keys():
+                self._register_owner_method_aliases(module, cls.symbol.id, cls.name, method_name)
+        for hir_impl in module.impls:
+            match hir_impl.type_.kind:
+                case Named(sym_id, _):
+                    var target_name = hm_module_symbol_name(module, sym_id.id)
+                    if target_name == "" and self.symbol_names.contains_key(sym_id.id):
+                        target_name = self.symbol_names[sym_id.id]
+                    if target_name != "":
+                        for method_name in hir_impl.methods.keys():
+                            self._register_owner_method_aliases(module, sym_id.id, target_name, method_name)
+                        if hir_impl.has_trait_:
+                            match hir_impl.trait_.kind:
+                                case Named(trait_sym_id, _):
+                                    val trait_name = hm_module_symbol_name(module, trait_sym_id.id)
+                                    val trait_owner = hm_module_symbol_owner(module, trait_sym_id.id, mod_owner)
+                                    val trait_key = "{trait_owner}::{trait_name}"
+                                    if local_trait_methods.contains_key(trait_key):
+                                        for tm_name in local_trait_methods[trait_key]:
+                                            self._register_owner_method_aliases(module, sym_id.id, target_name, tm_name)
+                                    if project_trait_methods.contains_key(trait_key):
+                                        for tm_name in project_trait_methods[trait_key]:
+                                            self._register_owner_method_aliases(module, sym_id.id, target_name, tm_name)
+                                case _: pass
+                case _: pass
+
+    me register_module_type_methods(module: HirModule):
+        val empty_traits: Dict<text, [text]> = {}
+        self.register_module_type_methods_with_traits(module, empty_traits)
+
+    me register_project_type_methods(project_modules: Dict<text, HirModule>):
+        var project_trait_methods: Dict<text, [text]> = {}
+        for pm in project_modules.values():
+            val pm_owner = hm_module_owner_name(pm)
+            val pm_path_owner = hm_canonical_owner_text(pm.path)
+            for hir_trait in pm.traits.values():
+                val t_names = hm_trait_method_names(hir_trait)
+                val t_owner = hm_module_symbol_owner(pm, hir_trait.symbol.id, pm_owner)
+                project_trait_methods["{t_owner}::{hir_trait.name}"] = t_names
+                if pm_path_owner != "" and pm_path_owner != t_owner:
+                    var explicit_owner = ""
+                    if val sym = pm.symbols.get_symbol_raw(hir_trait.symbol.id):
+                        explicit_owner = hm_symbol_explicit_owner(sym)
+                    if explicit_owner == "":
+                        project_trait_methods["{pm_path_owner}::{hir_trait.name}"] = t_names
+        for pm in project_modules.values():
+            self.register_module_type_methods_with_traits(pm, project_trait_methods)
+
     me _register_module_symbols(module: HirModule):
         """Register all symbol mutability info from a module for narrowing analysis."""
+        val mod_owner = hm_module_owner_name(module)
+        var local_type_ids: Dict<i64, bool> = {}
+        for s in module.structs.values():
+            local_type_ids[s.symbol.id] = true
+        for c in module.classes.values():
+            local_type_ids[c.symbol.id] = true
+        for e in module.enums.values():
+            local_type_ids[e.symbol.id] = true
         for dk_9 in module.symbols.symbols.keys():
             val sym: HirSymbol = module.symbols.symbols[dk_9]
             self.register_symbol_mutability(sym.id.id, sym.is_mutable)
@@ -913,3 +1096,40 @@ impl HmInferContext:
                 case SymbolKind.Class: "class"
                 case SymbolKind.Enum: "enum"
                 case _: "type"
+            val explicit_owner = hm_symbol_explicit_owner(sym)
+            val effective_owner = if explicit_owner != "": explicit_owner else: mod_owner
+            self.symbol_owners[sym.id.id] = effective_owner
+            val is_type_decl = (sym.kind == SymbolKind.Struct or sym.kind == SymbolKind.Class or sym.kind == SymbolKind.Enum)
+            if is_type_decl and not local_type_ids.contains_key(sym.id.id):
+                val owner_loaded = explicit_owner != "" and (explicit_owner == mod_owner or self.loaded_owner_modules.contains_key(explicit_owner))
+                if not owner_loaded:
+                    self.external_type_symbols[sym.id.id] = true
+                else:
+                    self.external_type_symbols[sym.id.id] = false
+            else:
+                self.external_type_symbols[sym.id.id] = false
+
+    me _bind_imported_function_symbols(module: HirModule):
+        # Cross-module argument checking (bug
+        # function_argument_types_unchecked_2026-09-01): the caller's symbol
+        # table carries every imported function's declared Function type (set
+        # from the module surface), but infer_module only forward-declared
+        # signatures for module.functions — the module's OWN functions — so a
+        # callee reached through a `use` bound to `undefined: <name>` and no
+        # argument check ran. Bind imported function symbols by their
+        # module-local SymbolId (the key a callee Var/NamedVar reads first, per
+        # lookup_local_or_name) so Check-mode argument inference sees the
+        # declared parameter types. Local functions are bound later by the
+        # forward-declare loop under their own ids and by name, so a local
+        # declaration still shadows an import. Generic imports keep type_ = nil
+        # (generic_param_count > 0) and stay unbound, exactly as before.
+        for sym_key in module.symbols.symbols.keys():
+            val sym: HirSymbol = module.symbols.symbols[sym_key]
+            if sym.kind == SymbolKind.Function and not module.functions.has(sym.id) and sym.generic_param_count == 0:
+                match sym.type_:
+                    case Some(declared):
+                        match declared.kind:
+                            case HirTypeKind.Function(_, _, _):
+                                self.bind_mono(sym.id.id.to_text(), declared)
+                            case _: pass
+                    case _: pass

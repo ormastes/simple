@@ -1,0 +1,73 @@
+# Purpose and audience: compiler engineers who own class identity across
+# flattened modules (interpreter lane).
+# @req REQ-SSPEC-UNIT
+# Tracks: interpreter_class_identity_no_scope_fallback_fail_open_2026_11_27
+"""
+# The no-scope fallback of class identity matching is fail-closed
+
+`qd` and `qe` each declare `class Gizmo`. A module that NEITHER declares
+NOR imports `Gizmo` cannot denote either class, so an owner-exact `Gizmo`
+instance must not match a bare `Gizmo` pattern there -- the match falls
+through to `case _`. Before the fix, `class_identity_matches` accepted the
+instance by its source name alone whenever the executing module's scope had
+no answer for the name (fail-open): the no-import driver printed
+`noimport d=3 e=4` instead of `noimport d=-9 e=-9`.
+
+Re-verification recipe (against a scratch seed build):
+
+    CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+    CARGO_TARGET_DIR=$PWD/build/p3cache/classident/cargo-target \
+      cargo build --release -p simple-driver          # in src/compiler_rust
+    SIMPLE_BIN=build/p3cache/classident/cargo-target/release/simple.exe \
+      bin/simple test \
+      test/01_unit/compiler/interpreter/same_name_class_no_scope_fallback_spec.spl
+
+RED before the fix (module_cache.rs `None => source == type_name`):
+the no-import case fails -- stdout shows `noimport d=3 e=4` instead of
+`noimport d=-9 e=-9` (the in-process owner cases and the positive import
+control already pass). GREEN after
+(`None => !class_name_is_shared(type_name) && source == type_name`).
+
+(SIMPLE_BIN must be a repo-relative path: on Windows the test runner
+canonicalizes SIMPLE_BINARY to an absolute path, which the process spawn
+layer then mangles; SIMPLE_BIN passes through verbatim.)
+
+The JIT lane is intentionally not asserted here: JIT match patterns do not
+check the owner yet (bug jit_pattern_same_name_class_identity_unchecked_2026_11_27).
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+use std.io_runtime.{file_exists}
+use test.fixtures.same_name_class.body.qd.{qd_make, qd_take}
+use test.fixtures.same_name_class.body.qe.{qe_make, qe_take}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    "bin/simple"
+
+fn run_fixture(mode: text, fixture: text) -> text:
+    val command = "SIMPLE_EXECUTION_MODE=" + mode + " " + simple_binary() + " run test/fixtures/same_name_class/body/" + fixture
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+describe "the class-identity no-scope fallback fails closed":
+    it "matches each owner's own Gizmo and rejects the other's in the test lane":
+        step("matches each owner's own Gizmo and rejects the other's in the test lane")
+        expect(qd_take(qd_make())).to_equal(103)
+        expect(qd_take(qe_make())).to_equal(-1)
+        expect(qe_take(qe_make())).to_equal(204)
+        expect(qe_take(qd_make())).to_equal(-1)
+
+    it "rejects an owner-exact instance by a bare pattern the module never imported (interpreter)":
+        step("rejects an owner-exact instance by a bare pattern the module never imported")
+        expect(run_fixture("interpret", "main_noimport_neg.spl")).to_contain("noimport d=-9 e=-9")
+
+    it "still binds an imported Gizmo pattern to its owner module (interpreter)":
+        step("still binds an imported Gizmo pattern to its owner module")
+        expect(run_fixture("interpret", "main_noimport_pos.spl")).to_contain("import d=3 e=-9")

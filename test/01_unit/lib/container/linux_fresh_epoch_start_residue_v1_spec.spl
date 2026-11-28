@@ -1,0 +1,183 @@
+# Epoch startup V1 asks for the leader-residue move on `start`, and the epoch owner retires that group at close.
+#
+# Why (doc/08_tracking/bug/container_fresh_route_start_helper_kills_conmon_2026-11-27.md, "Epoch startup V1"):
+# `linux_fresh_epoch_project_launch_v1` admits `start` from the caller's template. The engine forks the
+# container's monitor from that helper, so without the move the monitor dies with the helper group and every
+# later engine command fails. The request was left out until an owner retired the group; that owner is the
+# epoch admission's close, after its provider helper was collected.
+#
+# Executed here: the production epoch projection over DATA only, and the pure retirement reducer. The epoch
+# lifecycle and the admission close are source pins; the stateful owners cannot run under the seed (native
+# origin check), and nothing here proves a live guest.
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, GroupProcessStreamRequestV2,
+    group_process_child_argv_digest_v2, group_process_stream_template_encode_v3}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessCpuQuotaV3, GroupProcessBrokerBudgetV3,
+    GroupProcessStreamProfileV3, group_process_stream_profile_encode_v3, group_process_stream_profile_residue_words_v3,
+    GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3}
+use std.nogc_sync_mut.io.linux_fresh_epoch_launch_v1.{LinuxFreshEpochBrokerDataV1, linux_fresh_epoch_project_launch_v1,
+    linux_fresh_epoch_leader_residue_mode_v1}
+use std.nogc_sync_mut.container.machine_fresh_workload_engine_group_v3.{machine_fresh_engine_group_requested_v3,
+    machine_fresh_epoch_engine_group_decide_v1, machine_fresh_engine_group_forget_v3}
+use std.common.sdn.value.SdnValue
+
+fn er_profile_v1(provider: text) -> LinuxFreshEpochProfileV1:
+    LinuxFreshEpochProfileV1(fields: {"kind": SdnValue.String("linux-fresh-provider-epoch"), "version": SdnValue.Int(1),
+        "epochId": SdnValue.String("installed_epoch_1"), "machinePolicyDigest": SdnValue.String("a".repeat(64)),
+        "serviceName": SdnValue.String("simple-host"), "serviceUid": SdnValue.Int(20001), "serviceGid": SdnValue.Int(20001),
+        "subuidStart": SdnValue.Int(200000), "subuidCount": SdnValue.Int(65536),
+        "subgidStart": SdnValue.Int(200000), "subgidCount": SdnValue.Int(65536),
+        "hostUnit": SdnValue.String("simple-host.service"), "providerUnit": SdnValue.String("simple-podman.service"),
+        "providerSocketUnit": SdnValue.String("simple-podman.socket"),
+        "partitionCgroup": SdnValue.String("/simple.slice"), "delegatedCgroup": SdnValue.String("/simple.slice/epoch"),
+        "supervisorCgroup": SdnValue.String("/simple.slice/epoch/supervisor"),
+        "partitionCpuMillis": SdnValue.Int(6000), "partitionMemoryBytes": SdnValue.Int(6442450944),
+        "reservedCpuMillis": SdnValue.Int(1000), "reservedMemoryBytes": SdnValue.Int(1073741824),
+        "outsideCpuMillis": SdnValue.Int(1000), "outsideMemoryBytes": SdnValue.Int(1073741824),
+        "providerExecutable": SdnValue.String(provider), "providerExecutableSha256": SdnValue.String("b".repeat(64)),
+        "providerPolicyDigest": SdnValue.String("c".repeat(64)),
+        "graphRoot": SdnValue.String("/var/lib/simple-host/podman/graph"), "runRoot": SdnValue.String("/run/simple-host/podman"),
+        "staticRoot": SdnValue.String("/var/lib/simple-host/podman/graph/libpod"),
+        "endpointPath": SdnValue.String("/run/simple-host/podman/podman.sock"),
+        "storageDriver": SdnValue.String("vfs"), "cgroupManager": SdnValue.String("cgroupfs"),
+        "brokerExecutable": SdnValue.String("/opt/simple/bin/simple"), "brokerExecutableSha256": SdnValue.String("d".repeat(64))})
+
+# The caller's template: one engine operation and whatever residue mode the caller already carried.
+fn er_template_v1(args: [text], carried: text) -> GroupProcessStreamLaunchV2:
+    val request = GroupProcessStreamRequestV2(program: "/usr/bin/podman", producer_digest: "b".repeat(64), args: args,
+        environment: [], directory: "/", inputs: [], timeout_ms: 30000, broker_program: "/opt/simple/bin/simple",
+        broker_digest: "d".repeat(64), child_argv_digest: group_process_child_argv_digest_v2("/usr/bin/podman", args),
+        launch_deadline_unix_ms: 1)
+    val resources = GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(500, 50000, 100000),
+        broker: GroupProcessBrokerBudgetV3("/sys/fs/cgroup/simple.slice/epoch/supervisor", 11, 22, 7, "a".repeat(64),
+            1000000, 1000000, 1000, 1073741824, 1073741824), child_image_mode: "trusted-local-admin-image-fd-v1",
+        leader_residue_mode: carried)
+    GroupProcessStreamLaunchV2(root: "/run/simple-host/podman/launch-1", worker_id: "operation_1", generation: 7,
+        snapshot_digest: "e".repeat(64), cache_identity: "f".repeat(64), memory_limit_bytes: 134217728,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/simple.slice/epoch", transport_generation: 0,
+        profile_v3: Some(resources))
+
+fn er_project_v1(provider: text, args: [text], carried: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    linux_fresh_epoch_project_launch_v1(er_profile_v1(provider), LinuxFreshEpochBrokerDataV1(device: 11, inode: 22,
+        generation: 7, cpu_quota_us: 1000000, cpu_period_us: 1000000, memory_bytes: 1073741824), er_template_v1(args, carried))
+
+fn er_body_v1(source: text, anchor: text, stop_at: text) -> text:
+    val at = source.index_of(anchor)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of(stop_at)
+    if stop >= 0: tail.substring(0, stop) else: tail
+
+describe "Linux fresh epoch start residue V1":
+    it "asks for the move when the epoch's own command is the podman engine's start":
+        val projected = er_project_v1("/usr/bin/podman", ["start", "d".repeat(64)], "")
+        expect(projected.is_ok()).to_equal(true)
+        val launch = projected.unwrap()
+        val args = launch.request.args
+        expect(args[args.len() - 2]).to_equal("start")
+        expect(launch.request.program).to_equal("/usr/bin/podman")
+        step("The thirteenth profile word is present, and the owner's capture predicate sees the request")
+        val profile = launch.profile_v3.unwrap()
+        expect(profile.leader_residue_mode).to_equal(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3)
+        expect(group_process_stream_profile_residue_words_v3(profile)).to_equal([1])
+        expect(machine_fresh_engine_group_requested_v3(launch)).to_equal(true)
+        step("Binding the bound launch again yields the same bytes, so custody's validation still matches")
+        val again = linux_fresh_epoch_project_launch_v1(er_profile_v1("/usr/bin/podman"), LinuxFreshEpochBrokerDataV1(device: 11,
+            inode: 22, generation: 7, cpu_quota_us: 1000000, cpu_period_us: 1000000, memory_bytes: 1073741824), launch)
+        expect(again.is_ok()).to_equal(true)
+        expect(group_process_stream_template_encode_v3(again.unwrap()).unwrap()).to_equal(group_process_stream_template_encode_v3(launch).unwrap())
+
+    it "never asks for any other operation, whatever the caller's template carried":
+        val plain_start = er_project_v1("/usr/bin/podman", ["start", "d".repeat(64)], "").unwrap().profile_v3.unwrap()
+        for args in [["version"], ["info"], ["inspect", "d".repeat(64)], ["stop", "d".repeat(64)], ["rm", "d".repeat(64)],
+                ["exec", "d".repeat(64), "true"], ["images"]]:
+            val carried = er_project_v1("/usr/bin/podman", args, GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3)
+            expect(carried.is_ok()).to_equal(true)
+            val profile = carried.unwrap().profile_v3.unwrap()
+            expect(profile.leader_residue_mode).to_equal("")
+            expect(machine_fresh_engine_group_requested_v3(carried.unwrap())).to_equal(false)
+            step("Twelve runtime words and the wire profile of a template that never carried it")
+            expect(group_process_stream_profile_residue_words_v3(profile).len()).to_equal(0)
+            val plain = er_project_v1("/usr/bin/podman", args, "").unwrap().profile_v3.unwrap()
+            expect(group_process_stream_profile_encode_v3(profile)).to_equal(group_process_stream_profile_encode_v3(plain))
+            expect(group_process_stream_profile_encode_v3(profile) == group_process_stream_profile_encode_v3(plain_start)).to_equal(false)
+
+    it "keeps the base every workload and workspace helper is built on byte-identical":
+        step("The installed owner binds a never-spawned `version`; the workload projections set the mode themselves")
+        val base = er_project_v1("/usr/bin/podman", ["version"], "").unwrap().profile_v3.unwrap()
+        expect(base.leader_residue_mode).to_equal("")
+        var without = er_template_v1(["version"], "").profile_v3.unwrap()
+        without.broker = base.broker
+        without.helper_cpu = base.helper_cpu
+        expect(group_process_stream_profile_encode_v3(base)).to_equal(group_process_stream_profile_encode_v3(without))
+        val owner = file_read_text("src/lib/nogc_sync_mut/io/linux_installed_fresh_epoch_owner_v1.spl")
+        expect(owner.contains("request.args = [\"version\"] # DATA-only base projection; this is never spawned.")).to_equal(true)
+
+    it "asks only for the podman engine and only for start":
+        expect(linux_fresh_epoch_leader_residue_mode_v1("/usr/bin/podman", "start")).to_equal(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3)
+        expect(linux_fresh_epoch_leader_residue_mode_v1("/usr/local/bin/podman", "start")).to_equal(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3)
+        for provider in ["/usr/bin/docker", "/usr/bin/podman-remote", "/usr/bin/notpodman", "podman", ""]:
+            expect(linux_fresh_epoch_leader_residue_mode_v1(provider, "start")).to_equal("")
+        for operation in ["version", "info", "pull", "create", "exec", "inspect", "stop", "rm", "images", "restart", ""]:
+            expect(linux_fresh_epoch_leader_residue_mode_v1("/usr/bin/podman", operation)).to_equal("")
+        step("A profile whose provider is another engine projects start without the request")
+        val other = er_project_v1("/usr/bin/docker", ["start", "d".repeat(64)], GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3)
+        expect(other.is_ok()).to_equal(true)
+        expect(other.unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("")
+        step("One statement of the projection sets it")
+        val launch = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_epoch_launch_v1.spl")
+        expect(launch.split("leader_residue_mode: ").len()).to_equal(2)
+        expect(launch.contains("leader_residue_mode: linux_fresh_epoch_leader_residue_mode_v1(provider, operands[0])")).to_equal(true)
+
+    it "retires the epoch's engine group at close: nothing when never asked, refused while the helper is held":
+        val identity = "a".repeat(64)
+        expect(machine_fresh_epoch_engine_group_decide_v1("", true).unwrap().len()).to_equal(0)
+        expect(machine_fresh_epoch_engine_group_decide_v1("", false).unwrap().len()).to_equal(0)
+        val held = machine_fresh_epoch_engine_group_decide_v1(identity, false)
+        expect(held.is_err()).to_equal(true)
+        expect(held.unwrap_err()).to_equal("machine-fresh-epoch-engine-group-helper-active")
+        val names = machine_fresh_epoch_engine_group_decide_v1(identity, true)
+        expect(names.is_ok()).to_equal(true)
+        expect(names.unwrap()).to_equal(["simple-engine-" + identity])
+        val bad = machine_fresh_epoch_engine_group_decide_v1("not-a-digest", true)
+        expect(bad.is_err()).to_equal(true)
+        expect(bad.unwrap_err()).to_equal("machine-fresh-workload-engine-group-identity")
+        step("A retired group is forgotten once; a second retirement of the same name is refused")
+        expect(machine_fresh_engine_group_forget_v3([identity], "simple-engine-" + identity).unwrap().len()).to_equal(0)
+        val twice = machine_fresh_engine_group_forget_v3([], "simple-engine-" + identity)
+        expect(twice.is_err()).to_equal(true)
+        expect(twice.unwrap_err()).to_equal("machine-fresh-workload-engine-group-unrecorded")
+
+    it "records the group from the captured launch and closes only after it is retired":
+        val lifecycle = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_epoch_lifecycle_v1.spl")
+        val attach = er_body_v1(lifecycle, "    pub fn attach_process_v1(", "\n\n")
+        val record_at = attach.index_of("if machine_fresh_engine_group_requested_v3(process.launch):\n            fresh_epoch_lifecycle_states_v1[self.slot].engine_group = process.identity_digest")
+        expect(record_at > 0).to_equal(true)
+        step("Before the template check, so a helper whose image is refused still has its group retired")
+        expect(attach.index_of("val matched = fresh_epoch_fallback_template_v1(current, process)?") > record_at).to_equal(true)
+        step("An unattached helper records it before its own cleanup")
+        val cleanup = er_body_v1(lifecycle, "    pub fn close_v1(process: GroupProcessStreamOwnerV2,", "\n\n")
+        val unattached_at = cleanup.index_of("fresh_epoch_lifecycle_states_v1[self.lifecycle.slot].engine_group = process.identity_digest")
+        expect(unattached_at > 0).to_equal(true)
+        expect(cleanup.index_of("val closed = process_cleanup_piped_owned_v2(process, reference)") > unattached_at).to_equal(true)
+        step("The decision reads the lifecycle's own helper slot; closed_v1 refuses while a group is recorded")
+        val decision = er_body_v1(lifecycle, "    pub fn engine_group_decision_v1(", "\n\n")
+        expect(decision.contains("machine_fresh_epoch_engine_group_decide_v1(current.engine_group, current.process.is_none() and")).to_equal(true)
+        val closed = er_body_v1(lifecycle, "    pub fn closed_v1(", "\n\n")
+        expect(closed.contains("if current.engine_group != \"\": return Err(\"machine-fresh-epoch-engine-group-retained\")")).to_equal(true)
+        step("The admission close retires it after the helper was collected and before the writer and custody close")
+        val authority = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val close = er_body_v1(authority, "    pub fn close_v1() -> MachineFreshEpochCloseTurnV1:", "\n\n")
+        val process_at = close.index_of("val process = retained.lifecycle.close_process_v1()")
+        val retire_at = close.index_of("val engine = retained.retire_engine_group_v1()")
+        expect(process_at > 0).to_equal(true)
+        expect(retire_at > process_at).to_equal(true)
+        expect(close.index_of("val state = authority.close_v1()") > retire_at).to_equal(true)
+        expect(close.index_of("val closed = custody.close_v1()") > retire_at).to_equal(true)
+        step("A refusal is plain: the same close may be repeated and nothing is latched")
+        expect(close.contains("if engine.is_err(): return MachineFreshEpochCloseTurnV1(Some(retained), false, engine.unwrap_err())")).to_equal(true)
+        val retire = er_body_v1(authority, "    fn retire_engine_group_v1() -> Result<(), text>:", "\n\n")
+        expect(retire.contains("for name in self.lifecycle.engine_group_decision_v1()?:")).to_equal(true)
+        expect(retire.contains("val retired = self.custody.unwrap().retire_engine_group_v3(name, \"\")?\n            self.lifecycle.engine_group_retired_v1(name)?")).to_equal(true)

@@ -218,3 +218,5 @@ after pulling a vendor patch.
 Pre-existing divergence found: `[u64::MAX; 300][0] == u64::MAX` is false
 through `rt_array_repeat` in both the JIT and the interpreter, but true for
 an unrolled literal. u64 repeats therefore stay unrolled.
+
+See also: doc/08_tracking/bug/seed_jit_type_alias_captures_same_named_trait_dispatch_2026-11-28.md (same class of simple-name collision).

@@ -2,6 +2,13 @@
 
 Lane `generic-rr-hir-variant-obj`. Architecture: `doc/04_architecture/generic_rr_hir_variant_obj.md`.
 
+> **Superseded in part (2026-11-28).** The erased-model statements here ("single erased
+> body"; a caller consumes signature + bound, and the body is read only by the template's
+> own object action) are replaced by
+> `doc/05_design/compiler/cache/generic_instance_tldr_trace.md` §3 and §7: under full
+> monomorphization the body facet is read by every instance of the template. The facet
+> fingerprints, the invalidation planner and the HIR-variant object key are unchanged.
+
 ## 1. `generic_tldr_view_v1.spl` additions (owner module)
 
 ```simple

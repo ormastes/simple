@@ -445,10 +445,16 @@ pub fn shared_source_for_target(path: &Path, target: crate::pipeline::cfg_strip:
     entry
 }
 
+/// Cache-miss parses of [`shared_source`]. Modules the loader already parsed
+/// are seeded, so a regression to re-parsing shows up here on every platform
+/// (`[resolve-stats] shared_parses=`).
+pub(crate) static SHARED_SOURCE_PARSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn parse_shared_source(
     source: &str,
     target: &crate::pipeline::cfg_strip::CfgTarget,
 ) -> Result<Arc<simple_parser::ast::Module>, Arc<str>> {
+    SHARED_SOURCE_PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let selected = crate::pipeline::cfg_strip::strip_os_when_blocks(source, target)
         .map_err(|error| Arc::<str>::from(error))?;
     simple_parser::Parser::new(&selected)
@@ -2175,8 +2181,10 @@ pub fn owner_qualified_class_symbol(name: &str) -> Option<String> {
 /// type spelled `type_name` in the executing module (patterns, typed match
 /// arms, overload scoring). An owner-exact identity (`__spl_flat_...__Thing`)
 /// satisfies `Thing` -- or a local alias of it -- when that name denotes
-/// exactly this class in the executing module's scope; with no scope answer
-/// the source name decides.
+/// exactly this class in the executing module's scope. With no scope answer a
+/// SHARED name fails closed (the module imported no owner of it, so the bare
+/// name cannot denote this class); a single owner resolves through the flat
+/// table by its source name.
 pub fn class_identity_matches(instance: &str, type_name: &str) -> bool {
     if instance == type_name {
         // A bare identity is this module's `type_name` only when the name has
@@ -2193,7 +2201,11 @@ pub fn class_identity_matches(instance: &str, type_name: &str) -> bool {
     let source = crate::interpreter::flatten_owner_source_name(instance);
     match scoped_walk(&current_owner(), type_name) {
         Some(def) => def.name == instance,
-        None => source == type_name,
+        // Fail closed on a shared name the executing module never bound:
+        // accepting the owner-exact instance by source name alone let a
+        // module that imported no owner of the name match another module's
+        // class (bug interpreter_class_identity_no_scope_fallback_fail_open_2026_11_27).
+        None => !class_name_is_shared(type_name) && source == type_name,
     }
 }
 
@@ -2251,6 +2263,16 @@ pub fn resolve_class_in_scope(
             .cloned()
             .or_else(|| owned_class_candidates(name).first().map(|(_, d)| Arc::clone(d))));
     }
+    // A runtime (block-scoped / lazily loaded) `use m.{Name}` binds the
+    // constructor into the flat global surface but records no owner binding,
+    // so the walk above dead-ends and this name would read as "not imported
+    // by" the executing module. That constructor IS the import: resolve the
+    // identity it denotes, accepting only the definition whose identity still
+    // matches it -- a flat slot overtaken by a different identity keeps the
+    // ambiguity error below.
+    if let Some(def) = runtime_imported_class(classes, name) {
+        return Ok(Some(def));
+    }
     let candidates = owned_class_candidates(name);
     if *DBG_COLLISION {
         eprintln!(
@@ -2271,6 +2293,24 @@ pub fn resolve_class_in_scope(
             )))
         }
     }
+}
+
+/// The class denoted by a runtime-imported constructor bound under `name` in
+/// the flat global surface. Block-scoped and lazily loaded `use` statements
+/// (`load_and_merge_module`) unpack the imported constructor into
+/// `MODULE_GLOBALS` and the local env without an owner binding, so a shared
+/// bare name imported that way dead-ends the owner walk. `class_name` is
+/// owner-exact for a renamed (second-owner) class and bare for the first
+/// owner, and each import merged the matching definition into the caller's
+/// flat class table -- so the flat slot the import wrote answers exactly,
+/// while a slot since overtaken by a different identity is rejected.
+fn runtime_imported_class(classes: &HashMap<String, Arc<ClassDef>>, name: &str) -> Option<Arc<ClassDef>> {
+    let bound = crate::interpreter::MODULE_GLOBALS.with(|globals| globals.borrow().get(name).cloned())?;
+    let Value::Constructor { class_name } = bound else {
+        return None;
+    };
+    let def = classes.get(&class_name)?;
+    (def.name == class_name).then(|| Arc::clone(def))
 }
 
 /// Resolve the class of a live instance. A `Value::Object` carries only its

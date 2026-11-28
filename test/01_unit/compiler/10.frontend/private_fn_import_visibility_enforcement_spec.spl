@@ -4,7 +4,7 @@
 use std.spec.{describe, it, expect}
 use std.spec.step
 use std.nogc_sync_mut.env.platform.{get_temp_dir}
-use std.nogc_sync_mut.io_runtime.{write_file, dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{write_file, dir_create_all, dir_remove_all, env_set_process}
 use compiler.common.config.{Logger}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -32,8 +32,11 @@ fn enforce_probe(provider_name: text, provider_path: text, provider_src: text,
         ]):
         case Ok(value): surfaces = value
         case Err(_): expect(false).to_equal(true)
+    # The hard error is staged behind SIMPLE_STRICT_PRIVATE_IMPORTS=1 (default: warning).
+    env_set_process("SIMPLE_STRICT_PRIVATE_IMPORTS", "1")
     var lowering = hirlowering_for_module(consumer_name, surfaces)
     val hir = lowering.lower_module(consumer)
+    env_set_process("SIMPLE_STRICT_PRIVATE_IMPORTS", "")
     var hard_errors = 0
     var msgs = ""
     var i = 0
@@ -47,8 +50,8 @@ fn enforce_probe(provider_name: text, provider_path: text, provider_src: text,
     ["{hard_errors}", msgs, bound]
 
 describe "Frontend private-fn cross-module visibility enforcement":
-    it "rejects cross-directory plain use of a private fn by default and skips symbol registration":
-        step("Lower cross-directory plain use without env opt-in")
+    it "rejects cross-directory plain use of a private fn under SIMPLE_STRICT_PRIVATE_IMPORTS=1 and skips symbol registration":
+        step("Lower cross-directory plain use in strict mode")
         val res = enforce_probe(
             "enf.sub.mod_a", "src/enf/sub/mod_a.spl", ENF_PROVIDER_SRC,
             "enf.caller", "src/enf/caller.spl",

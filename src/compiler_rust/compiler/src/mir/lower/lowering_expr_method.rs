@@ -655,7 +655,8 @@ impl<'a> MirLowerer<'a> {
         // (lowering_stmt.rs `HirExprKind::Index` write arm): box int keys
         // unconditionally, box int values UNLESS the dict's value type is a
         // heap type (struct/enum/etc — boxing a heap pointer would corrupt
-        // its tag, task #117).
+        // its tag, task #117); float values are heap-boxed (BoxFloat) under
+        // the same `!value_is_heap` guard.
         // See task: dict_insert_integer_key_boxing.
         if (method == "set" || method == "insert")
             && args.len() == 2
@@ -722,6 +723,24 @@ impl<'a> MirLowerer<'a> {
                     let boxed = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::BoxInt {
+                        dest: boxed,
+                        value: raw_value_reg,
+                    });
+                    boxed
+                })?
+            } else if !value_is_heap && matches!(args[1].ty, TypeId::F32 | TypeId::F64) {
+                // Same lossless heap box as the dict literal
+                // (lowering_expr_collection.rs `lower_dict_expr`) and the
+                // `d[k] = v` rt_index_set store: a raw f64 word stored into
+                // the dict decodes on readback (UnboxFloat ->
+                // rt_value_as_float) as a legacy inline TAG_FLOAT, shifting
+                // the payload and zeroing the low 3 mantissa bits
+                // (`d.insert("k", 0.1)`; `d["k"]` then read
+                // 0.09999999999999998).
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxFloat {
                         dest: boxed,
                         value: raw_value_reg,
                     });

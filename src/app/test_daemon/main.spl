@@ -1,12 +1,13 @@
 # Lightweight test daemon CLI entrypoint.
 
 use std.sffi.cli_args.{cli_get_args}
-use app.io.process_ops.{process_run, process_run_timeout}
-use app.test_daemon.light_protocol.{timeout_verdict_line}
+use app.io.process_ops.{process_run, process_run_bounded}
+use app.test_daemon.light_protocol.{ensure_daemon_at, light_atomic_publish, light_lock_break_stale, light_lock_pid, lock_alive_at, timeout_verdict_line}
 
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text}
+use std.io_runtime.{read_file_text_result}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{file_rename}
@@ -17,26 +18,18 @@ use std.io_runtime.{time_now_unix_micros}
 extern fn rt_path_absolute(path: text) -> text?
 use std.io_runtime.{env_get}
 
-# Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
-# truncate) then write() as two separate steps, so a concurrent reader that
-# lists the directory and opens the file between those steps can observe a
-# 0-byte (or partially written) file. The daemon's poll loop lists+reads
-# request files this way, so a non-atomic write here races with it and the
-# daemon can misread an in-flight request as empty ("missing test path"),
-# consuming and discarding the real request (#98).
+# Atomic write: unique tmp + rename via light_atomic_publish. Plain
+# rt_file_write_text or a shared `<path>.tmp` races with concurrent writers
+# and pollers.
 fn atomic_write_text(path: text, content: text) -> bool:
-    val tmp_path = "{path}.tmp"
-    if file_write(tmp_path, content):
-        if file_rename(tmp_path, path):
-            return true
-        file_delete(tmp_path)
-    file_write(path, content)
+    light_atomic_publish(path, content)
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 val LIGHT_STOP: text = ".build/test_daemon_light/stop"
+val LIGHT_BINARY: text = ".build/test_daemon_light/daemon.binary"
 
 fn test_daemon_args() -> [text]:
     val raw = cli_get_args()
@@ -121,38 +114,36 @@ fn ensure_dirs():
 fn daemon_pid() -> text:
     if not file_exists(LIGHT_LOCK):
         return ""
-    val content = read_file_text(LIGHT_LOCK)
-    if content == "":
-        return ""
-    content.split("\n")[0].trim()
+    light_lock_pid(read_file_text(LIGHT_LOCK))
 
-fn daemon_lock_alive() -> bool:
-    """True only when the lock is held by a LIVE light-daemon process.
-
-    Mirrors test_runner_client.daemon_lock_alive: a reused PID passes kill -0,
-    so a crashed daemon's lock made every request wait out the full budget and
-    report a timeout with no verdict. A D-state daemon matches its own cmdline
-    and is left strictly alone; no process is ever signalled, only the lock
-    file is removed. Bug: stale_daemon_lock_fakes_total_red_2026-08-09."""
-    val pid = daemon_pid()
+fn daemon_pid_alive(pid: text) -> bool:
     if pid == "":
         return false
-    val (_stdout, _stderr, code) = process_run_timeout(
-        "/bin/sh",
-        ["-c", "kill -0 {pid} 2>/dev/null || exit 1; test -r /proc/{pid}/cmdline || exit 0; tr '\\0' ' ' < /proc/{pid}/cmdline | grep -q light_daemon"],
-        2000
-    )
-    code == 0
-
-fn ensure_daemon() -> bool:
-    ensure_dirs()
-    if daemon_lock_alive():
+    if not file_exists("/proc/self"):
+        val (_out, _err, code) = process_run_bounded("/bin/kill", ["-0", pid], 2000, 0)
+        return code == 0
+    if not file_exists("/proc/{pid}"):
+        return false
+    val cmdline_result = read_file_text_result("/proc/{pid}/cmdline")
+    if not cmdline_result.is_ok():
         return true
+    cmdline_result.unwrap_or("").contains("light_daemon")
+
+fn daemon_lock_alive() -> bool:
+    """True only when the lock is held by a LIVE light-daemon process."""
+    lock_alive_at(LIGHT_LOCK, \p: daemon_pid_alive(p))
+
+fn report_stale_lock():
     val stale_pid = daemon_pid()
-    if stale_pid != "":
-        print "warning: test-daemon: stale lock {LIGHT_LOCK} (recorded pid {stale_pid} is not a live light_daemon); removing it and respawning."
-        print "warning: test-daemon: if this repeats, clear the lane by hand: rm -rf {LIGHT_DAEMON_DIR}"
-    file_delete(LIGHT_LOCK)
+    if stale_pid == "":
+        return
+    print "warning: test-daemon: stale lock {LIGHT_LOCK} (recorded pid {stale_pid} is not a live light_daemon); removing it and respawning."
+    print "warning: test-daemon: if this repeats, clear the lane by hand: rm -rf {LIGHT_DAEMON_DIR}"
+
+fn no_hook():
+    pass
+
+fn spawn_light_daemon() -> bool:
     file_delete(LIGHT_STOP)
     val binary = simple_binary()
     val (_daemon_out, _daemon_err, daemon_code) = process_run(
@@ -162,14 +153,11 @@ fn ensure_daemon() -> bool:
     if daemon_code != 0:
         file_write("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
         return false
-    var waits = 0
-    while waits < 40:
-        if daemon_lock_alive():
-            return true
-        thread_sleep(50)
-        waits = waits + 1
-    file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
-    false
+    true
+
+fn ensure_daemon() -> bool:
+    ensure_dirs()
+    ensure_daemon_at(LIGHT_LOCK, LIGHT_BINARY, \p: daemon_pid_alive(p), \: spawn_light_daemon(), \: report_stale_lock(), \: no_hook())
 
 fn cli_test_daemon_start() -> i64:
     if not ensure_daemon():
@@ -181,14 +169,16 @@ fn cli_test_daemon_start() -> i64:
 fn cli_test_daemon_stop() -> i64:
     ensure_dirs()
     if not daemon_lock_alive():
-        file_delete(LIGHT_LOCK)
+        val stale_pid = daemon_pid()
+        light_lock_break_stale(LIGHT_LOCK, LIGHT_BINARY, stale_pid, \p: daemon_pid_alive(p))
         print "Test daemon: not running"
         return 0
     file_write(LIGHT_STOP, "stop")
     var waits = 0
     while waits < 40:
         if not daemon_lock_alive():
-            file_delete(LIGHT_LOCK)
+            val stale_pid = daemon_pid()
+            light_lock_break_stale(LIGHT_LOCK, LIGHT_BINARY, stale_pid, \p: daemon_pid_alive(p))
             print "Test daemon stopped"
             return 0
         thread_sleep(50)
@@ -200,7 +190,8 @@ fn cli_test_daemon_status() -> i64:
     if daemon_lock_alive():
         print "Test daemon: running (pid: {daemon_pid()})"
         return 0
-    file_delete(LIGHT_LOCK)
+    val stale_pid = daemon_pid()
+    light_lock_break_stale(LIGHT_LOCK, LIGHT_BINARY, stale_pid, \p: daemon_pid_alive(p))
     print "Test daemon: not running"
     0
 

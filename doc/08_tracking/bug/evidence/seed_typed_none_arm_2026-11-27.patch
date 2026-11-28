@@ -1,0 +1,154 @@
+diff --git a/src/compiler_rust/compiler/src/hir/lower/expr/control.rs b/src/compiler_rust/compiler/src/hir/lower/expr/control.rs
+index 5d1efb87020..2ba7dec9ba5 100644
+--- a/src/compiler_rust/compiler/src/hir/lower/expr/control.rs
++++ b/src/compiler_rust/compiler/src/hir/lower/expr/control.rs
+@@ -1213,6 +1213,18 @@ impl Lowerer {
+                     if subject_ty == TypeId::ANY {
+                         return Ok(self.erased_none_arm_condition(&subject_ref));
+                     }
++                    // A typed `Q?` holding a user `Q.None`: `case nil:` is read
++                    // by the payload variant's name, exactly like `case None:`.
++                    // seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27
++                    if self.optional_payload_declares_none(subject_ty) {
++                        return Ok(HirExpr {
++                            kind: HirExprKind::BuiltinCall {
++                                name: "rt_is_none_variant".to_string(),
++                                args: vec![subject_ref],
++                            },
++                            ty: TypeId::BOOL,
++                        });
++                    }
+                     return Ok(HirExpr {
+                         kind: HirExprKind::BuiltinCall {
+                             name: "rt_is_none".to_string(),
+@@ -1377,6 +1389,20 @@ impl Lowerer {
+                     if subject_ty == TypeId::ANY && matches!(pattern_enum.as_str(), "_" | "Option") {
+                         return Ok(self.erased_none_arm_condition(&subject_ref));
+                     }
++                    // A typed `Q?` holding a user `Q.None`: the interpreter's
++                    // bare `None` arm matches the payload variant by NAME, so
++                    // the arm needs the stamp-aware `rt_is_none_variant`, not
++                    // the nil-sentinel-only `rt_is_none`.
++                    // seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27
++                    if self.optional_payload_declares_none(subject_ty) {
++                        return Ok(HirExpr {
++                            kind: HirExprKind::BuiltinCall {
++                                name: "rt_is_none_variant".to_string(),
++                                args: vec![subject_ref],
++                            },
++                            ty: TypeId::BOOL,
++                        });
++                    }
+                     return Ok(HirExpr {
+                         kind: HirExprKind::BuiltinCall {
+                             name: "rt_is_none".to_string(),
+@@ -1831,6 +1857,30 @@ impl Lowerer {
+         }
+     }
+ 
++    /// `true` when `subject_ty` is an optional (`T?` Pointer form, or the
++    /// explicit generic `Option<T>` form) whose payload type is a USER enum
++    /// declaring a variant named `None`. For such a subject the interpreter
++    /// reads flat `None` / `nil` / `Some` arms by the payload's own variant
++    /// NAME: a present `Q.None` takes the `None` arm while staying present
++    /// for `.?` / `??` / `if val`. The typed-optional arm probes therefore
++    /// need the stamp-aware `rt_is_none_variant`, not the nil-sentinel-only
++    /// `rt_is_none`. Payloads that are not user enums (or declare no `None`)
++    /// can hold no stamped value, so they keep the cheap probe.
++    /// seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27
++    pub(crate) fn optional_payload_declares_none(&self, subject_ty: TypeId) -> bool {
++        let inner = self
++            .optional_enum_payload_inner(subject_ty)
++            .or_else(|| self.module.types.optional_inner(subject_ty));
++        let Some(inner) = inner else {
++            return false;
++        };
++        matches!(
++            self.module.types.get(inner),
++            Some(HirType::Enum { name, variants, .. })
++                if name != "Option" && variants.iter().any(|(n, _)| n == "None")
++        )
++    }
++
+     /// Arm test for a top-level builtin-optional `case Some(p):`: presence
+     /// (`rt_is_some`) AND the refutable payload sub-patterns, read through the
+     /// same dual-representation slot as the nested `Ok(Some(..))` path in
+@@ -1876,6 +1926,34 @@ impl Lowerer {
+             },
+             ty: TypeId::BOOL,
+         };
++        // A typed `Q?` whose payload enum declares `None`: the interpreter
++        // reads the flat `Some` arm by the payload variant's name too, so a
++        // present `Q.None` must NOT match `Some(...)` (nil-sentinel presence
++        // alone routed it to the `Some` arm).
++        // seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27
++        if self.optional_payload_declares_none(subject_ty) {
++            let not_user_none = HirExpr {
++                kind: HirExprKind::Unary {
++                    op: UnaryOp::Not,
++                    operand: Box::new(HirExpr {
++                        kind: HirExprKind::BuiltinCall {
++                            name: "rt_is_none_variant".to_string(),
++                            args: vec![subject_ref.clone()],
++                        },
++                        ty: TypeId::BOOL,
++                    }),
++                },
++                ty: TypeId::BOOL,
++            };
++            presence = HirExpr {
++                kind: HirExprKind::Binary {
++                    op: BinOp::And,
++                    left: Box::new(presence),
++                    right: Box::new(not_user_none),
++                },
++                ty: TypeId::BOOL,
++            };
++        }
+         // An untyped subject can hold a user enum that declares `Some`/`None`
+         // itself; the interpreter matches such a value only through its own
+         // `Some` variant, so `Opt.Nope` must not take the arm.
+diff --git a/src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs b/src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs
+index a6789f4d422..3d310525c63 100644
+--- a/src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs
++++ b/src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs
+@@ -3655,6 +3655,18 @@ impl Lowerer {
+                     if subject_ty == TypeId::ANY {
+                         return Ok(self.erased_none_arm_condition(&subject_ref));
+                     }
++                    // A typed `Q?` holding a user `Q.None`: `case nil:` is read
++                    // by the payload variant's name, exactly like `case None:`.
++                    // seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27
++                    if self.optional_payload_declares_none(subject_ty) {
++                        return Ok(HirExpr {
++                            kind: HirExprKind::BuiltinCall {
++                                name: "rt_is_none_variant".to_string(),
++                                args: vec![subject_ref],
++                            },
++                            ty: TypeId::BOOL,
++                        });
++                    }
+                     return Ok(HirExpr {
+                         kind: HirExprKind::BuiltinCall {
+                             name: "rt_is_none".to_string(),
+@@ -3843,6 +3855,20 @@ impl Lowerer {
+                     if subject_ty == TypeId::ANY && matches!(pattern_enum.as_str(), "_" | "Option") {
+                         return Ok(self.erased_none_arm_condition(&subject_ref));
+                     }
++                    // A typed `Q?` holding a user `Q.None`: the interpreter's
++                    // bare `None` arm matches the payload variant by NAME, so
++                    // the arm needs the stamp-aware `rt_is_none_variant`, not
++                    // the nil-sentinel-only `rt_is_none`.
++                    // seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27
++                    if self.optional_payload_declares_none(subject_ty) {
++                        return Ok(HirExpr {
++                            kind: HirExprKind::BuiltinCall {
++                                name: "rt_is_none_variant".to_string(),
++                                args: vec![subject_ref],
++                            },
++                            ty: TypeId::BOOL,
++                        });
++                    }
+                     return Ok(HirExpr {
+                         kind: HirExprKind::BuiltinCall {
+                             name: "rt_is_none".to_string(),

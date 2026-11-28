@@ -12,6 +12,7 @@ TODO(platform-variant-migration): move here — windows_memory_v1.spl.
 - **restricted_identity_v1.spl** — restricted low-integrity token and scope SID for contained children.
 - **contained_write_v1.spl** — low-label write grant and reader-SID read grant (Windows body).
 - **app_container_v1.spl** — per-scope AppContainer launch with no capabilities, grants only on listed dirs, profile deleted at teardown (identity `app-sandbox`).
+- **app_container_confinement_probe_v1.spl** — evidence-only inside/outside read probe over app_container_v1 (runs both sandbox runs itself; sets no capability flag).
 - **containment_v1.spl** — SOSIX containment variant: support, start, poll, cancel, collect, qualify, memory-cap evidence.
 - **containment_launch_v1.spl** — job + restricted-token launch core over the process owner (internal).
 - **containment_qualify_v1.spl** — nine-canary qualify op with paired positive controls (internal).

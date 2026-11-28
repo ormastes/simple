@@ -637,6 +637,63 @@ pub extern "C" fn rt_option_float_bits(value: RuntimeValue) -> i64 {
     value.as_float().to_bits() as i64
 }
 
+/// Tag of the inline (tag, bits) layout of a typed `f64?` for the one-word
+/// form `value`: `0` nil, `4` the `Option::None` enum, `1` `Some` holding the
+/// raw IEEE bits, `3` `Some` holding a boxed float, `2` any other word (the
+/// flat tagged float). Presence is `(tag & 3) != 0`; the sub-kind lets
+/// `rt_option_float_pack` rebuild the same one-word form. Never allocates.
+/// Twin of `rt_option_float_tag` in src/runtime/runtime_native.c.
+/// seed_typed_f64_option_some_heap_allocates_per_some_never_released_2026-11-27
+#[no_mangle]
+pub extern "C" fn rt_option_float_tag(value: RuntimeValue) -> i64 {
+    if value.is_nil() {
+        return 0;
+    }
+    if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
+        if unsafe { (*p).enum_id } == OPTION_ENUM_ID {
+            if rt_is_none(value) {
+                return 4;
+            }
+            return if unsafe { (*p).payload }.as_heap_float_ptr().is_some() {
+                3
+            } else {
+                1
+            };
+        }
+    }
+    2
+}
+
+/// One-word form of an inline typed `f64?` (`tag` as `rt_option_float_tag`,
+/// `value` the exact payload): the box built where the pair escapes to a
+/// consumer that only knows the one-word form. `cached` is the word already
+/// built for this value (0 = none) and is returned as is, so a value is boxed
+/// once per assignment, not once per escaping read. Twin of `rt_option_float_pack`
+/// in src/runtime/runtime_native.c.
+/// seed_typed_f64_option_some_heap_allocates_per_some_never_released_2026-11-27
+#[no_mangle]
+pub extern "C" fn rt_option_float_pack(cached: RuntimeValue, tag: i64, value: f64) -> RuntimeValue {
+    if cached.to_raw() != 0 {
+        return cached;
+    }
+    if tag & 8 != 0 {
+        // Erased payload form: what an `any` consumer of the payload decodes.
+        return if tag & 3 != 0 {
+            RuntimeValue::from_float(value)
+        } else {
+            RuntimeValue::NIL
+        };
+    }
+    let some = hash_variant_discriminant("Some");
+    match tag {
+        1 => rt_enum_new(OPTION_ENUM_ID, some, RuntimeValue::from_raw(value.to_bits())),
+        2 => RuntimeValue::from_float(value),
+        3 => rt_enum_new(OPTION_ENUM_ID, some, RuntimeValue::from_float(value)),
+        4 => rt_enum_new(OPTION_ENUM_ID, hash_variant_discriminant("None"), RuntimeValue::NIL),
+        _ => RuntimeValue::NIL,
+    }
+}
+
 /// Unwrap the payload of a present `Result.Ok`/`Option.Some` value; abort
 /// (matching the native-lane error-raise idiom used elsewhere in this crate,
 /// e.g. `rt_slice`'s negative-step check) if the receiver is a genuine

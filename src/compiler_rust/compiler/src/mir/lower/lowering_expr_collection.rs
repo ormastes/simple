@@ -1,13 +1,15 @@
 //! Collection expression lowering: Tuple, Array, VecLiteral, Dict, ArrayRepeat.
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, HirExprKind, HirType, TypeId, UnaryOp};
-use crate::mir::effects::CallTarget;
+use crate::hir::{BinOp, HirExpr, HirExprKind, HirType, TypeId, UnaryOp};
+use crate::mir::blocks::Terminator;
+use crate::mir::effects::{CallTarget, LocalKind};
+use crate::mir::function::MirLocal;
 use crate::mir::instructions::{MirInst, VReg};
 
 /// Above this many identical scalar elements an array literal is built by one
-/// `rt_array_repeat` call instead of one operand per element.
-const ARRAY_LITERAL_REPEAT_MIN: usize = 256;
+/// repeat call instead of one operand per element.
+pub(super) const ARRAY_LITERAL_REPEAT_MIN: usize = 256;
 
 impl<'a> MirLowerer<'a> {
     pub(super) fn lower_tuple_expr(&mut self, elements: &[HirExpr]) -> MirLowerResult<VReg> {
@@ -114,6 +116,16 @@ impl<'a> MirLowerer<'a> {
             });
         }
         if !elements.is_empty() && (elements.iter().all(|elem| elem.ty == TypeId::U8) || outer_is_u8_array) {
+            if !self.array_push_returns_header && elements.len() > ARRAY_LITERAL_REPEAT_MIN {
+                let first = &elements[0];
+                if Self::repeat_scalar_element(first) && elements.iter().all(|elem| elem == first) {
+                    let count_expr = HirExpr {
+                        kind: HirExprKind::Integer(elements.len() as i64),
+                        ty: TypeId::I64,
+                    };
+                    return self.lower_u8_array_repeat_expr(first, &count_expr);
+                }
+            }
             let capacity = elements.len() as i64;
             let capacity_reg = self.with_func(|func, current_block| {
                 let reg = func.new_vreg();
@@ -443,7 +455,7 @@ impl<'a> MirLowerer<'a> {
     /// Scalar element whose single evaluation is indistinguishable from N
     /// evaluations: a numeric/bool literal, a negated numeric literal, or a
     /// plain local/global read of a numeric/bool type.
-    fn repeat_scalar_element(elem: &HirExpr) -> bool {
+    pub(super) fn repeat_scalar_element(elem: &HirExpr) -> bool {
         let scalar_ty = matches!(
             elem.ty,
             TypeId::I8
@@ -572,7 +584,16 @@ impl<'a> MirLowerer<'a> {
         // accidentally-correct `1` into wrongly-boxed `8`. Both sides now land
         // together: this box here, plus the `.get()` route through
         // `lower_index_expr` in `lowering_expr_method.rs` (search
-        // `receiver_is_dict`). Float/bool VALUE boxing remains a follow-up.
+        // `receiver_is_dict`).
+        //
+        // FLOAT values take the same lossless box as array/tuple elements.
+        // A raw f64 bit-pattern whose low 3 bits alias TAG_FLOAT (0b010) was
+        // read back by `UnboxFloat` -> `rt_value_as_float` as a legacy inline
+        // float, shifting the payload and zeroing the low 3 mantissa bits
+        // (`{"k": 0.1}` read as 0.09999999999999998,
+        // seed_jit_dict_f64_literal_value_read_loses_low_mantissa_bits_2026-11-27).
+        // Bool VALUE tagging remains a follow-up (the raw 0/1 word currently
+        // round-trips through the integer readers).
         for (key_expr, value_expr) in pairs {
             let key_reg = self.lower_expr(key_expr)?;
             // Boolean keys must match tagged membership/index reads. Preserve
@@ -583,7 +604,19 @@ impl<'a> MirLowerer<'a> {
                 self.box_int_operand(key_reg, key_expr.ty)?
             };
             let value_reg = self.lower_expr(value_expr)?;
-            let value_reg = self.box_int_operand(value_reg, value_expr.ty)?;
+            let value_reg = if matches!(value_expr.ty, TypeId::F32 | TypeId::F64) {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxFloat {
+                        dest: boxed,
+                        value: value_reg,
+                    });
+                    boxed
+                })?
+            } else {
+                self.box_int_operand(value_reg, value_expr.ty)?
+            };
             let insert_target = CallTarget::from_name("rt_dict_set");
             self.with_func(|func, current_block| {
                 let block = func.block_mut(current_block).unwrap();
@@ -598,7 +631,184 @@ impl<'a> MirLowerer<'a> {
         Ok(dict_reg)
     }
 
-    pub(super) fn lower_array_repeat_expr(&mut self, value: &HirExpr, count: &HirExpr) -> MirLowerResult<VReg> {
+    fn is_zero_byte_hir_expr(expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::Integer(n) => (*n & 0xFF) == 0,
+            HirExprKind::Cast { expr, .. } => Self::is_zero_byte_hir_expr(expr),
+            _ => false,
+        }
+    }
+
+    fn clamp_non_negative_repeat_count(&mut self, count: &HirExpr, count_reg: VReg) -> MirLowerResult<VReg> {
+        if let HirExprKind::Integer(n) = &count.kind {
+            if *n <= 0 {
+                return self.with_func(|func, current_block| {
+                    let zero = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+                    zero
+                });
+            }
+            return Ok(count_reg);
+        }
+        if Self::is_unsigned_int_type(count.ty) {
+            return Ok(count_reg);
+        }
+
+        // Normalize narrow signed widths (i8/i16/i32) to i64 before storing
+        // into the signed i64 clamp slot.
+        let count_i64 = if matches!(count.ty, TypeId::I8 | TypeId::I16 | TypeId::I32) {
+            self.with_func(|func, current_block| {
+                let cast = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Cast {
+                    dest: cast,
+                    source: count_reg,
+                    from_ty: count.ty,
+                    to_ty: TypeId::I64,
+                });
+                cast
+            })?
+        } else {
+            self.unbox_scalar_for_raw_slot(TypeId::I64, count.ty, count_reg)?
+        };
+
+        let temp_local_index = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$u8_repeat_count_{}", index),
+                ty: TypeId::I64,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+        let (temp_addr, cond_reg, signed_count_reg) = self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let signed_count = func.new_vreg();
+            let zero = func.new_vreg();
+            let cond = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: temp_local_index,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: count_i64,
+                ty: TypeId::I64,
+            });
+            // Load from a TypeId::I64 slot so BinOp::Gt uses signed comparison.
+            block.instructions.push(MirInst::Load {
+                dest: signed_count,
+                addr,
+                ty: TypeId::I64,
+            });
+            block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+            block.instructions.push(MirInst::BinOp {
+                dest: cond,
+                op: BinOp::Gt,
+                left: signed_count,
+                right: zero,
+            });
+            (addr, cond, signed_count)
+        })?;
+        let (then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+            let then_id = func.new_block();
+            let else_id = func.new_block();
+            let merge_id = func.new_block();
+            let block = func.block_mut(current_block).unwrap();
+            block.terminator = Terminator::Branch {
+                cond: cond_reg,
+                then_block: then_id,
+                else_block: else_id,
+            };
+            (then_id, else_id, merge_id)
+        })?;
+
+        self.set_current_block(then_id)?;
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Store {
+                addr: temp_addr,
+                value: signed_count_reg,
+                ty: TypeId::I64,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+
+        self.set_current_block(else_id)?;
+        self.with_func(|func, current_block| {
+            let zero = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+            block.instructions.push(MirInst::Store {
+                addr: temp_addr,
+                value: zero,
+                ty: TypeId::I64,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+
+        self.set_current_block(merge_id)?;
+        self.with_func(|func, current_block| {
+            let clamped = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Load {
+                dest: clamped,
+                addr: temp_addr,
+                ty: TypeId::I64,
+            });
+            clamped
+        })
+    }
+
+    /// Lower a `[u8]` repeat `[value; count]` into a `BYTE_PACKED` runtime
+    /// array so copies (`rt_array_copy`) and appends (`rt_typed_bytes_u8_push`)
+    /// keep 1-byte backing storage instead of 8-byte tagged slots.
+    pub(super) fn lower_u8_array_repeat_expr(&mut self, value: &HirExpr, count: &HirExpr) -> MirLowerResult<VReg> {
+        let raw_value_reg = self.lower_expr(value)?;
+        let raw_value_reg = self.unbox_scalar_for_raw_slot(TypeId::U8, value.ty, raw_value_reg)?;
+        let count_reg = self.lower_expr(count)?;
+        let clamped_count = self.clamp_non_negative_repeat_count(count, count_reg)?;
+        let arr_reg = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: CallTarget::from_name("rt_byte_array_new_len"),
+                args: vec![clamped_count],
+            });
+            dest
+        })?;
+        if !Self::is_zero_byte_hir_expr(value) {
+            self.with_func(|func, current_block| {
+                let zero = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+                block.instructions.push(MirInst::Call {
+                    dest: None,
+                    target: CallTarget::from_name("rt_array_fill_span"),
+                    args: vec![arr_reg, zero, clamped_count, raw_value_reg],
+                });
+            })?;
+        }
+        Ok(arr_reg)
+    }
+
+    pub(super) fn lower_array_repeat_expr(
+        &mut self,
+        value: &HirExpr,
+        count: &HirExpr,
+        outer_ty: TypeId,
+    ) -> MirLowerResult<VReg> {
+        let outer_is_u8_array = self
+            .type_registry
+            .and_then(|tr| tr.get(outer_ty))
+            .is_some_and(|t| matches!(t, HirType::Array { element, .. } if *element == TypeId::U8));
+        if !self.array_push_returns_header && (value.ty == TypeId::U8 || outer_is_u8_array) {
+            return self.lower_u8_array_repeat_expr(value, count);
+        }
         // Array repeat: [value; count] - creates array with count copies of value
         let raw_value_reg = self.lower_expr(value)?;
         let count_reg = self.lower_expr(count)?;

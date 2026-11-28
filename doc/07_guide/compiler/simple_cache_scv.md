@@ -240,7 +240,7 @@ Reason strings you will meet after `SCV-E-ADMISSION:`:
 | `snapshot-authority-env-publish-failed`, `snapshot-authority-env-clear-failed`, `source-authority-env-publish-failed`, `source-authority-env-clear-failed` | `native_build_main.spl:1915,1930`; `admission.spl:91,154` | `env_set` failed; environment is not writable |
 | `repository-root-unavailable` | `admission.spl:99` | cwd is not an absolute plain checkout path |
 | `package-index:stale-graph-rebuild-required` | `admission.spl:111-113` | package-module index bound to another snapshot; set `SIMPLE_PACKAGE_INDEX_COLD_INIT=1`. (`cold-rebuild-pending` is *not* a refusal: admission succeeds with that reason string, `:156`.) |
-| `git-event-refresh-failed`, `git-event-source-unavailable`, `inventory-*` (`inventory-absent`, `inventory-pointer-invalid`, `inventory-publication-digest-mismatch`, ...) | `src/lib/scv/*.spl`, `inventory_events.spl` | the incremental git-event refresh or the inventory store is broken; `SIMPLE_SCV_INVENTORY_COLD_INIT=1` rebuilds it |
+| `git-event-refresh-failed:<branch>[:<detail>]` (the suffix names the failing check, e.g. `row-shape:byte_len=0:H src/a.spl`, `quoted-path:..`, `file-event-failed:..`, `git-ls-files-failed`), `git-event-source-unavailable`, `inventory-*` (`inventory-absent`, `inventory-pointer-invalid`, `inventory-publication-digest-mismatch`, ...) | `src/lib/scv/*.spl`, `inventory_events.spl` | the incremental git-event refresh or the inventory store is broken; `SIMPLE_SCV_INVENTORY_COLD_INIT=1` rebuilds it |
 
 ## 5. Debugging
 

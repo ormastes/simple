@@ -1056,7 +1056,7 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
-    fn is_unsigned_int_type(ty: TypeId) -> bool {
+    pub(super) fn is_unsigned_int_type(ty: TypeId) -> bool {
         matches!(ty, TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64)
     }
 
@@ -2554,6 +2554,21 @@ impl<'a> MirLowerer<'a> {
             );
         }
 
+        // Typed `f64?` locals become an inline (tag, bits) pair; see
+        // `mir::float_option_inline`. Same choke point, same reason.
+        if let Some(registry) = self.type_registry {
+            let inline_stats =
+                crate::mir::float_option_inline::apply_float_option_inline_to_module(&mut module.functions, registry);
+            if inline_stats.locals_inlined > 0 {
+                tracing::debug!(
+                    "f64? inline layout: {} local(s), {} boxed read(s), {} producer(s) removed",
+                    inline_stats.locals_inlined,
+                    inline_stats.reads_boxed,
+                    inline_stats.producers_removed,
+                );
+            }
+        }
+
         // Stamp lambda signatures onto otherwise-untyped indirect calls
         // (see `mir::closure_call_types` for why this cannot be done at the
         // call site alone).
@@ -2564,6 +2579,37 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower a single HIR function to MIR function
     pub(super) fn lower_function(&mut self, func: &HirFunction) -> MirLowerResult<MirFunction> {
+        // Rewrite unresolved bare receiver-field reads (`kind` for
+        // `self.kind`) into typed `self.<field>` accesses BEFORE any
+        // per-function analysis so every downstream pass sees the final
+        // tree. The function is cloned only when a candidate exists (rare:
+        // a method body with a bare field read). See
+        // doc/08_tracking/bug/implicit_self_field_read_unresolved_in_plain_fn_method_2026-09-03.md
+        // and receiver_field_rewrite.rs.
+        let rewritten;
+        let func = if let Some(registry) = self.type_registry {
+            let context = super::receiver_field_rewrite::ReceiverFieldRewrite::for_function(
+                func,
+                registry,
+                &self.global_types,
+                &self.available_functions,
+                &self.function_value_globals,
+                &self.imported_function_names,
+            );
+            match context.filter(|ctx| ctx.body_has_candidate(&func.body)) {
+                Some(context) => {
+                    rewritten = {
+                        let mut owned = func.clone();
+                        context.rewrite_body(&mut owned.body);
+                        owned
+                    };
+                    &rewritten
+                }
+                None => func,
+            }
+        } else {
+            func
+        };
         // Per-function: local indices are function-scoped, so this MUST be
         // recomputed (not accumulated) or one function's locals would be read
         // as another's.

@@ -452,7 +452,19 @@ impl<'a> Parser<'a> {
             }
 
             self.debug_verbose(&format!("Parsing item {}", iterations));
-            items.push(self.parse_item()?);
+            let item = self.parse_item()?;
+            // `pass(x)` is the pass-with-message statement, so a bare call can
+            // never reach a free function of that name. Members stay legal:
+            // `T.pass(..)` is reached through `.` and parsed by the type body.
+            if let Node::Function(f) = &item {
+                if f.name == "pass" {
+                    return Err(ParseError::syntax_error_with_span(
+                        "reserved keyword 'pass' cannot be used as a function name",
+                        f.span,
+                    ));
+                }
+            }
+            items.push(item);
             items.append(&mut self.pending_statements);
         }
 
@@ -813,31 +825,21 @@ impl<'a> Parser<'a> {
                     self.parse_var() // parse as var
                 }
             }
-            // `unit`/`newunit` declarations are always `unit <Name> ...`; a
-            // statement like `unit = x`, `unit += 1`, `unit.f = x` or
-            // `unit[i] = x` is an assignment to a variable named `unit`
-            // (expression position already reads it via
-            // `parse_keyword_identifier("unit")`).
+            // `unit`/`newunit` declarations are always `unit <Name> ...`, so the
+            // declaration parser is entered only when an identifier directly
+            // follows. Every other statement starting with `unit` — `unit = x`,
+            // `unit == x`, `unit + 1`, `unit(...)`, `unit.f`, `unit[i]`, a bare
+            // `unit` expression — is an expression statement using a variable
+            // named `unit` (expression position already reads it via
+            // `parse_keyword_identifier("unit")`). The previous allow-list
+            // routed only assignment ops, `.` and `[` to the expression path,
+            // so `unit == x` fell into parse_unit() and died with
+            // `expected identifier, found Eq`.
             TokenKind::Unit => {
-                if matches!(
-                    self.peek_next().kind,
-                    TokenKind::Assign
-                        | TokenKind::PlusAssign
-                        | TokenKind::MinusAssign
-                        | TokenKind::StarAssign
-                        | TokenKind::SlashAssign
-                        | TokenKind::PercentAssign
-                        | TokenKind::TildeAssign
-                        | TokenKind::TildePlusAssign
-                        | TokenKind::TildeMinusAssign
-                        | TokenKind::TildeStarAssign
-                        | TokenKind::TildeSlashAssign
-                        | TokenKind::Dot
-                        | TokenKind::LBracket
-                ) {
-                    self.parse_expression_or_assignment()
-                } else {
+                if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) {
                     self.parse_unit()
+                } else {
+                    self.parse_expression_or_assignment()
                 }
             }
             TokenKind::HandlePool => self.parse_handle_pool(),

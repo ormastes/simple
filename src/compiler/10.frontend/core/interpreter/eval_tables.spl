@@ -14,7 +14,7 @@
 
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
-use compiler.core.ast.{arm_get_pattern, decl_get_param_types, decl_get_ret_type, expr_get}
+use compiler.core.ast.{arm_get_pattern, decl_get_name, decl_get_param_types, decl_get_ret_type, expr_get}
 use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT}
 use compiler.core.interpreter.eval.{eval_warnings}
 use compiler.common.diagnostics.interpreter_policy_ids.{interpreter_policy_tag}
@@ -52,6 +52,42 @@ var fib_source_names: [text] = []
 var fib_owners: [text] = []
 var fib_buckets: [i64] = []
 var fib_nexts: [i64] = []
+# Bindings whose local name differs from the source name (`use m.{A as B}`).
+# Zero means no local name can alias a class, so a struct-table miss needs no
+# import-route probe (struct_resolve_for_caller hot path).
+var fib_alias_count: i64 = 0
+# Alias bindings whose LOCAL name is class-like (upper camel case), and the
+# name-hash buckets those local names fall in. A struct-table miss can only be
+# an aliased class when its own bucket is flagged, so an unrelated uppercase
+# miss (`Mk(i)`, an enum name) never reaches the owner-keyed probes.
+var fib_class_alias_count: i64 = 0
+var fib_class_alias_buckets: [bool] = []
+
+# Memo of struct_resolve_for_caller's caller-dependent answers, keyed by
+# (name, caller). Only shared names and class-alias candidates reach it; the
+# bucket comes from the name hash the flat probe already computed, so a hit
+# never hashes the caller's module path (hm_hash_text is a per-byte loop and a
+# path is ~100 bytes). Any class-table or import-binding mutation marks it
+# stale; it is rebuilt empty on the next caller-dependent lookup.
+var srm_names: [text] = []
+var srm_callers: [text] = []
+var srm_vals: [i64] = []
+var srm_buckets: [i64] = []
+var srm_nexts: [i64] = []
+var srm_stale: bool = true
+
+fn _fib_note_alias(local_name: text):
+    fib_alias_count = fib_alias_count + 1
+    if local_name == "": return
+    val first = local_name[0]
+    if first < "A" or first > "Z": return
+    if fib_class_alias_buckets.len() == 0:
+        var fill: i64 = 0
+        while fill < HM_SIZE:
+            fib_class_alias_buckets.push(false)
+            fill = fill + 1
+    fib_class_alias_buckets[hm_hash_text(local_name) % HM_SIZE] = true
+    fib_class_alias_count = fib_class_alias_count + 1
 
 var fmn_callers: [text] = []
 var fmn_aliases: [text] = []
@@ -307,11 +343,22 @@ fn _ftr_samesig_diag_enabled() -> bool:
         _ftr_samesig_diag = rt_env_get_i64("SIMPLE_DIAG_SAME_SIGNATURE_COLLISION", 0)
     _ftr_samesig_diag == 1
 
+fn _ftr_is_shared_class_method(name: text) -> bool:
+    val sep = name.index_of("__")
+    if sep <= 0:
+        return false
+    val sdecl = struct_table_lookup(name[0:sep])
+    sdecl >= 0 and struct_decl_is_shared_name(sdecl)
+
 fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
     # Private helpers, public free functions and `Type__method` registrations all
     # share this one flat table, so all three are checked. See the note above the
     # `_ftr_collision_warned` declaration before narrowing this again.
     if existing_did == new_did:
+        return
+    if _ftr_is_shared_class_method(name):
+        # `Type__method` of a class name several modules declare: dispatch is
+        # owner-keyed (struct_member_decl), so each module keeps its own body.
         return
     if not _ftr_sig_differs(existing_did, new_did):
         # SAME-SIGNATURE COLLISION. This used to be an unconditional `return`.
@@ -443,6 +490,10 @@ pub fn func_import_binding_reset():
     fib_owners = []
     fib_buckets = hm_make_global_buckets()
     fib_nexts = []
+    fib_alias_count = 0
+    fib_class_alias_count = 0
+    fib_class_alias_buckets = []
+    srm_stale = true
     fmn_callers = []
     fmn_aliases = []
     fmn_owners = []
@@ -555,12 +606,15 @@ pub fn func_import_binding_register(caller: text, name: text, owner: text):
     val binding_names = func_import_binding_names(name)
     val source_name = binding_names.0
     val local_name = binding_names.1
+    srm_stale = true
     val bucket = _hm_pair_bucket(caller, local_name)
     var idx = fib_buckets[bucket]
     while idx != -1:
         if fib_callers[idx] == caller and fib_names[idx] == local_name:
             fib_source_names[idx] = source_name
             fib_owners[idx] = owner
+            if source_name != local_name:
+                _fib_note_alias(local_name)
             return
         idx = fib_nexts[idx]
     val new_idx = fib_names.len()
@@ -570,6 +624,8 @@ pub fn func_import_binding_register(caller: text, name: text, owner: text):
     fib_owners.push(owner)
     fib_nexts.push(fib_buckets[bucket])
     fib_buckets[bucket] = new_idx
+    if source_name != local_name:
+        _fib_note_alias(local_name)
 
 pub fn func_import_binding_route(caller: text, name: text) -> (text, text):
     if fib_buckets.len() == 0:
@@ -612,6 +668,33 @@ fn func_resolve_for_caller_depth(caller: text, name: text, depth: i64) -> i64:
 
 pub fn func_resolve_for_caller(caller: text, name: text) -> i64:
     func_resolve_for_caller_depth(caller, name, 0)
+
+# Bare CALL `name(args)` from `caller` that both declares `name` and
+# selectively imports another module's `name` (`use alpha.{same_name}` beside
+# a local `fn same_name(n: i64)`): both definitions are visible and the call's
+# arguments choose (`eval_pick_own_or_import`, eval_calls.spl).
+# `func_resolve_for_caller` alone returned the local one by name, so a
+# two-text call ran the `(i64)` body. Returns (own, imported) decl ids, or
+# (-1, -1) when the caller sees only one definition. Rust seed twins:
+# `select_flatten_call_candidate` (HIR) and `own_vs_import_bound`
+# (interpreter). Bug: seed_same_name_fn_binding_2026-11-27.
+pub val FUNC_LOOKUP_OWN_IMPORT_AMBIGUOUS: i64 = -3
+
+@allow(primitive_api) # reason: core-interpreter dense decl_id arena index pair
+pub fn func_own_import_pair(caller: text, name: text) -> (i64, i64):
+    val own = func_table_lookup_owned(caller, name)
+    if own < 0:
+        return (-1, -1)
+    val route = func_import_binding_route(caller, name)
+    if route.0 == "" or route.0 == caller:
+        return (-1, -1)
+    val imported = func_resolve_for_caller_depth(route.0, route.1, 1)
+    if imported < 0 or imported == own:
+        return (-1, -1)
+    (own, imported)
+
+pub fn func_own_import_ambiguous_message(name: text) -> text:
+    "ambiguous call to '{name}': this module defines '{name}' and also imports one with the same arity but a different signature. Rename one definition or import the other under an alias. [compiler_cross_module_private_symbol_collision]"
 
 fn func_table_remove(name: text) -> bool:
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -948,19 +1031,273 @@ var st_buckets: [i64] = []
 var st_nexts: [i64] = []
 var st_module_paths: [text] = []
 
+# Owner-keyed struct/class table. Owner decision 2026-11-27 (bug
+# pure_simple_interpreter_class_table_keyed_by_bare_name_2026_11_27): a class
+# is identified by its OWNER module, not its bare name. The flat table above
+# stays for single-owner names (the hot path); a name declared by two or more
+# owner modules resolves through the caller's own definition, then its import
+# bindings (`use m.{Thing as Legacy}` routes `Legacy` to (m, Thing)).
+var sto_owners: [text] = []
+var sto_names: [text] = []
+var sto_vals: [i64] = []
+var sto_buckets: [i64] = []
+var sto_nexts: [i64] = []
+# Per bare name: first registering owner/decl and whether a second owner exists.
+var sto_name_keys: [text] = []
+var sto_name_first_owner: [text] = []
+var sto_name_first_decl: [i64] = []
+var sto_name_shared: [bool] = []
+var sto_name_buckets: [i64] = []
+var sto_name_nexts: [i64] = []
+# Dense by decl_id: true when the decl's bare name has two or more owners.
+var st_decl_shared: [bool] = []
+
 pub fn struct_table_reset():
+    srm_stale = true
     st_keys = []
+    _st_unrouted_warned = []
     st_vals = []
     st_buckets = hm_make_global_buckets()
     st_nexts = []
     st_module_paths = []
+    sto_owners = []
+    sto_names = []
+    sto_vals = []
+    sto_buckets = hm_make_global_buckets()
+    sto_nexts = []
+    sto_name_keys = []
+    sto_name_first_owner = []
+    sto_name_first_decl = []
+    sto_name_shared = []
+    sto_name_buckets = hm_make_global_buckets()
+    sto_name_nexts = []
+    st_decl_shared = []
 
-# Class/struct-name collision diagnostic — the type-table sibling of
-# `_ftr_warn_collision` above. The struct table is keyed on the bare name, so
-# two co-loaded modules that each define a same-named class/struct clobber each
-# other and method bodies cross-dispatch onto instances of the wrong class. The
-# symptom does NOT look like a collision: it reads as "method not found" or
-# "no field named X" on a class that plainly has the member. See
+fn _st_decl_shared_set(decl_id: i64):
+    if decl_id < 0: return
+    while st_decl_shared.len() <= decl_id:
+        st_decl_shared.push(false)
+    st_decl_shared[decl_id] = true
+
+# True when `decl_id` is a struct/class whose bare name is declared by two or
+# more owner modules, so its members must resolve by owner, not by name.
+# reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+pub fn struct_decl_is_shared_name(decl_id: i64) -> bool:
+    if decl_id < 0 or decl_id >= st_decl_shared.len(): return false
+    st_decl_shared[decl_id]
+
+fn _sto_note_owner(owner: text, name: text, decl_id: i64):
+    if sto_name_buckets.len() == 0:
+        sto_name_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = sto_name_buckets[bucket]
+    while idx != -1:
+        if sto_name_keys[idx] == name:
+            if sto_name_shared[idx]:
+                _st_decl_shared_set(decl_id)
+            elif sto_name_first_owner[idx] != owner and sto_name_first_decl[idx] != decl_id:
+                sto_name_shared[idx] = true
+                _st_decl_shared_set(sto_name_first_decl[idx])
+                _st_decl_shared_set(decl_id)
+            else:
+                sto_name_first_decl[idx] = decl_id
+            return
+        idx = sto_name_nexts[idx]
+    val new_idx = sto_name_keys.len()
+    sto_name_keys.push(name)
+    sto_name_first_owner.push(owner)
+    sto_name_first_decl.push(decl_id)
+    sto_name_shared.push(false)
+    sto_name_nexts.push(sto_name_buckets[bucket])
+    sto_name_buckets[bucket] = new_idx
+
+# reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+pub fn struct_table_register_owned(owner: text, name: text, decl_id: i64):
+    srm_stale = true
+    if sto_buckets.len() == 0:
+        sto_buckets = hm_make_global_buckets()
+    decl_owner_file_set(decl_id, owner)
+    _sto_note_owner(owner, name, decl_id)
+    val bucket = _hm_pair_bucket(owner, name)
+    var idx = sto_buckets[bucket]
+    while idx != -1:
+        if sto_owners[idx] == owner and sto_names[idx] == name:
+            sto_vals[idx] = decl_id
+            return
+        idx = sto_nexts[idx]
+    val new_idx = sto_names.len()
+    sto_owners.push(owner)
+    sto_names.push(name)
+    sto_vals.push(decl_id)
+    sto_nexts.push(sto_buckets[bucket])
+    sto_buckets[bucket] = new_idx
+
+# reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+pub fn struct_table_lookup_owned(owner: text, name: text) -> i64:
+    if sto_buckets.len() == 0:
+        return -1
+    val bucket = _hm_pair_bucket(owner, name)
+    var idx = sto_buckets[bucket]
+    while idx != -1:
+        _eval_table_chain_probes = _eval_table_chain_probes + 1
+        if sto_owners[idx] == owner and sto_names[idx] == name:
+            return sto_vals[idx]
+        idx = sto_nexts[idx]
+    -1
+
+# Owner module that declared struct/class `decl_id` ("" when unknown).
+# reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+pub fn struct_decl_owner(decl_id: i64) -> text:
+    decl_owner_file_get(decl_id)
+
+fn _struct_resolve_owned_depth(caller: text, name: text, depth: i64) -> i64:
+    if depth > 8: return -1
+    val own = struct_table_lookup_owned(caller, name)
+    if own >= 0:
+        return own
+    val route = func_import_binding_route(caller, name)
+    val imported_owner = route.0
+    if imported_owner == "" or imported_owner == caller:
+        return -1
+    val did = struct_table_lookup_owned(imported_owner, route.1)
+    if did >= 0:
+        return did
+    # Re-export chain (facade `export use owner.{Thing as Local}`).
+    _struct_resolve_owned_depth(imported_owner, route.1, depth + 1)
+
+# Once per name: a caller that neither defines nor imports a class name that
+# several owner modules declare gets the flat table's last-loaded pick.
+var _st_unrouted_warned: [text] = []
+
+# Whether the unrouted-class warning fired for `name` in this program.
+# reason: core-interpreter owner-keyed class table over raw class-name text
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw class-name text
+pub fn struct_unrouted_warned(name: text) -> bool:
+    for seen in _st_unrouted_warned:
+        if seen == name:
+            return true
+    false
+
+fn _st_warn_unrouted(caller: text, name: text):
+    for seen in _st_unrouted_warned:
+        if seen == name:
+            return
+    _st_unrouted_warned.push(name)
+    print "[WARN] class '{name}' is declared by several modules and '{caller}' neither defines nor imports it; using the last-loaded definition. Import it from its owner module (use <module>.{{{name}}}) or qualify it (<module>.{name}). [compiler_cross_module_private_symbol_collision]"
+
+# Resolve the class/struct a bare or aliased name denotes inside `caller`.
+# Single-owner names take the flat-table hit unchanged (one hash, no extra
+# probe); a shared name resolves by owner module; a flat miss is retried as an
+# import alias only when some alias binding exists. Falls back to the flat
+# table's pick when the caller neither defines nor imports a shared name.
+# reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+pub fn struct_resolve_for_caller(caller: text, name: text) -> i64:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var flat: i64 = -1
+    var idx = st_buckets[bucket]
+    while idx != -1:
+        if st_keys[idx] == name:
+            flat = st_vals[idx]
+            break
+        idx = st_nexts[idx]
+    if flat >= 0:
+        if flat >= st_decl_shared.len() or not st_decl_shared[flat]:
+            return flat
+    else:
+        # Only a class-like alias binding can name a class the flat table
+        # lacks, and its local name hashes to a flagged bucket.
+        if fib_class_alias_count == 0 or name == "" or not fib_class_alias_buckets[bucket]:
+            return -1
+        val first = name[0]
+        if first < "A" or first > "Z":
+            return -1
+    if srm_stale:
+        if srm_names.len() > 0 or srm_buckets.len() == 0:
+            srm_names = []
+            srm_callers = []
+            srm_vals = []
+            srm_nexts = []
+            srm_buckets = hm_make_global_buckets()
+        srm_stale = false
+    val memo_bucket = (bucket + caller.byte_len()) % HM_SIZE
+    var memo = srm_buckets[memo_bucket]
+    while memo != -1:
+        if srm_names[memo] == name and srm_callers[memo] == caller:
+            return srm_vals[memo]
+        memo = srm_nexts[memo]
+    var resolved = _struct_resolve_owned_depth(caller, name, 0)
+    if resolved < 0 and flat >= 0:
+        _st_warn_unrouted(caller, name)
+        resolved = flat
+    srm_names.push(name)
+    srm_callers.push(caller)
+    srm_vals.push(resolved)
+    srm_nexts.push(srm_buckets[memo_bucket])
+    srm_buckets[memo_bucket] = srm_names.len() - 1
+    resolved
+
+# True when some `use m.{A as B}` binding has a class-like local name, i.e. a
+# type name can denote a class declared under a different name.
+# reason: core-interpreter owner-keyed class table over raw class-name text
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw class-name text
+pub fn struct_class_alias_present() -> bool:
+    fib_class_alias_count > 0
+
+# Declared (bare) name of struct decl `sdecl`; `fallback` when unknown. An
+# import alias names the owner's class, whose instances keep its real name.
+# reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+pub fn struct_decl_name_for(sdecl: i64, fallback: text) -> text:
+    if sdecl < 0: return fallback
+    val declared = decl_get_name(sdecl)
+    if declared == "": fallback else: declared
+
+# `Type__member` for struct decl `sdecl`: the declaring module's definition
+# when the bare type name is shared by several owner modules (owner decision
+# 2026-11-27), else -- or when that owner defines none, e.g. an impl in
+# another module -- the flat bare-name table.
+# reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+pub fn struct_member_decl(sdecl: i64, type_name: text, member: text) -> i64:
+    val key = type_name + "__" + member
+    if sdecl >= 0 and struct_decl_is_shared_name(sdecl):
+        val owned = func_table_lookup_owned(struct_decl_owner(sdecl), key)
+        if owned >= 0:
+            return owned
+        # The owner module lacks this member. A flat hit is only usable when
+        # it does not belong to ANOTHER same-named class (a third module's
+        # impl/extension is fine); otherwise it is "not found", never a
+        # cross-dispatch into the other class.
+        val flat = func_table_lookup(key)
+        if flat < 0:
+            return -1
+        val other = struct_table_lookup_owned(decl_owner_file_get(flat), type_name)
+        if other >= 0 and other != sdecl:
+            return -1
+        return flat
+    func_table_lookup(key)
+
+# Resolve `ns.Name` where `ns` is a module namespace bound in `caller`.
+# reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+@allow(primitive_api) # reason: core-interpreter owner-keyed class table over raw module-path text and dense decl_id
+pub fn struct_resolve_module_member_for_caller(caller: text, alias: text, member: text) -> i64:
+    val owner = func_module_namespace_lookup(caller, alias)
+    if owner == "":
+        return -1
+    _struct_resolve_owned_depth(owner, member, 0)
+
+# Class/struct-name collision record — the type-table sibling of
+# `_ftr_warn_collision` above. The FLAT struct table is keyed on the bare name
+# (last write wins), which used to make two co-loaded same-named classes
+# cross-dispatch. Since the owner decision of 2026-11-27 a shared name
+# resolves by owner module (struct_resolve_for_caller, owner-keyed method
+# dispatch), so co-loading is legitimate and no longer printed; the names are
+# still recorded for observability. History:
 # doc/08_tracking/bug/interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md
 var _st_collision_warned: [text] = []
 
@@ -973,13 +1310,13 @@ fn _st_warn_collision(name: text, old_path: text, new_path: text):
             return
         j = j + 1
     _st_collision_warned.push(name)
-    print "[WARN] class/struct '{name}' has co-compiled definitions in multiple modules ({old_path} vs {new_path}); the interpreter resolves class members by NAME, so method bodies from one definition execute against instances of the other — the failure reads as 'method not found' or 'no field named ...' on a class that has the member. Rename one of the classes. [compiler_cross_module_private_symbol_collision]"
 
 # Observability hook for specs: names that have warned so far this process.
 pub fn struct_table_collisions() -> [text]:
     _st_collision_warned
 
 pub fn struct_table_register(name: text, decl_id: i64):
+    srm_stale = true
     val bucket = hm_hash_text(name) % HM_SIZE
     var idx = st_buckets[bucket]
     while idx != -1:
@@ -1007,6 +1344,7 @@ pub fn struct_table_lookup(name: text) -> i64:
     -1
 
 fn struct_table_remove(name: text) -> bool:
+    srm_stale = true
     val bucket = hm_hash_text(name) % HM_SIZE
     var prev: i64 = -1
     var idx = st_buckets[bucket]
@@ -1024,9 +1362,28 @@ fn struct_table_remove(name: text) -> bool:
         idx = st_nexts[idx]
     false
 
+fn _struct_owned_remove(owner: text, name: text, expected_decl_id: i64):
+    srm_stale = true
+    if owner == "" or sto_buckets.len() == 0:
+        return
+    val bucket = _hm_pair_bucket(owner, name)
+    var prev: i64 = -1
+    var idx = sto_buckets[bucket]
+    while idx != -1:
+        if sto_owners[idx] == owner and sto_names[idx] == name and sto_vals[idx] == expected_decl_id:
+            if prev == -1:
+                sto_buckets[bucket] = sto_nexts[idx]
+            else:
+                sto_nexts[prev] = sto_nexts[idx]
+            sto_vals[idx] = -1
+            return
+        prev = idx
+        idx = sto_nexts[idx]
+
 fn struct_table_remove_owned(name: text, expected_decl_id: i64) -> bool:
     # pure_interp_registry_2026-07-17: see func_table_remove_owned above —
     # same bare-name unload-corruption guard, for the struct table.
+    _struct_owned_remove(struct_decl_owner(expected_decl_id), name, expected_decl_id)
     val current = struct_table_lookup(name)
     if current != expected_decl_id:
         return false

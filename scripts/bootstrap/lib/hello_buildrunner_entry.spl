@@ -1,0 +1,53 @@
+# Single entry point from the phase-3 Hello matrix twin into the BuildRunner
+# twin (scripts/bootstrap/lib/hello_sanity_buildrunner_lane.spl, the port of
+# hello-sanity-buildrunner.py run_lane). This module adapts the matrix's
+# command owner (run_command / check_executable) to the lane's HelloMatrixPort
+# and maps its receipt fields onto the matrix's SDN writer.
+use std.nogc_sync_mut.io.env_ops.{host_arch}
+use scripts.bootstrap.lib.hello_matrix_policy.{SdnField}
+use scripts.bootstrap.lib.hello_matrix_run.{MatrixContext, run_command}
+use scripts.bootstrap.lib.hello_matrix_lane.{check_executable}
+use scripts.bootstrap.lib.hello_sanity_buildrunner.{SdnField as LaneField}
+use scripts.bootstrap.lib.hello_sanity_buildrunner_lane.{HelloMatrixPort, HelloLaneContext, HelloProvider, RuntimeHash, hello_buildrunner_run_lane}
+
+# The port's callbacks are plain functions; the active matrix context is held
+# here for the duration of one lane call (the matrix is single-threaded).
+var _active: [MatrixContext] = []
+
+fn _port_run(lane: text, name: text, argv: [text], seconds: i64) -> Result<text, text>:
+    if _active.len() != 1: return Err("buildrunner port used outside a matrix lane")
+    val r = run_command(_active[0], lane, name, argv, [], "", seconds)
+    if r.ok: Ok(r.stdout) else: Err(r.error)
+
+fn _port_check(lane: text, artifact: text) -> Result<bool, text>:
+    if _active.len() != 1: return Err("buildrunner port used outside a matrix lane")
+    val e = check_executable(_active[0], lane, artifact)
+    if e == "": Ok(true) else: Err(e)
+
+pub fn matrix_port() -> HelloMatrixPort:
+    HelloMatrixPort(run: _port_run, check_executable: _port_check)
+
+pub fn lane_context(ctx: MatrixContext, os: text, memory_policy: text, producer_path: text, producer_sha256: text) -> HelloLaneContext:
+    var hashes: [RuntimeHash] = []
+    for p in ctx.runtime_hashes:
+        hashes.push(RuntimeHash(relative: p.key, sha256: p.value))
+    HelloLaneContext(out: ctx.out, root: ctx.root, runtime: ctx.runtime, compiler: ctx.compiler, sha: ctx.sha, linker: ctx.linker, runtime_hashes: hashes, phase: ctx.phase, max_rss_kib: ctx.max_rss_kib, timeout_seconds: ctx.timeout_seconds, compile_route: ctx.compile_route, min_free_disk_bytes: ctx.min_free_disk_bytes, max_log_bytes: ctx.max_log_bytes, windows_abi: ctx.windows_abi, trace_stages: ctx.trace_stages, memory_policy: memory_policy, host_machine: host_arch(), host_os: os, producer_path: producer_path, producer_sha256: producer_sha256)
+
+# Lane receipt kinds (str/int/bool) onto the matrix writer kinds (s/i/b).
+pub fn matrix_fields(fields: [LaneField]) -> [SdnField]:
+    var out: [SdnField] = []
+    for f in fields:
+        val kind = if f.kind == "int": "i" elif f.kind == "bool": "b" else: "s"
+        out.push(SdnField(key: f.key, kind: kind, value: f.value))
+    out
+
+# Python: buildrunner_rows[name] = adapter.run_lane(...); an escaping
+# exception aborts the matrix, so Err is returned to the caller unchanged.
+pub fn matrix_buildrunner_run_lane(ctx: MatrixContext, os: text, memory_policy: text, producer_path: text, producer_sha256: text, backend: text, lane: text, manager: text, manifest_writer: text, template: text, target: text) -> Result<[SdnField], text>:
+    _active = [ctx]
+    val lane_ctx = lane_context(ctx, os, memory_policy, producer_path, producer_sha256)
+    val result = hello_buildrunner_run_lane(matrix_port(), lane_ctx, backend, lane, HelloProvider(manager: manager, manifest_writer: manifest_writer, template: template), target)
+    _active = []
+    match result:
+        case Ok(fields): Ok(matrix_fields(fields))
+        case Err(e): Err(e)

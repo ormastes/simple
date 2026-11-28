@@ -742,6 +742,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_opt_i64_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_i64_to_hex", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_opt_value_to_string", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_opt_f64_value_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_opt_bool_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_opt_f64_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_string", &[I64], &[I64]),
@@ -817,6 +818,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_enum_payload", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_unwrap_or_self", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_option_float_bits", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_option_float_tag", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_option_float_pack", &[I64, I64, F64], &[I64]),
     RuntimeFuncSpec::new("rt_unwrap_or_trap", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_expect_or_trap", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_unwrap_or_value", &[I64, I64], &[I64]),
@@ -1143,10 +1146,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_driver_poll_flags", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_poll_data", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_poll_data_len", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_cancel", &[I64, I64], &[I64]),
+    // extern "C" fn -> bool (Rust async_driver_sffi.rs and C runtime.h alike):
+    // I8, or the caller reads undefined RAX bits 8..63 (see
+    // runtime_h_bool_returns_use_i8_abi).
+    RuntimeFuncSpec::new("rt_driver_cancel", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_driver_backend_name", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_supports_sendfile", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_supports_zero_copy", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_supports_sendfile", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_driver_supports_zero_copy", &[I64], &[I8]),
     // =========================================================================
     // Generator operations
     // =========================================================================
@@ -2210,9 +2216,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_term_enable_ansi", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_term_get_size", &[], &[I64]), // () -> RuntimeValue (tuple of i32, i32)
     RuntimeFuncSpec::new("rt_terminal_get_size", &[], &[I64]), // () -> RuntimeValue (tuple of i64, i64)
-    RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
-    RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
-    RuntimeFuncSpec::new("rt_terminal_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I8]), // () -> C bool (C, Rust and simple_core lanes agree)
+    RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I8]), // () -> C bool (C, Rust and simple_core lanes agree)
+    RuntimeFuncSpec::new("rt_terminal_is_tty", &[], &[I8]), // () -> C bool (C, Rust and simple_core lanes agree)
     RuntimeFuncSpec::new("rt_terminal_is_tty_handle", &[I64], &[I8]), // (fd) -> C bool
     RuntimeFuncSpec::new("rt_terminal_signal_scope_begin", &[], &[I64]), // () -> opaque handle
     RuntimeFuncSpec::new("rt_terminal_read_byte_interruptible", &[I64], &[I64]), // handle -> byte/outcome
@@ -2640,7 +2646,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_trim_start_matches", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_zfill", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_take", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I8]), // () -> C bool (C, Rust and simple_core lanes agree)
     RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_xxh3_128_text", &[I64], &[I64]), // text -> 32-hex XXH3-128
@@ -2675,6 +2681,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_run_bounded_environment_tuple_v1", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_run_bounded_admitted_tuple_v1", &[I64, I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_async_environment_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn_async_env_v1", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_pty_close", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_pty_exit_code_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_pty_hangup", &[I64], &[I8]),
@@ -2816,6 +2823,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_stdout_state", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_piped_exit_status_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_piped_generation_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn_piped_environment_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_wait_readable_v1", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_piped_pid_for_generation_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_read_stdout_ref_v1", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_stdout_state_ref_v1", &[I64, I64], &[I64]),
@@ -3236,11 +3245,63 @@ mod tests {
         assert_eq!(start.returns, [I64]);
     }
 
+    /// A C runtime function declared `bool rt_x(...)` only defines AL; x86-64
+    /// SysV and Win64 leave RAX bits 8..63 undefined. Declaring such an import
+    /// with an I64 return makes the caller read those bits: clang's
+    /// `rt_process_is_running` ends `sete %bl; movl %ebx, %eax`, so the
+    /// caller's saved RBX bits 8..31 leaked into the result and
+    /// `not process_is_running(pid)` read false for an exited child
+    /// (doc/08_tracking/bug/seed_native_inline_if_else_or_chain_false_2026-11-27.md).
+    /// Every `bool` prototype in runtime.h with a spec must use I8, with no
+    /// exceptions: the Rust and simple_core twins return plain `bool` too.
+    /// Parser limit: only single-line prototypes that
+    /// START with `bool` are seen (no `extern`/`static inline`/macro prefix, no
+    /// split declarations) -- runtime.h has none of those forms today.
+    #[test]
+    fn runtime_h_bool_returns_use_i8_abi() {
+        let header_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/runtime.h");
+        let header = std::fs::read_to_string(&header_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", header_path.display()));
+        let mut checked = 0usize;
+        let mut wrong = Vec::new();
+        for line in header.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("bool") else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            let Some(name) = rest.split(|c: char| c == '(' || c.is_whitespace()).next() else {
+                continue;
+            };
+            if !name.starts_with("rt_") {
+                continue;
+            }
+            let Some(spec) = spec_for(name) else { continue };
+            checked += 1;
+            if spec.returns != [I8] {
+                wrong.push(format!("{name} returns {:?}", spec.returns));
+            }
+        }
+        assert!(checked > 0, "no `bool rt_*` prototype in runtime.h matched a spec");
+        assert!(
+            wrong.is_empty(),
+            "C `bool` runtime imports must declare an I8 return: {wrong:?}"
+        );
+    }
+
     #[test]
     fn process_bool_sffi_specs_use_i8_return_abi() {
-        for name in ["rt_process_is_running", "rt_process_kill", "rt_process_exists"] {
-            let spec = spec_for(name).unwrap_or_else(|| panic!("missing process bool spec: {name}"));
-            assert_eq!(spec.params, [I64], "{name} params");
+        let one: &[types::Type] = &[I64];
+        let two: &[types::Type] = &[I64, I64];
+        for (name, params) in [
+            ("rt_process_is_running", one),
+            ("rt_process_kill", one),
+            ("rt_process_exists", one),
+            ("rt_driver_cancel", two),
+            ("rt_driver_supports_sendfile", one),
+            ("rt_driver_supports_zero_copy", one),
+        ] {
+            let spec = spec_for(name).unwrap_or_else(|| panic!("missing bool-returning spec: {name}"));
+            assert_eq!(spec.params, params, "{name} params");
             assert_eq!(spec.returns, [I8], "{name} must use I8 to match extern \"C\" fn -> bool");
         }
     }

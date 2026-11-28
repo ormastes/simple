@@ -7,9 +7,13 @@ use simple_parser::{self as ast, ast::Mutability, ast::Pattern, Expr, MatchArm};
 use std::collections::HashSet;
 
 use crate::hir::lower::context::FunctionContext;
-use crate::hir::lower::error::LowerResult;
+use crate::hir::lower::error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
+
+// `Lowerer::join_class` codes of the two classes numeric promotion joins.
+const JOIN_INT: u8 = 1;
+const JOIN_FLOAT: u8 = 2;
 
 fn hir_expr_definitely_returns(expr: &HirExpr) -> bool {
     match &expr.kind {
@@ -45,7 +49,7 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
 /// Its default element/key type is not evidence about the join type, so a
 /// concrete sibling must win (same rule `lower_if` applies to `[]`).
 /// Bottom arms (`return`, NIL) are ignored; at least one arm must be weak.
-fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
+pub(super) fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
     weak_expr(expr) == Some(true)
 }
 
@@ -59,6 +63,10 @@ fn weak_expr(expr: &HirExpr) -> Option<bool> {
         HirExprKind::Dict(pairs) => Some(pairs.is_empty()),
         HirExprKind::Block(stmts) => weak_stmts(stmts),
         HirExprKind::LetIn { body, .. } => weak_expr(body),
+        // `Some([])` is as weak as `[]`: the Option wrapper adds no element evidence.
+        HirExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, HirExprKind::Global(n) if n == "Some") => {
+            weak_expr(&args[0])
+        }
         HirExprKind::If {
             then_branch,
             else_branch: Some(else_branch),
@@ -85,6 +93,88 @@ fn join_weak(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     match (a, b) {
         (None, other) | (other, None) => other,
         (Some(x), Some(y)) => Some(x && y),
+    }
+}
+
+/// Some(true) when the weak literal reached through `Some(..)`/blocks/ifs is a `{}`, Some(false)
+/// for `[]`.
+fn weak_literal_is_dict(expr: &HirExpr) -> Option<bool> {
+    match &expr.kind {
+        HirExprKind::Array(_) => Some(false),
+        HirExprKind::Dict(_) => Some(true),
+        HirExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, HirExprKind::Global(n) if n == "Some") => {
+            weak_literal_is_dict(&args[0])
+        }
+        HirExprKind::LetIn { body, .. } => weak_literal_is_dict(body),
+        HirExprKind::Block(stmts) => match stmts.last() {
+            Some(HirStmt::Expr(e)) => weak_literal_is_dict(e),
+            _ => None,
+        },
+        HirExprKind::If { then_branch, else_branch: Some(else_branch), .. } => {
+            weak_literal_is_dict(then_branch).or_else(|| weak_literal_is_dict(else_branch))
+        }
+        _ => None,
+    }
+}
+
+/// An arm with no value for `Lowerer::join_value_arms` to judge: bottom, or a
+/// block that ends in a statement (`continue`, `break`, an assignment, a
+/// statement `if`) instead of an expression.
+fn hir_arm_yields_no_value(expr: &HirExpr) -> bool {
+    if hir_arm_is_bottom(expr) {
+        return true;
+    }
+    match &expr.kind {
+        HirExprKind::Block(stmts) => !matches!(stmts.last(), Some(HirStmt::Expr(tail)) if !hir_arm_yields_no_value(tail)),
+        HirExprKind::LetIn { body, .. } => hir_arm_yields_no_value(body),
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => hir_arm_yields_no_value(then_branch) && hir_arm_yields_no_value(else_branch),
+        _ => false,
+    }
+}
+
+/// Nesting depth down to which an array literal holds only empty literals
+/// (`[]` = 1, `[[]]` and `[[], []]` = 2): below it the literal's default element
+/// type is not evidence. `None` for anything else.
+fn hir_hollow_literal_depth(expr: &HirExpr) -> Option<usize> {
+    match &expr.kind {
+        HirExprKind::Array(items) => {
+            let mut depth = usize::MAX;
+            for item in items {
+                depth = depth.min(hir_hollow_literal_depth(item)?);
+            }
+            Some(if items.is_empty() { 1 } else { depth + 1 })
+        }
+        HirExprKind::Block(stmts) => match stmts.last() {
+            Some(HirStmt::Expr(tail)) => hir_hollow_literal_depth(tail),
+            _ => None,
+        },
+        HirExprKind::LetIn { body, .. } => hir_hollow_literal_depth(body),
+        // A match arm chain: every value arm must be hollow; bottom arms are ignored.
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => match (hir_arm_is_bottom(then_branch), hir_arm_is_bottom(else_branch)) {
+            (true, true) => None,
+            (true, false) => hir_hollow_literal_depth(else_branch),
+            (false, true) => hir_hollow_literal_depth(then_branch),
+            (false, false) => Some(hir_hollow_literal_depth(then_branch)?.min(hir_hollow_literal_depth(else_branch)?)),
+        },
+        _ => None,
+    }
+}
+
+/// The value of `expr` comes from an `if`/`else` or `match` join.
+fn hir_is_value_join(expr: &HirExpr) -> bool {
+    match &expr.kind {
+        HirExprKind::If { else_branch: Some(_), .. } => true,
+        HirExprKind::LetIn { body, .. } => hir_is_value_join(body),
+        HirExprKind::Block(stmts) => matches!(stmts.last(), Some(HirStmt::Expr(tail)) if hir_is_value_join(tail)),
+        _ => false,
     }
 }
 
@@ -138,6 +228,10 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
 fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
     match expr {
         Expr::ArrayRepeat { .. } => true,
+        // `Some([x; 0])` keeps the repeat evidence through the Option wrapper.
+        Expr::Call { callee, args, .. } if args.len() == 1 && matches!(callee.as_ref(), Expr::Identifier(n) if n == "Some") => {
+            ast_expr_tail_is_array_repeat(&args[0].value)
+        }
         Expr::DoBlock(stmts) => ast_stmts_tail_is_array_repeat(stmts),
         Expr::If {
             then_branch,
@@ -279,6 +373,19 @@ impl Lowerer {
         }
     }
 
+    /// Payload type of an `Option` enum (only `Option`, never `Result`).
+    pub(crate) fn option_enum_payload(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, variants, .. }) if name == "Option" => variants
+                .iter()
+                .find(|(variant, _)| variant == "Some")
+                .and_then(|(_, payload)| payload.as_ref())
+                .and_then(|fields| fields.first())
+                .copied(),
+            _ => None,
+        }
+    }
+
     pub(super) fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Enum { name, variants, .. }) if name == "Result" => {
@@ -307,11 +414,194 @@ impl Lowerer {
     /// Both types are arrays, or both are dicts: only then may a weak empty
     /// literal defer to its sibling (an unrelated aggregate keeps the default).
     fn same_collection_kind(&self, a: TypeId, b: TypeId) -> bool {
+        // Option vs Option (or the ANY-typed `Some([])` vs an Option): compare payloads.
+        // Only Option enums are looked through, never Result.
+        match (self.option_enum_payload(a), self.option_enum_payload(b)) {
+            (Some(pa), Some(pb)) => return self.same_collection_kind(pa, pb),
+            _ => {}
+        }
         matches!(
             (self.module.types.get(a), self.module.types.get(b)),
             (Some(HirType::Array { .. } | HirType::Any), Some(HirType::Array { .. }))
                 | (Some(HirType::Dict { .. } | HirType::Any), Some(HirType::Dict { .. }))
         )
+    }
+
+    /// `same_collection_kind` for a weak arm `weak` of type `a`. An erased (ANY) `Some([])` /
+    /// `Some({})` carries its kind only in the literal, so derive array-vs-dict from it and
+    /// require the sibling Option payload to match.
+    fn weak_arm_matches_sibling(&self, weak: &HirExpr, a: TypeId, b: TypeId) -> bool {
+        if a == TypeId::ANY {
+            if let Some(payload) = self.option_enum_payload(b) {
+                return match weak_literal_is_dict(weak) {
+                    Some(true) => matches!(self.module.types.get(payload), Some(HirType::Dict { .. })),
+                    Some(false) => matches!(self.module.types.get(payload), Some(HirType::Array { .. })),
+                    None => false,
+                };
+            }
+        }
+        self.same_collection_kind(a, b)
+    }
+
+    /// Representation class of an arm type the value join can judge, or
+    /// `None` for one it leaves alone (ANY, struct, enum, Option, tuple, a
+    /// suffix-guessed method result): there the seed's typing is not
+    /// authoritative, see `validate_declared_return_type`.
+    fn join_class(&self, ty: TypeId) -> Option<u8> {
+        if self.suffix_guessed_return_types.contains(&ty) {
+            return None;
+        }
+        match self.module.types.get(ty)? {
+            HirType::Bool => Some(0),
+            HirType::Int { .. } => Some(JOIN_INT),
+            HirType::Float { .. } if self.guessed_float_in_function.get() => None,
+            HirType::Float { .. } => Some(JOIN_FLOAT),
+            HirType::String => Some(3),
+            HirType::Array { .. } => Some(4),
+            HirType::Dict { .. } => Some(5),
+            _ => None,
+        }
+    }
+
+    /// Two judged types that cannot share one slot: different classes, or
+    /// arrays whose element types disagree (`[f64]` vs `[i64]`). `hollow` is
+    /// the depth below which one side is only empty literals
+    /// (`hir_hollow_literal_depth`): nothing is compared past it.
+    fn join_types_disagree(&self, a: TypeId, b: TypeId, hollow: Option<usize>) -> bool {
+        if hollow == Some(0) {
+            return false;
+        }
+        let (Some(ca), Some(cb)) = (self.join_class(a), self.join_class(b)) else {
+            return false;
+        };
+        match (self.module.types.get(a), self.module.types.get(b)) {
+            (Some(HirType::Array { element: ea, .. }), Some(HirType::Array { element: eb, .. })) => {
+                self.join_types_disagree(*ea, *eb, hollow.map(|d| d - 1))
+            }
+            _ => ca != cb,
+        }
+    }
+
+    fn join_type_name(&self, ty: TypeId) -> String {
+        match self.module.types.get(ty) {
+            Some(HirType::Bool) => "bool".to_string(),
+            Some(HirType::String) => "text".to_string(),
+            Some(HirType::Float { bits }) => format!("f{bits}"),
+            Some(HirType::Int { bits, signedness }) => {
+                format!("{}{bits}", if matches!(signedness, Signedness::Unsigned) { "u" } else { "i" })
+            }
+            Some(HirType::Array { element, .. }) => format!("[{}]", self.join_type_name(*element)),
+            Some(HirType::Dict { key, value }) => {
+                format!("Dict<{}, {}>", self.join_type_name(*key), self.join_type_name(*value))
+            }
+            _ => "_".to_string(),
+        }
+    }
+
+    /// A float-typed `if`/`match` join stored into an integer slot (annotated
+    /// binding, assignment target, struct field). The int -> float promotion
+    /// of `join_value_arms` must never reach an int slot silently.
+    pub(in crate::hir::lower) fn reject_float_join_for_int_slot(
+        &self,
+        expected: TypeId,
+        value: &HirExpr,
+        slot: &str,
+    ) -> LowerResult<()> {
+        if hir_is_value_join(value) {
+            self.reject_float_for_int_slot(expected, value, slot)?;
+        }
+        Ok(())
+    }
+
+    /// Typed join of two value-position `if`/`match` arms. The first concrete
+    /// arm's type used to win and the sibling was read through it as garbage
+    /// (`1` vs `"a"`, `{}` vs `5`, `[f64]` vs `[i64]`).
+    ///
+    /// - int vs float: the language's implicit int -> float widening (same
+    ///   rule as mixed arithmetic); the int arm is converted and the join is
+    ///   the float type. A float join stored into an int slot is E1003
+    ///   (`reject_float_join_for_int_slot`, index, argument, return).
+    /// - any other disagreement is a compile-time type error in safe code.
+    ///   Only `unsafe` code and functions of a script entry file (`.shs` /
+    ///   `.sscript`, see `set_entry_script_mode`) keep the untyped join.
+    ///
+    /// Bottom arms, weak empty literals against the same collection kind and
+    /// types `join_class` does not judge are left to the existing rules.
+    /// `labels` name the two arms in the message.
+    fn join_value_arms(
+        &self,
+        then_arm: &mut HirExpr,
+        else_arm: &mut HirExpr,
+        ty: &mut TypeId,
+        labels: (&str, &str),
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        if hir_arm_yields_no_value(then_arm) || hir_arm_yields_no_value(else_arm) {
+            return Ok(());
+        }
+        // A dict literal is a dict whatever (dynamic) type the seed gave it.
+        let class = |arm: &HirExpr| match arm.kind {
+            HirExprKind::Dict(_) => Some(5),
+            _ => self.join_class(arm.ty),
+        };
+        let (Some(a), Some(b)) = (class(then_arm), class(else_arm)) else {
+            return Ok(());
+        };
+        if (a == JOIN_INT && b == JOIN_FLOAT) || (a == JOIN_FLOAT && b == JOIN_INT) {
+            let (int_arm, target) = if a == JOIN_INT { (then_arm, else_arm.ty) } else { (else_arm, then_arm.ty) };
+            let value = std::mem::replace(
+                int_arm,
+                HirExpr {
+                    kind: HirExprKind::Nil,
+                    ty: TypeId::NIL,
+                },
+            );
+            *int_arm = HirExpr {
+                kind: HirExprKind::Cast {
+                    expr: Box::new(value),
+                    target,
+                },
+                ty: target,
+            };
+            *ty = target;
+            return Ok(());
+        }
+        let both_concrete = hir_value_is_concrete(then_arm) && hir_value_is_concrete(else_arm);
+        let (then_hollow, else_hollow) = (hir_hollow_literal_depth(then_arm), hir_hollow_literal_depth(else_arm));
+        let hollow = [then_hollow, else_hollow].into_iter().flatten().min();
+        let disagree = a != b || (both_concrete && self.join_types_disagree(then_arm.ty, else_arm.ty, hollow));
+        // A nested hollow then-arm (`[[]]`) defers to its concrete sibling, as a
+        // plain `[]` already does in the callers.
+        if !disagree && a == b && then_hollow.is_some_and(|d| d > 1) && else_hollow.is_none() {
+            *ty = else_arm.ty;
+        }
+        let script_fn = crate::hir::lower::lowerer::entry_script_mode() && self.current_function_owner.is_none();
+        if !disagree || ctx.unsafe_depth > 0 || script_fn {
+            return Ok(());
+        }
+        let mut site = format!("`{}`", self.current_function_name.as_deref().unwrap_or("<module>"));
+        if let Some(line) = self.current_function_line {
+            site.push_str(&format!(" (fn at line {line}"));
+            if let Some(owner) = self.current_function_owner.as_deref() {
+                site.push_str(&format!(" of {}", owner.trim_start_matches(r"\\?\")));
+            }
+            site.push(')');
+        }
+        let name = |arm: &HirExpr| match arm.kind {
+            HirExprKind::Array(ref items) if items.is_empty() => "[]".to_string(),
+            HirExprKind::Dict(_) if self.join_class(arm.ty).is_none() => "Dict".to_string(),
+            _ => self.join_type_name(arm.ty),
+        };
+        let msg = format!(
+            "{LOWERING_TYPE_ERROR_TAG} type mismatch: value arms disagree in {site}: {} is `{}` but {} is `{}`; \
+             give every arm one type (convert explicitly, or wrap the alternatives in an enum) -- \
+             only `unsafe` code or a script may mix arm types",
+            labels.0,
+            name(then_arm),
+            labels.1,
+            name(else_arm)
+        );
+        Err(LowerError::Unsupported(msg))
     }
 
     /// Lower an if expression to HIR
@@ -367,7 +657,7 @@ impl Lowerer {
             if hir_value_is_weak_empty(&then_hir)
                 && hir_value_is_concrete(other)
                 && other.ty != TypeId::ANY
-                && self.same_collection_kind(then_hir.ty, other.ty)
+                && self.weak_arm_matches_sibling(&then_hir, then_hir.ty, other.ty)
                 && !ast_expr_tail_is_array_repeat(then_branch)
             {
                 ty = other.ty;
@@ -402,6 +692,10 @@ impl Lowerer {
                     ty = slice_ty;
                 }
             }
+        }
+        self.reject_uninferred_join(&then_hir, else_hir.as_deref(), ctx)?;
+        if let Some(other) = else_hir.as_mut() {
+            self.join_value_arms(&mut then_hir, other, &mut ty, ("the then-arm", "the else-arm"), ctx)?;
         }
 
         Ok(HirExpr {
@@ -466,8 +760,8 @@ impl Lowerer {
         let binding_stmts = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
 
         let then_hir = self.lower_expr(then_branch, ctx)?;
-        let ty = then_hir.ty;
-        let then_hir = if binding_stmts.is_empty() {
+        let mut ty = then_hir.ty;
+        let mut then_hir = if binding_stmts.is_empty() {
             then_hir
         } else {
             let mut stmts = binding_stmts;
@@ -482,11 +776,14 @@ impl Lowerer {
         // indices already baked into the HIR remain valid.
         self.restore_match_bindings(previous_bindings, ctx);
 
-        let else_hir = if let Some(eb) = else_branch {
+        let mut else_hir = if let Some(eb) = else_branch {
             Some(Box::new(self.lower_expr(eb, ctx)?))
         } else {
             None
         };
+        if let Some(other) = else_hir.as_mut() {
+            self.join_value_arms(&mut then_hir, other, &mut ty, ("the then-arm", "the else-arm"), ctx)?;
+        }
 
         let if_expr = HirExpr {
             kind: HirExprKind::If {
@@ -606,6 +903,7 @@ impl Lowerer {
 
         // Restore context; lambda-local variables must not leak to the outer function.
         ctx.locals.truncate(saved_locals_len);
+        ctx.uninferred_locals.retain(|index, _| *index < saved_locals_len);
         ctx.local_map = saved_local_map;
 
         Ok(HirExpr {
@@ -734,8 +1032,9 @@ impl Lowerer {
         self.lower_match_with(subject, arms, "expression", ctx)
     }
 
-    /// `form` is `"expression"` or `"statement"` and only names the match form
-    /// in the no-arm-matched panic: a match used as a statement (value
+    /// `form` is `"expression"` or `"statement"`. It names the match form in the
+    /// no-arm-matched panic, and only the expression form has its arms joined
+    /// (`join_value_arms`). A match used as a statement (value
     /// discarded) fails closed exactly like a value-position one (owner
     /// decision 2026-11-14,
     /// doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md).
@@ -748,6 +1047,7 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         // Lower the subject once and store in a local variable to avoid re-evaluation
         let subject_hir = self.lower_subject_for_patterns(subject, arms.iter().map(|a| &a.pattern), false, ctx)?;
+        self.reject_uninferred(&subject_hir, "a match subject", ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value
@@ -757,7 +1057,7 @@ impl Lowerer {
 
         // Build the chain of If-Else expressions from the arms
         let exhaust_msg = match_exhausted_message(form, arms.first().map(|a| ("first arm", a.span.line)));
-        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, &exhaust_msg, ctx)?;
+        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, &exhaust_msg, form == "expression", ctx)?;
         let result_ty = if_chain.ty;
 
         // Wrap in LetIn to store the subject before evaluating the if-else chain
@@ -778,6 +1078,7 @@ impl Lowerer {
         subject_ty: TypeId,
         arms: &[MatchArm],
         exhaust_msg: &str,
+        value_position: bool,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         if arms.is_empty() {
@@ -818,7 +1119,7 @@ impl Lowerer {
         // Lower the arm body with bindings in scope
         let then_branch = self.lower_match_arm_body(&arm.body, ctx)?;
         let then_ty = then_branch.ty;
-        let then_branch = if binding_stmts.is_empty() {
+        let mut then_branch = if binding_stmts.is_empty() {
             then_branch
         } else {
             // Prepend the binding initializations, preserving the arm value as
@@ -837,7 +1138,8 @@ impl Lowerer {
         self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
-        let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, exhaust_msg, ctx)?;
+        let mut else_branch =
+            self.lower_match_arms(subject_idx, subject_ty, remaining_arms, exhaust_msg, value_position, ctx)?;
         // Class 5: a BOTTOM arm — a return-only arm, a bare `nil`, or
         // `panic(...)` (which lowers to `rt_panic` typed `TypeId::NIL`) —
         // does not contribute a value to the match join. Using its type as
@@ -853,9 +1155,19 @@ impl Lowerer {
             && hir_value_is_weak_empty(&then_branch)
             && hir_value_is_concrete(&else_branch)
             && else_branch.ty != TypeId::ANY
-            && self.same_collection_kind(then_ty, else_branch.ty)
+            && self.weak_arm_matches_sibling(&then_branch, then_ty, else_branch.ty)
             && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
-        let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
+        self.reject_uninferred_join(&then_branch, Some(&else_branch), ctx)?;
+        let mut result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
+        // A statement-form match discards its value: its arms are not joined.
+        if value_position {
+            let then_label = format!("the arm at line {}", arm.span.line);
+            let rest_label = match remaining_arms.first() {
+                Some(next) => format!("the arm(s) from line {}", next.span.line),
+                None => "the fall-through".to_string(),
+            };
+            self.join_value_arms(&mut then_branch, &mut else_branch, &mut result_ty, (&then_label, &rest_label), ctx)?;
+        }
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -901,6 +1213,18 @@ impl Lowerer {
                     if subject_ty == TypeId::ANY {
                         return Ok(self.erased_none_arm_condition(&subject_ref));
                     }
+                    crate::hir::lower::option_pattern_shape_diag::report_if_never_option_with_owner(
+                        None,
+                        "nil",
+                        self.module.types.get(subject_ty),
+                        "expression form",
+                        crate::hir::lower::option_pattern_shape_diag::DiagLocation {
+                            file: self.current_file.as_deref(),
+                            function: self.current_function_name.as_deref(),
+                            line: self.current_pattern_span.map(|(line, _)| line),
+                            column: self.current_pattern_span.map(|(_, column)| column),
+                        },
+                    )?;
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -998,11 +1322,13 @@ impl Lowerer {
                 })
             }
             Pattern::Enum { name: pattern_enum, variant, .. } => {
-                // Warn-only, DEFAULT OFF. Expression-form twin of the statement
-                // check in hir/lower/stmt_lowering.rs; reached for
+                // Warn-only, DEFAULT OFF for Ok/Err; error by default for Some/None.
+                // Expression-form twin of the statement check in
+                // hir/lower/stmt_lowering.rs; reached for
                 // `val x = match subj: case Some(v)`. See
                 // hir/lower/option_pattern_shape_diag.rs.
-                crate::hir::lower::option_pattern_shape_diag::report_if_never_option(
+                crate::hir::lower::option_pattern_shape_diag::report_if_never_option_with_owner(
+                    Some(pattern_enum.as_str()),
                     variant,
                     self.module.types.get(subject_ty),
                     "expression form",
