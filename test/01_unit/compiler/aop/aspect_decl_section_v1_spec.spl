@@ -1,0 +1,623 @@
+# @req REQ-ASPECT-AW1-CODEC
+# @req REQ-ASPECT-AW1-FAILCLOSED
+# @req REQ-ASPECT-AW1-FACETS
+"""
+# `aspect-decl|`: the advice declarations a module publishes in its TLDR
+
+## Purpose and audience
+
+Purpose: document and pin
+`src/compiler/00.common/cache_contract/aspect_decl_section_v1.spl`, the codec
+of the `aspect-decl|` module TLDR section (aspect plan stage AW-1). A module
+that declares advice writes one row per declaration into its own TLDR. A file
+that may be advised later reads those rows instead of another file's HIR or a
+process-global registry, so the cache can tell which files an advice edit
+touches without compiling anything.
+
+Audience: compiler engineers who produce or consume the section (the TLDR
+writer, the later `advice_index` and weave-plan stages) and reviewers checking
+that a damaged or foreign section can never be read as "this module declares
+no advice".
+
+## What a section holds
+
+| Part | Meaning |
+|------|---------|
+| seal | sha256 over every byte after it; integrity only |
+| leaf digest | the module's aspect interface digest (rows, handler signature, effects; no body); the input of the directory `aspect_root_digest` |
+| row | family (`logical` or `mir`), `AdviceId`, handler, form, mode, activation, selector text and selector id, scope id, order, the three contract flags, signature digest, effects digest |
+| `advice.body` facet | the handler body digest; excluded from the row digest and from the leaf |
+| `family_inventory_index` | the position of the declaration in its family; kept for order, excluded from the row digest |
+
+`form` is the declaration as written: the advice form of a mir row (`before`,
+`after`, `around`) or the join-point kind of a logical row (`forward`). `mode`
+is where the advice runs: the form of a mir row, and `before` for a logical
+row, which is always woven as a call at the start of the forwarder.
+`activation` is the declared weave mode (`static` unless a registry mode is
+named).
+
+`AdviceId` names a declaration by module, family, handler and the 0-based
+occurrence of that handler in that family. It is not the position of the
+declaration in the module, so adding or removing another advice leaves it
+unchanged; `family_inventory_index` is that position and does shift.
+
+A row digest (`aspect_decl_row_digest_v1`) is the identity of a declaration.
+Editing an advice body changes only the facet. Editing a selector changes the
+row digest. Both rules are proved here on hand-built rows and again on real
+lowered modules in `aspect_decl_section_writer_v1_spec.spl`.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/aop/aspect_decl_section_v1_spec.spl`
+   from the repository root. No fixture file and no host fact is read.
+2. Measure coverage with
+   `SIMPLE_EXECUTION_MODE=interpreter SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<f> <seed> run <this spec>`
+   (doc/07_guide/infra/testing/coverage.md).
+
+## Reading a decode result
+
+| status | When | What the reader does |
+|--------|------|----------------------|
+| `ok` | size, framing, magic, seal, counts and every row verified | uses the section |
+| `miss` | no section, or a seal whose algorithm this reader cannot verify | recomputes; nothing is wrong |
+| `reject` | malformed, truncated, over a limit, tampered, unknown non-optional field | recomputes and may report the reason |
+
+A result that is not `ok` always carries an empty section.
+
+## Lifecycle
+
+Research: doc/01_research/local/dir_tldr_aspect.md
+Plan: doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (AW-1)
+Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
+Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md (section 3)
+
+## Decision inventory (MC/DC)
+
+Function names refer to `aspect_decl_section_v1.spl`.
+
+| Function | Decision | Covering scenario |
+|----------|----------|-------------------|
+| `aspect_section_count_v1` | empty or longer than 12 digits; byte below `0` or above `9` | "a count is 1 to 12 decimal digits" |
+| `aspect_section_frames_read_v1` | width scan stops at end of data, at 12 digits, at `:`; bad width, missing `:`, 13th digit, value overruns | "a frame list is read back value for value", "bytes outside a frame invalidate the whole list" |
+| `aspect_section_seal_status_v1` | unparsable seal; algorithm is not sha256; text differs | "a seal verifies only for its own bytes and its own algorithm" |
+| `aspect_body_span_digest_v1` | negative start, empty span, span past the end; name absent | "a body digest covers exactly the function's own span" |
+| `aspect_decl_row_digest_v1` | key is `body`; key is `index` | "an advice body edit changes only the body facet", "adding an unrelated earlier advice leaves later advice ids unchanged" |
+| `aspect_decl_row_v1` | family is `mir` | "a resolved handler becomes one row of its family" |
+| `aspect_decl_section_of_semantic_v1` | handler has no digest; digest is empty; handler already declared in this family | "a handler without a body digest is an error", "two declarations of one handler get different advice ids" |
+| `aspect_decl_section_encode_v1` | row limit; head field limit; row field limit; section limit | "encoding refuses every over-limit section" |
+| `_int_v1` | leading `-`; bad magnitude; bad number | "order may be negative", "a row with a bad number or flag is rejected" |
+| `_row_decode_v1` | known key; duplicate; optional `?` key; missing key; flag not `1` and not `0`; index or order unreadable; index negative | "an unknown optional field is ignored", "an unknown mandatory field is rejected", "a row with a bad number or flag is rejected" |
+| `aspect_decl_section_decode_v1` | size; framing; fewer than six values; magic; seal miss; seal reject; count unreadable; count over limit; rows run out; pair count unreadable or overrunning; row error; trailing values | the `decode` scenarios |
+| `aspect_decl_section_of_entries_v1` | entry has the kind prefix; none; more than one | "a module TLDR carries exactly one section" |
+
+Exclusions: none.
+
+## Compatibility and limitations
+
+Text is measured in bytes everywhere in this codec. The surrounding module
+TLDR record counts characters, so the TLDR round trip here uses ASCII; the
+non-ASCII round trip is proved on the section text itself.
+The scope id is the same value in every row: no source syntax declares an
+advice scope yet.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:aop
+# @tag:cache
+# @tag:coverage
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.aspect_decl_section_v1.*
+use compiler.common.cache_contract.directory_aspect_draft_v2.{DirectoryAspectDeclarationV2}
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectHandlerV2,
+    DirectoryAspectSemanticV2}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_render_v1,
+    module_tldr_sections_parse_v1}
+
+val MODULE = "pkg.aspects"
+
+fn declaration(family: text, index: i64, name: text, selector: text, mode: text,
+        priority: i64) -> DirectoryAspectDeclarationV2:
+    DirectoryAspectDeclarationV2(family: family, family_inventory_index: index, handler: name,
+        form: if family == "mir": "after" else: "forward", selector: selector, mode: mode,
+        priority: priority, readonly: family == "logical", noalloc: family == "logical",
+        bounded_time: false)
+
+fn resolved(family: text, index: i64, name: text, selector: text, mode: text,
+        priority: i64) -> DirectoryAspectHandlerV2:
+    DirectoryAspectHandlerV2(declaration: declaration(family, index, name, selector, mode, priority),
+        signature_digest: sha256_text("signature of " + name),
+        effects_digest: sha256_text("effects of " + name))
+
+fn logical_handler() -> DirectoryAspectHandlerV2:
+    resolved("logical", 0, "trace_submit", "submit_view", "static", 0)
+
+fn mir_handler() -> DirectoryAspectHandlerV2:
+    resolved("mir", 0, "audit_call", "execution(pay*)", "static", -5)
+
+fn semantic_of(handlers: [DirectoryAspectHandlerV2]) -> DirectoryAspectSemanticV2:
+    DirectoryAspectSemanticV2(
+        source: DirectoryCategoryProjectionV2(canonical_path: "pkg/aspects.spl",
+            source_identity: "pkg/aspects.spl", source_digest: sha256_text("source"),
+            target_triple: "x86_64-unknown-linux-gnu", preprocessed_digest: sha256_text("source"),
+            cfg_decision_digest: sha256_text("cfg"), environment_policy_digest: sha256_text("policy"),
+            trait_root: sha256_text("traits"), extension_root: sha256_text("extensions")),
+        source_epoch: DirectorySourceEpochV2(driver_identity: 1, generation: 1),
+        module_identity: MODULE, coverage_schema: "current-parser-aop/v1", handlers: handlers,
+        interface_digest: sha256_text("interface"))
+
+fn bodies() -> Dict<text, text>:
+    {"trace_submit": sha256_text("body of trace_submit"), "audit_call": sha256_text("body of audit_call")}
+
+fn both_families() -> AspectDeclSectionV1:
+    aspect_decl_section_of_semantic_v1(semantic_of([mir_handler(), logical_handler()]), bodies()).unwrap()
+
+fn encoded_both() -> text:
+    aspect_decl_section_encode_v1(both_families()).unwrap()
+
+fn repeated(unit: text, count: i64) -> text:
+    var out = ""
+    var chunk = unit
+    var left = count
+    while left > 0:
+        if left % 2 == 1:
+            out = out + chunk
+        chunk = chunk + chunk
+        left = left / 2
+    out
+
+# The key/value list of one valid row, in wire order.
+fn valid_pairs() -> [text]:
+    ["family", "logical", "index", "0", "advice", "sha256:" + sha256_text("advice"),
+        "handler", "trace_submit", "form", "forward", "mode", "static", "activation", "static",
+        "selector", "submit_view", "selector_id", "sha256:" + sha256_text("selector"),
+        "scope_id", "sha256:" + sha256_text("scope"), "order", "0", "readonly", "1",
+        "noalloc", "0", "bounded_time", "1", "signature", sha256_text("signature"),
+        "effects", sha256_text("effects"), "body", sha256_text("body")]
+
+fn with_value(pairs: [text], key: text, value: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < pairs.len():
+        out.push(pairs[i])
+        if pairs[i] == key:
+            out.push(value)
+        else:
+            out.push(pairs[i + 1])
+        i = i + 2
+    out
+
+fn without_key(pairs: [text], key: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < pairs.len():
+        if pairs[i] != key:
+            out.push(pairs[i])
+            out.push(pairs[i + 1])
+        i = i + 2
+    out
+
+# A sealed section text from raw values: the hand-built form of what the
+# encoder writes, used to reach every decode rule behind the seal.
+fn sealed(values: [text]) -> text:
+    var body = ""
+    for value in values:
+        body = body + aspect_section_frame_v1(value)
+    aspect_section_frame_v1(aspect_section_seal_v1(body)) + body
+
+fn section_values(row_count: text, pair_count: text, pairs: [text]) -> [text]:
+    var values: [text] = [ASPECT_DECL_SECTION_MAGIC_V1, MODULE, "current-parser-aop/v1",
+        sha256_text("interface"), row_count, pair_count]
+    for pair in pairs:
+        values.push(pair)
+    values
+
+fn one_row(pairs: [text]) -> AspectDeclSectionDecodeV1:
+    val count = pairs.len() / 2
+    aspect_decl_section_decode_v1(sealed(section_values("1", "{count}", pairs)))
+
+fn outcome(result: AspectDeclSectionDecodeV1) -> text:
+    "{result.status}:{result.reason}:{result.section.rows.len()}"
+
+# ---------------------------------------------------------------------------
+
+# @manual_section: Framing and sealing
+describe "aspect section framing":
+    it "a frame list is read back value for value":
+        # @req REQ-ASPECT-AW1-CODEC
+        step("Frame an empty value, an ASCII value and a non-ASCII value, then read the frames")
+        val wire = aspect_section_frame_v1("") + aspect_section_frame_v1("submit_view") +
+            aspect_section_frame_v1("결제::Zahlung")
+        val frames = aspect_section_frames_read_v1(wire)
+        # @capture(exec): decoded frame values
+        step("The three values come back unchanged; the non-ASCII width is its byte width")
+        expect(frames.is_some()).to_equal(true)
+        expect(frames.unwrap()).to_equal(["", "submit_view", "결제::Zahlung"])
+        expect(aspect_section_frame_v1("결제")).to_equal("6:결제")
+        expect(aspect_section_frames_read_v1("").unwrap()).to_equal([])
+
+    it "a count is 1 to 12 decimal digits":
+        # @req REQ-ASPECT-AW1-CODEC
+        step("Parse well-formed counts, an empty count, a 13 digit count and non-digit bytes")
+        val parsed = [aspect_section_count_v1("0"), aspect_section_count_v1("007"),
+            aspect_section_count_v1("999999999999"), aspect_section_count_v1(""),
+            aspect_section_count_v1("1234567890123"), aspect_section_count_v1("1/"),
+            aspect_section_count_v1("1:"), aspect_section_count_v1("-1")]
+        # @capture(exec): parsed counts
+        step("Only the first three are counts; everything else is -1")
+        expect(parsed).to_equal([0, 7, 999999999999, -1, -1, -1, -1, -1])
+
+    it "bytes outside a frame invalidate the whole list":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Read a width with no colon, a non-digit width, a 13 digit width and an overrunning value")
+        val results = [aspect_section_frames_read_v1("3:abc12"), aspect_section_frames_read_v1("3:abcxy:"),
+            aspect_section_frames_read_v1("1234567890123:"), aspect_section_frames_read_v1("5:ab"),
+            aspect_section_frames_read_v1("3:abc:")]
+        # @capture(exec): frame read verdicts
+        step("Each read fails and returns no value, even though a first frame was well formed")
+        for result in results:
+            expect(result.is_none()).to_equal(true)
+
+    it "a seal verifies only for its own bytes and its own algorithm":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Seal a body, then check it against the same body, another body and foreign seals")
+        val seal = aspect_section_seal_v1("body")
+        val statuses = [aspect_section_seal_status_v1(seal, "body"),
+            aspect_section_seal_status_v1(seal, "other body"),
+            aspect_section_seal_status_v1("blake3:" + sha256_text("body"), "body"),
+            aspect_section_seal_status_v1("md5:0123456789abcdef0123456789abcdef", "body"),
+            aspect_section_seal_status_v1("not a digest", "body")]
+        # @capture(exec): seal statuses
+        step("Same body is ok, another body is a reject, a known other algorithm and an unknown one are a miss")
+        expect(seal).to_equal("sha256:" + sha256_text("body"))
+        expect(statuses).to_equal([ASPECT_SECTION_OK_V1, ASPECT_SECTION_REJECT_V1,
+            ASPECT_SECTION_MISS_V1, ASPECT_SECTION_MISS_V1, ASPECT_SECTION_MISS_V1])
+
+# @manual_section: Identities and facets
+describe "aspect declaration identities":
+    it "a body digest covers exactly the function's own span":
+        # @req REQ-ASPECT-AW1-FACETS
+        step("Digest the span of `observe` in a two-function source, then edit each function in turn")
+        val head = "fn other():\n    1\n\n"
+        val source = head + "fn observe():\n    return\n"
+        val start = head.byte_len()
+        val base = aspect_body_span_digest_v1(source, start, source.byte_len(), "observe")
+        val padded = aspect_body_span_digest_v1(source + "\n\n", start, source.byte_len() + 2, "observe")
+        val other_edit = "fn other():\n    2\n\n" + "fn observe():\n    return\n"
+        val body_edit = head + "fn observe():\n    pass\n"
+        # @capture(exec): body digests
+        step("Trailing blank lines and an edit of the other function leave it equal; a body edit changes it")
+        expect(base.byte_len()).to_equal(64)  # oracle: sha256 hex width
+        expect(padded).to_equal(base)
+        expect(aspect_body_span_digest_v1(other_edit, start, other_edit.byte_len(), "observe")).to_equal(base)
+        expect(aspect_body_span_digest_v1(body_edit, start, body_edit.byte_len(), "observe") == base).to_equal(false)
+
+    it "a span that is not this function's declaration has no digest":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Ask for a negative start, an empty span, a span past the end and a span of another function")
+        val source = "fn observe():\n    return\n"
+        val digests = [aspect_body_span_digest_v1(source, -1, 5, "observe"),
+            aspect_body_span_digest_v1(source, 5, 5, "observe"),
+            aspect_body_span_digest_v1(source, 0, source.byte_len() + 1, "observe"),
+            aspect_body_span_digest_v1(source, 0, source.byte_len(), "missing")]
+        # @capture(exec): empty digests
+        step("Every one is the empty digest, which the section builder refuses")
+        expect(digests).to_equal(["", "", "", ""])
+
+    it "an advice id names the declaration slot, not its selector":
+        # @req REQ-ASPECT-AW1-FACETS
+        step("Build ids for one slot and for a different module, family, handler and occurrence")
+        val id = aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 0)
+        val others = [aspect_decl_advice_id_v1("pkg.other", "logical", "trace_submit", 0),
+            aspect_decl_advice_id_v1(MODULE, "mir", "trace_submit", 0),
+            aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 1),
+            aspect_decl_advice_id_v1(MODULE, "logical", "trace_other", 0)]
+        # @capture(exec): advice ids
+        step("The id is a tagged sha256, repeatable, and each changed part gives another id")
+        expect(id.starts_with("sha256:")).to_equal(true)
+        expect(aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 0)).to_equal(id)
+        for other in others:
+            expect(other == id).to_equal(false)
+        val edited = aspect_decl_row_v1(MODULE, resolved("logical", 7, "trace_submit", "pay_view", "static", 3),
+            0, "b")
+        expect(edited.advice_id).to_equal(id)
+
+    it "adding an unrelated earlier advice leaves later advice ids unchanged":
+        # @req REQ-ASPECT-AW1-FACETS
+        step("Build the section of a module with two advice, then again with an unrelated advice declared before them")
+        val digests = {"trace_submit": "b1", "audit_call": "b2", "early_probe": "b3"}
+        val before = aspect_decl_section_of_semantic_v1(semantic_of([
+            resolved("logical", 0, "trace_submit", "submit_view", "static", 0),
+            resolved("logical", 1, "audit_call", "audit_view", "static", 0)]), digests).unwrap()
+        val after = aspect_decl_section_of_semantic_v1(semantic_of([
+            resolved("logical", 0, "early_probe", "probe_view", "static", 0),
+            resolved("logical", 1, "trace_submit", "submit_view", "static", 0),
+            resolved("logical", 2, "audit_call", "audit_view", "static", 0)]), digests).unwrap()
+        # @capture(exec): advice ids before and after the insertion
+        step("Both existing advice keep their ids and their row digests although their inventory index moved; the new advice has its own id")
+        expect([after.rows[1].advice_id, after.rows[2].advice_id]).to_equal(
+            [before.rows[0].advice_id, before.rows[1].advice_id])
+        expect([aspect_decl_row_digest_v1(after.rows[1]), aspect_decl_row_digest_v1(after.rows[2])]).to_equal(
+            [aspect_decl_row_digest_v1(before.rows[0]), aspect_decl_row_digest_v1(before.rows[1])])
+        expect([after.rows[1].family_inventory_index, before.rows[0].family_inventory_index]).to_equal([1, 0])
+        expect(after.rows[0].advice_id == before.rows[0].advice_id).to_equal(false)
+
+    it "two declarations of one handler get different advice ids":
+        # @req REQ-ASPECT-AW1-FACETS
+        step("Build the section of a module that attaches one handler to two selectors, and to a mir rule of the same name")
+        val section = aspect_decl_section_of_semantic_v1(semantic_of([
+            resolved("mir", 0, "trace_submit", "execution(pay*)", "static", 0),
+            resolved("logical", 0, "trace_submit", "submit_view", "static", 0),
+            resolved("logical", 1, "trace_submit", "pay_view", "static", 0)]), {"trace_submit": "b1"}).unwrap()
+        # @capture(exec): advice ids of the three rows
+        step("Each row has its own id: occurrence 0 per family, then occurrence 1 for the repeated logical handler")
+        expect([section.rows[0].advice_id, section.rows[1].advice_id, section.rows[2].advice_id]).to_equal(
+            [aspect_decl_advice_id_v1(MODULE, "mir", "trace_submit", 0),
+            aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 0),
+            aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 1)])
+
+    it "a resolved handler becomes one row of its family":
+        # @req REQ-ASPECT-AW1-CODEC
+        step("Build a row from a static logical handler and from a mir handler in registry mode")
+        val logical = aspect_decl_row_v1(MODULE, logical_handler(), 0, "body-1")
+        val dynamic = aspect_decl_row_v1(MODULE, resolved("mir", 2, "audit_call", "execution(audit*)", "registry", 9), 0, "body-2")
+        # @capture(exec): row fields
+        step("Fields are copied, order is the priority, mode is where the advice runs and activation is the declared weave mode")
+        expect([logical.family, logical.handler, logical.form, logical.mode, logical.activation,
+            logical.selector]).to_equal(["logical", "trace_submit", "forward", "before", "static", "submit_view"])
+        expect([logical.readonly, logical.noalloc, logical.bounded_time]).to_equal([true, true, false])
+        expect(logical.signature_digest).to_equal(sha256_text("signature of trace_submit"))
+        expect(logical.effects_digest).to_equal(sha256_text("effects of trace_submit"))
+        expect(logical.body_digest).to_equal("body-1")
+        expect([dynamic.family, dynamic.form, dynamic.mode, dynamic.activation]).to_equal(["mir", "after", "after", "registry"])
+        expect([dynamic.family_inventory_index, dynamic.order]).to_equal([2, 9])
+        expect(dynamic.scope_id).to_equal(logical.scope_id)
+        expect(dynamic.selector_id == logical.selector_id).to_equal(false)
+
+    it "an advice body edit changes only the body facet":
+        # @req REQ-ASPECT-AW1-FACETS
+        step("Build the same declaration with two body digests, then with another selector")
+        val before = aspect_decl_row_v1(MODULE, logical_handler(), 0, "body-1")
+        val body_edit = aspect_decl_row_v1(MODULE, logical_handler(), 0, "body-2")
+        val selector_edit = aspect_decl_row_v1(MODULE,
+            resolved("logical", 0, "trace_submit", "pay_view", "static", 0), 0, "body-1")
+        # @capture(exec): row digests
+        step("The body edit keeps the row digest; the selector edit changes the row digest and the selector id")
+        expect(aspect_decl_row_digest_v1(body_edit)).to_equal(aspect_decl_row_digest_v1(before))
+        expect(body_edit.body_digest == before.body_digest).to_equal(false)
+        expect(aspect_decl_row_digest_v1(selector_edit) == aspect_decl_row_digest_v1(before)).to_equal(false)
+        expect(selector_edit.selector_id == before.selector_id).to_equal(false)
+        expect(selector_edit.body_digest).to_equal(before.body_digest)
+
+# @manual_section: Building and encoding a section
+describe "aspect-decl section":
+    it "a module's capture becomes one section with a row per declaration":
+        # @req REQ-ASPECT-AW1-CODEC
+        step("Build the section of a module that declares one mir and one logical advice")
+        val section = both_families()
+        # @capture(exec): section header and rows
+        step("The header carries the module, schema and leaf digest; rows keep declaration order")
+        expect([section.module_identity, section.coverage_schema, section.leaf_digest]).to_equal(
+            [MODULE, "current-parser-aop/v1", sha256_text("interface")])
+        expect([section.rows[0].handler, section.rows[1].handler]).to_equal(["audit_call", "trace_submit"])
+        expect(aspect_decl_section_of_semantic_v1(semantic_of([]), {}).unwrap().rows.len()).to_equal(0)  # oracle: no declaration, no row
+
+    it "a handler without a body digest is an error":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Build a section when the handler is absent from the digest map, then when its digest is empty")
+        val absent = aspect_decl_section_of_semantic_v1(semantic_of([logical_handler()]), {})
+        val empty = aspect_decl_section_of_semantic_v1(semantic_of([logical_handler()]), {"trace_submit": ""})
+        # @capture(exec): builder errors
+        step("Both are the same error; no row with an empty facet is produced")
+        expect(absent.unwrap_err()).to_equal("advice-body-unavailable")
+        expect(empty.unwrap_err()).to_equal("advice-body-unavailable")
+
+    it "both families round trip through the section text":
+        # @req REQ-ASPECT-AW1-CODEC
+        step("Encode a section with a mir row of negative order and a logical row, then decode it")
+        val section = both_families()
+        val decoded = aspect_decl_section_decode_v1(encoded_both())
+        # @capture(exec): decoded section
+        step("Status is ok and every field of every row equals the encoded one")
+        expect(outcome(decoded)).to_equal("ok::2")
+        expect([decoded.section.module_identity, decoded.section.coverage_schema,
+            decoded.section.leaf_digest]).to_equal([section.module_identity, section.coverage_schema,
+            section.leaf_digest])
+        for i in 0..2:
+            val want = section.rows[i]
+            val got = decoded.section.rows[i]
+            expect(aspect_decl_row_digest_v1(got)).to_equal(aspect_decl_row_digest_v1(want))
+            expect(got.body_digest).to_equal(want.body_digest)
+            expect([got.readonly, got.noalloc, got.bounded_time]).to_equal(
+                [want.readonly, want.noalloc, want.bounded_time])
+        expect(decoded.section.rows[0].order).to_equal(-5)  # oracle: the mir fixture priority
+        expect(decoded.section.rows[0].family).to_equal("mir")
+        expect(decoded.section.rows[1].family).to_equal("logical")
+
+    it "a non-ASCII selector round trips unchanged":
+        # @req REQ-ASPECT-AW1-CODEC
+        step("Encode and decode a section whose selector and handler names are not ASCII")
+        val handler = resolved("logical", 0, "추적_제출", "within(결제.*)", "static", 0)
+        val section = aspect_decl_section_of_semantic_v1(semantic_of([handler]), {"추적_제출": "b"}).unwrap()
+        val decoded = aspect_decl_section_decode_v1(aspect_decl_section_encode_v1(section).unwrap())
+        # @capture(exec): decoded non-ASCII row
+        step("The decoded row has the same handler and selector")
+        expect(decoded.status).to_equal(ASPECT_SECTION_OK_V1)
+        expect([decoded.section.rows[0].handler, decoded.section.rows[0].selector]).to_equal(
+            ["추적_제출", "within(결제.*)"])
+
+    it "encoding refuses every over-limit section":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Encode 1025 rows, a module name over 64 KiB, a selector over 64 KiB, and 17 rows of 64 KiB selectors")
+        val row = aspect_decl_row_v1(MODULE, logical_handler(), 0, "b")
+        var many: [AspectDeclRowV1] = []
+        for i in 0..1025:
+            many.push(row)
+        val wide = repeated("x", ASPECT_DECL_SECTION_MAX_FIELD_BYTES_V1)
+        val wide_row = aspect_decl_row_v1(MODULE, resolved("logical", 0, "trace_submit", wide, "static", 0), 0, "b")
+        var heavy: [AspectDeclRowV1] = []
+        for i in 0..17:
+            heavy.push(wide_row)
+        val base = both_families()
+        val errors = [
+            aspect_decl_section_encode_v1(AspectDeclSectionV1(..base, rows: many)).unwrap_err(),
+            aspect_decl_section_encode_v1(AspectDeclSectionV1(..base, module_identity: wide + "x")).unwrap_err(),
+            aspect_decl_section_encode_v1(AspectDeclSectionV1(..base, rows: [AspectDeclRowV1(..row, selector: wide + "x")])).unwrap_err(),
+            aspect_decl_section_encode_v1(AspectDeclSectionV1(..base, rows: heavy)).unwrap_err()]
+        # @capture(exec): encode errors
+        step("Each is refused with the limit it broke; a row at exactly the field limit still encodes")
+        expect(errors).to_equal(["row-limit", "field-limit", "field-limit", "section-limit"])
+        expect(aspect_decl_section_encode_v1(AspectDeclSectionV1(..base, rows: [wide_row])).is_ok()).to_equal(true)
+
+# @manual_section: Decoding fails closed
+describe "aspect-decl section decode":
+    it "a truncated section is rejected":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Cut a valid section in the middle of a frame, and cut it to its first three values")
+        val wire = encoded_both()
+        val mid_frame = aspect_decl_section_decode_v1(wire.substring(0, wire.byte_len() - 10))
+        val three = aspect_decl_section_decode_v1(sealed([ASPECT_DECL_SECTION_MAGIC_V1, MODULE]))
+        # @capture(exec): truncation verdicts
+        step("The first is a malformed frame, the second a truncated section; neither yields rows")
+        expect(outcome(mid_frame)).to_equal("reject:malformed-frame:0")
+        expect(outcome(three)).to_equal("reject:truncated-section:0")
+
+    it "a section over the byte limit is rejected before it is read":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Decode a text one byte over the section limit")
+        val result = aspect_decl_section_decode_v1(repeated("x", ASPECT_DECL_SECTION_MAX_BYTES_V1 + 1))
+        # @capture(exec): size verdict
+        step("It is rejected for its size")
+        expect(outcome(result)).to_equal("reject:section-limit:0")
+
+    it "a foreign magic or a changed byte is rejected":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Decode a sealed section with another magic, then a valid section with one value byte changed")
+        val foreign = aspect_decl_section_decode_v1(sealed(["aspect-decl/v9", MODULE, "s", "l", "0", "x"]))
+        val tampered = aspect_decl_section_decode_v1(encoded_both().replace("trace_submit", "trace_submix"))
+        # @capture(exec): magic and seal verdicts
+        step("The first is a bad magic, the second a seal mismatch")
+        expect(outcome(foreign)).to_equal("reject:bad-magic:0")
+        expect(outcome(tampered)).to_equal("reject:seal-mismatch:0")
+
+    it "an unknown digest algorithm is a miss, not a reject":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Replace the sha256 seal of a valid section by a seal of an algorithm this reader does not know")
+        val wire = encoded_both()
+        val body = wire.substring(aspect_section_frame_v1(aspect_section_seal_v1("")).byte_len(), wire.byte_len())
+        val unknown = aspect_decl_section_decode_v1(aspect_section_frame_v1("sha9:" + sha256_text(body)) + body)
+        # @capture(exec): miss verdict
+        step("The section is a miss with no rows: the reader recomputes instead of trusting it")
+        expect(outcome(unknown)).to_equal("miss:unknown-digest-algorithm:0")
+
+    it "a bad or over-limit row count is rejected":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Decode sealed sections whose row count is not a number, is 1025, or promises a row that is absent")
+        val not_number = aspect_decl_section_decode_v1(sealed(section_values("x", "0", [])))
+        val over = aspect_decl_section_decode_v1(sealed(section_values("1025", "0", [])))
+        val absent = aspect_decl_section_decode_v1(sealed([ASPECT_DECL_SECTION_MAGIC_V1, MODULE, "s", "l", "1"]))
+        # @capture(exec): count verdicts
+        step("Each is rejected with its own reason")
+        expect(outcome(not_number)).to_equal("reject:bad-row-count:0")
+        expect(outcome(over)).to_equal("reject:row-limit:0")
+        expect(outcome(absent)).to_equal("reject:truncated-section:0")
+
+    it "a row that promises more fields than it has is rejected":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Decode a row whose pair count is not a number, and one whose pair count overruns the section")
+        val not_number = aspect_decl_section_decode_v1(sealed(section_values("1", "x", valid_pairs())))
+        val overrun = aspect_decl_section_decode_v1(sealed(section_values("1", "18", valid_pairs())))
+        # @capture(exec): pair count verdicts
+        step("Both are a truncated row")
+        expect(outcome(not_number)).to_equal("reject:truncated-row:0")
+        expect(outcome(overrun)).to_equal("reject:truncated-row:0")
+
+    it "values after the last row are rejected":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Append one more value after the only row of a sealed section")
+        var values = section_values("1", "17", valid_pairs())
+        values.push("extra")
+        # @capture(exec): trailing data verdict
+        step("The section is rejected for trailing data; the same section without it decodes")
+        expect(outcome(aspect_decl_section_decode_v1(sealed(values)))).to_equal("reject:trailing-data:0")
+        expect(outcome(one_row(valid_pairs()))).to_equal("ok::1")
+
+    it "an unknown optional field is ignored":
+        # @req REQ-ASPECT-AW1-CODEC
+        step("Add a `?`-prefixed field this reader does not know to a valid row, twice")
+        var pairs = valid_pairs()
+        for extra in ["?future_hint", "anything", "?future_hint", "again"]:
+            pairs.push(extra)
+        val result = one_row(pairs)
+        # @capture(exec): decoded row with optional field
+        step("The row decodes with its known fields unchanged")
+        expect(outcome(result)).to_equal("ok::1")
+        expect([result.section.rows[0].handler, result.section.rows[0].selector]).to_equal(
+            ["trace_submit", "submit_view"])
+        expect([result.section.rows[0].readonly, result.section.rows[0].noalloc,
+            result.section.rows[0].bounded_time]).to_equal([true, false, true])
+
+    it "an unknown mandatory field is rejected":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Add a field without the `?` prefix, repeat a known field, and drop a known field")
+        var unknown = valid_pairs()
+        unknown.push("around_guard")
+        unknown.push("1")
+        var duplicate = valid_pairs()
+        duplicate.push("handler")
+        duplicate.push("other")
+        # @capture(exec): field verdicts
+        step("Unknown mandatory, duplicate and missing fields each reject the section")
+        expect(outcome(one_row(unknown))).to_equal("reject:unknown-mandatory-field:0")
+        expect(outcome(one_row(duplicate))).to_equal("reject:duplicate-field:0")
+        expect(outcome(one_row(without_key(valid_pairs(), "effects")))).to_equal("reject:missing-field:0")
+
+    it "a row with a bad number or flag is rejected":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Decode rows with a non-numeric index, a negative index, a bad order, a bad negative order and a flag of 2")
+        val verdicts = [outcome(one_row(with_value(valid_pairs(), "index", "x"))),
+            outcome(one_row(with_value(valid_pairs(), "index", "-1"))),
+            outcome(one_row(with_value(valid_pairs(), "order", "1.5"))),
+            outcome(one_row(with_value(valid_pairs(), "order", "-x"))),
+            outcome(one_row(with_value(valid_pairs(), "bounded_time", "2")))]
+        # @capture(exec): number and flag verdicts
+        step("Each is rejected; a negative order alone is accepted")
+        expect(verdicts).to_equal(["reject:bad-number:0", "reject:bad-number:0", "reject:bad-number:0",
+            "reject:bad-number:0", "reject:bad-flag:0"])
+        val negative = one_row(with_value(valid_pairs(), "order", "-12"))
+        expect(negative.section.rows[0].order).to_equal(-12)  # oracle: the order written into the row
+
+# @manual_section: The section inside a module TLDR
+describe "aspect-decl TLDR entry":
+    it "a module TLDR carries exactly one section":
+        # @req REQ-ASPECT-AW1-CODEC
+        step("Render the entry among other TLDR sections, parse the TLDR text back, and read the section")
+        val entry = aspect_decl_section_entry_v1(both_families()).unwrap()
+        val wire = module_tldr_sections_render_v1(["const|val LIMIT: i64 = 42", entry])
+        val (entries, consumed) = module_tldr_sections_parse_v1(wire)
+        val found = aspect_decl_section_of_entries_v1(entries)
+        # @capture(exec): TLDR round trip
+        step("The TLDR parser admits the `aspect-decl` kind and the section decodes with both rows")
+        expect(entry.starts_with("aspect-decl|")).to_equal(true)
+        expect(consumed).to_equal(wire.byte_len())
+        expect(outcome(found)).to_equal("ok::2")
+        expect(found.section.rows[1].handler).to_equal("trace_submit")
+
+    it "a TLDR without the section is a miss and a TLDR with two is rejected":
+        # @req REQ-ASPECT-AW1-FAILCLOSED
+        step("Read the section from entries that have none, and from entries that have it twice")
+        val entry = aspect_decl_section_entry_v1(both_families()).unwrap()
+        val none = aspect_decl_section_of_entries_v1(["const|val LIMIT: i64 = 42"])
+        val twice = aspect_decl_section_of_entries_v1([entry, "const|val LIMIT: i64 = 42", entry])
+        # @capture(exec): entry lookup verdicts
+        step("Absence is a miss, duplication is a reject, and an over-limit section has no entry at all")
+        expect(outcome(none)).to_equal("miss:section-absent:0")
+        expect(outcome(twice)).to_equal("reject:duplicate-section:0")
+        var many: [AspectDeclRowV1] = []
+        for i in 0..1025:
+            many.push(both_families().rows[0])
+        expect(aspect_decl_section_entry_v1(AspectDeclSectionV1(..both_families(), rows: many)).unwrap_err()).to_equal("row-limit")

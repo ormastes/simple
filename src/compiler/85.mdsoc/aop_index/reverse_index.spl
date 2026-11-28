@@ -6,14 +6,14 @@
 #   3. target entity -> selected advice (ordered)
 #   4. advice interface (advice_function) -> targets referencing it
 #
-# Selector read-set: there is no query IR (plan §2b), so the read-set is
-# derived by substring scan of predicate_text for the five real
-# JoinPointContext field names. A predicate that names NONE of them is given
-# the FULL read-set — conservative: it can only over-invalidate.
-# Prerequisite for a precise read-set: the normalized pointcut query IR.
+# Selector identity and read-set come from the one selector AST (aspect plan
+# AW-3, 10.frontend/core/aop_selector_identity_v1.spl): the predicate is
+# lowered into `PointcutSelectorV1` and its atoms name the descriptor fields
+# read. An unsupported predicate is given the FULL read-set - conservative:
+# it can only over-invalidate.
 
 use compiler.mdsoc.weaving.weaving_rule.{WeavingRule}
-use compiler.mdsoc.aop_cache.aop_group_keys.{aop_selector_digest}
+use compiler.frontend.core.aop_selector_identity_v1.{aop_predicate_lower_v1}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_mark_known_v1, reverse_reference_register_aop_v1
 }
@@ -26,7 +26,7 @@ pub fn reverse_index_publish_aop_consumer_v1(subject: text, consumer: text,
 val AOP_DESCRIPTOR_FIELDS: [text] = ["function_name", "module_path", "signature", "attributes", "effects"]
 
 struct AopSelectorReadSet:
-    selector_id: text          # aop_selector_digest(predicate_text)
+    selector_id: text          # PointcutSelectorId of the lowered predicate
     fields: [text]             # subset of AOP_DESCRIPTOR_FIELDS
     conservative: bool         # true when the full set was assumed
 
@@ -49,20 +49,22 @@ struct AopReverseIndex:
     advice_targets: [AopAdviceTargets]               # table 4
 
 fn aop_selector_read_set(rule: WeavingRule) -> AopSelectorReadSet:
+    val sel = aop_predicate_lower_v1(rule.predicate_text)
+    if not sel.supported:
+        return AopSelectorReadSet(selector_id: sel.selector_digest,
+            fields: AOP_DESCRIPTOR_FIELDS, conservative: true)
+    # A lowered mir-family predicate has name atoms and attribute atoms only.
+    var reads_name = false
+    var reads_attributes = false
+    for node in sel.nodes:
+        if node.form == "attr":
+            reads_attributes = true
+        elif node.op == "atom":
+            reads_name = true
     var fields: [text] = []
-    for f in AOP_DESCRIPTOR_FIELDS:
-        if rule.predicate_text.contains(f):
-            fields.push(f)
-    if fields.len() == 0:
-        # Opaque predicate — assume it can read everything (over-invalidate).
-        return AopSelectorReadSet(
-            selector_id: aop_selector_digest(rule.predicate_text),
-            fields: AOP_DESCRIPTOR_FIELDS,
-            conservative: true)
-    AopSelectorReadSet(
-        selector_id: aop_selector_digest(rule.predicate_text),
-        fields: fields,
-        conservative: false)
+    if reads_name: fields.push("function_name")
+    if reads_attributes: fields.push("attributes")
+    AopSelectorReadSet(selector_id: sel.selector_digest, fields: fields, conservative: false)
 
 # Table 2 query: which selectors must be reevaluated when `field` changes
 # on some candidate descriptor.
@@ -106,9 +108,9 @@ fn aop_reverse_index_build(rules: [WeavingRule], rule_partitions: [[text]], sele
     var read_sets: [AopSelectorReadSet] = []
     var i = 0
     while i < rules.len():
-        val sid = aop_selector_digest(rules[i].predicate_text)
-        sel_parts.push(AopSelectorPartitions(selector_id: sid, partition_key_digests: rule_partitions[i]))
         val read_set = aop_selector_read_set(rules[i])
+        val sid = read_set.selector_id
+        sel_parts.push(AopSelectorPartitions(selector_id: sid, partition_key_digests: rule_partitions[i]))
         read_sets.push(read_set)
         val partition_evidence = rule_partitions[i].join(",")
         val field_evidence = read_set.fields.join(",")
@@ -149,3 +151,5 @@ fn aop_reverse_index_build(rules: [WeavingRule], rule_partitions: [[text]], sele
         selector_read_sets: read_sets,
         target_selections: selections,
         advice_targets: advice_targets)
+
+export aop_selectors_reading_field, aop_partitions_of_selector, aop_targets_of_advice

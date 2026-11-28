@@ -668,10 +668,10 @@
     /* Draggable Floating Preview / Engine2D Inspector Window */
     .floating-window {
       position: fixed;
-      top: 78px;
-      right: 22px;
-      width: 610px;
-      height: 455px;
+      bottom: 42px;
+      right: 16px;
+      width: 470px;
+      height: 290px;
       border-radius: 14px;
       background: var(--surface-elevated);
       border: 1px solid var(--border-strong);
@@ -682,6 +682,11 @@
       flex-direction: column;
       overflow: hidden;
       z-index: 40;
+    }
+
+    .floating-window.expanded {
+      width: 760px;
+      height: 500px;
     }
 
     .floating-window.hidden {
@@ -814,6 +819,8 @@
             <option value="fluid_light">fluid_light</option>
           </select>
         </label>
+        <button id="btn-save-file" class="glass-btn" type="button" title="Save active buffer (Cmd/Ctrl+S)">Save</button>
+        <button id="btn-run-file" class="glass-btn" type="button" title="Execute active .spl in Simple">Run .spl</button>
         <button id="btn-run-check" class="glass-btn" type="button">Run Verify</button>
         <button id="btn-toggle-right" class="glass-btn active" type="button">Right Dock</button>
         <button id="btn-toggle-inspector" class="glass-btn primary" type="button">Engine2D Inspector</button>
@@ -909,7 +916,9 @@
           <option value="engine2d">Engine2D Only</option>
           <option value="web_liquid">Web Liquid Only</option>
         </select>
+        <button id="btn-rerender-inspector" class="glass-btn" style="height:22px;padding:0 7px;font-size:10px;" type="button">Re-render Live</button>
         <button id="btn-reload-captures" class="glass-btn" style="height:22px;padding:0 7px;font-size:10px;" type="button">Reload</button>
+        <button id="btn-expand-inspector" class="glass-btn" style="height:22px;padding:0 7px;font-size:10px;" type="button" title="Expand / Compact">□</button>
         <button id="btn-min-inspector" class="glass-btn" style="height:22px;padding:0 7px;font-size:10px;" type="button">_</button>
         <button id="btn-close-inspector" class="glass-btn" style="height:22px;padding:0 7px;font-size:10px;" type="button">x</button>
       </div>
@@ -1056,8 +1065,10 @@
       { id: "saml", owner: "std.common.saml", status: "bound" }
     ];
 
+    const ideBridge = window.simpleIdeBridge || null;
+
     const state = {
-      files: INITIAL_FILES.map((f) => ({ ...f, savedContent: f.content })),
+      files: INITIAL_FILES.map((f) => ({ ...f, savedContent: f.content, loadedFromDisk: false })),
       openTabs: [
         "src/app/ide/main.spl",
         "src/app/ide/gui_sanity.spl",
@@ -1069,7 +1080,10 @@
       profile: INITIAL_PROFILE,
       theme: INITIAL_THEME,
       searchQuery: "",
+      explorerFilter: "",
+      collapsedFolders: new Set(),
       rightVisible: true,
+      workspaceFileCount: 0,
       outputLines: [
         "[verify] ide_feature_check_report(\"gui\"): ready",
         "[verify] ide_gui_sanity_summary(): theme=dark renders_markdown=true",
@@ -1117,7 +1131,7 @@
     function computeDiagnostics() {
       const diags = [];
       for (const f of state.files) {
-        const lines = f.content.split("\n");
+        const lines = (f.content || "").split("\n");
         lines.forEach((line, idx) => {
           if (line.includes("pass_todo") || line.includes("TODO")) {
             diags.push({
@@ -1142,11 +1156,11 @@
 
     function parseOutline(file) {
       const items = [];
-      const lines = file.content.split("\n");
+      const lines = (file.content || "").split("\n");
       lines.forEach((line, idx) => {
         const trimmed = line.trim();
         let match;
-        if ((match = trimmed.match(/^(?:pub\s+)?(fn|struct|enum|class)\s+([A-Za-z0-9_]+)/))) {
+        if ((match = trimmed.match(/^(?:pub\s+)?(fn|me|struct|enum|class)\s+([A-Za-z0-9_]+)/))) {
           items.push({ kind: match[1], name: match[2], line: idx + 1 });
         } else if ((match = trimmed.match(/^(#{1,3})\s+(.+)/)) && file.lang === "markdown") {
           items.push({ kind: "h" + match[1].length, name: match[2], line: idx + 1 });
@@ -1155,10 +1169,25 @@
       return items;
     }
 
-    function jumpToLine(fileId, lineNumber) {
-      openFile(fileId);
+    async function loadFileContentIfNeeded(file) {
+      if (!file || file.loadedFromDisk || !ideBridge || !ideBridge.readFile) return;
+      if (file.content !== file.savedContent) return;
+      try {
+        const res = await ideBridge.readFile(file.id);
+        if (res && res.ok && typeof res.content === "string") {
+          file.content = res.content;
+          file.savedContent = res.content;
+          file.loadedFromDisk = true;
+        }
+      } catch (_err) {
+        // Keep bundled fallback content if read fails.
+      }
+    }
+
+    async function jumpToLine(fileId, lineNumber) {
+      await openFile(fileId);
       const file = activeFile();
-      const lines = file.content.split("\n");
+      const lines = (file.content || "").split("\n");
       const target = Math.max(1, Math.min(lines.length, lineNumber));
       let offset = 0;
       for (let i = 0; i < target - 1; i++) {
@@ -1170,11 +1199,25 @@
       syncGutterAndCursor();
     }
 
-    function openFile(fileId) {
+    async function openFile(fileId) {
+      let file = state.files.find((f) => f.id === fileId);
+      if (!file && ideBridge && ideBridge.readFile) {
+        const res = await ideBridge.readFile(fileId);
+        if (res && res.ok) {
+          const slashIdx = fileId.lastIndexOf("/");
+          const folder = slashIdx > 0 ? fileId.slice(0, slashIdx) : ".";
+          const name = slashIdx >= 0 ? fileId.slice(slashIdx + 1) : fileId;
+          const lang = name.endsWith(".md") ? "markdown" : (name.endsWith(".sdn") ? "sdn" : "simple");
+          file = { id: fileId, folder, name, lang, content: res.content, savedContent: res.content, loadedFromDisk: true };
+          state.files.push(file);
+        }
+      }
+      if (!file) return;
       if (!state.openTabs.includes(fileId)) {
         state.openTabs.push(fileId);
       }
       state.activeFileId = fileId;
+      await loadFileContentIfNeeded(file);
       renderAll();
     }
 
@@ -1187,6 +1230,90 @@
         state.activeFileId = state.openTabs[state.openTabs.length - 1];
       }
       renderAll();
+    }
+
+    async function saveActiveFile() {
+      const f = activeFile();
+      f.content = codeEditor.value;
+      if (ideBridge && ideBridge.saveFile) {
+        const res = await ideBridge.saveFile({ path: f.id, content: f.content });
+        if (res && res.ok) {
+          f.savedContent = f.content;
+          state.outputLines.push(`[save] saved ${f.id} -> ${res.savedPath}`);
+          document.getElementById("status-mode").textContent = "SAVED";
+          renderTabs();
+          if (state.drawerTab === "output") renderDrawer();
+          return true;
+        }
+      }
+      f.savedContent = f.content;
+      renderTabs();
+      return true;
+    }
+
+    async function runActiveFile() {
+      const f = activeFile();
+      f.content = codeEditor.value;
+      state.outputLines.push(`[run] executing ${f.id}...`);
+      state.drawerTab = "output";
+      renderDrawer();
+      if (!ideBridge || !ideBridge.runFile) {
+        state.outputLines.push("[run] preload bridge unavailable");
+        renderDrawer();
+        return { ok: false, exitCode: 1, stdout: "" };
+      }
+      const res = await ideBridge.runFile({ path: f.id, content: f.content });
+      state.outputLines.push(`[run] exit=${res.exitCode} (${res.elapsedMs} ms)`);
+      if (res.stdout) state.outputLines.push(res.stdout.trimEnd());
+      if (res.stderr && res.exitCode !== 0) state.outputLines.push("[stderr]\n" + res.stderr.trimEnd());
+      renderDrawer();
+      return res;
+    }
+
+    async function runLiveVerify() {
+      const f = activeFile();
+      const diags = computeDiagnostics();
+      state.outputLines.push(`[verify] checking ${f.id} (profile=${state.profile}, theme=${state.theme}, local_diags=${diags.length})...`);
+      state.drawerTab = "output";
+      renderDrawer();
+      if (ideBridge && ideBridge.runVerify) {
+        const res = await ideBridge.runVerify({
+          file: f.id,
+          content: f.content,
+          profile: state.profile,
+          theme: state.theme
+        });
+        if (res.summary) state.outputLines.push(`[verify:${res.mode}] ${res.summary} (${res.elapsedMs} ms)`);
+        if (res.report) state.outputLines.push(res.report.trimEnd());
+        renderDrawer();
+        return res;
+      }
+      return { ok: true };
+    }
+
+    async function rerenderLiveFrames() {
+      const f = activeFile();
+      if (!ideBridge || !ideBridge.rerenderFrames) {
+        loadCaptureImages();
+        return { ok: false };
+      }
+      const btn = document.getElementById("btn-rerender-inspector");
+      if (btn) btn.textContent = "Rendering...";
+      const res = await ideBridge.rerenderFrames({
+        file: f.id,
+        content: codeEditor.value,
+        profile: state.profile,
+        theme: state.theme
+      });
+      if (btn) btn.textContent = "Re-render Live";
+      if (res && res.ok) {
+        state.outputLines.push(`[render] ide_render_gui_frame + Liquid Glass (${res.elapsedMs} ms, checksum=${res.checksum})`);
+        loadCaptureImages();
+        if (state.drawerTab === "output") renderDrawer();
+      } else if (res && res.error) {
+        state.outputLines.push(`[render] ${res.error}`);
+      }
+      return res;
     }
 
     function applyTheme(theme) {
@@ -1277,7 +1404,7 @@
       });
 
       const titles = {
-        explorer: "Explorer",
+        explorer: `Explorer (${state.files.length})`,
         search: "Workspace Search",
         outline: "Outline",
         problems: "Diagnostics",
@@ -1286,26 +1413,47 @@
       sidebarTitle.textContent = titles[state.sidebarView] || "Explorer";
 
       if (state.sidebarView === "explorer") {
+        const fq = state.explorerFilter.trim().toLowerCase();
         const byFolder = new Map();
         for (const f of state.files) {
+          if (fq && !f.id.toLowerCase().includes(fq) && !f.name.toLowerCase().includes(fq)) continue;
           if (!byFolder.has(f.folder)) byFolder.set(f.folder, []);
           byFolder.get(f.folder).push(f);
         }
-        let html = "";
+        let html = `<input id="explorer-filter-input" class="search-input" value="${escapeHtml(state.explorerFilter)}" placeholder="Filter workspace files..." />`;
         for (const [folder, items] of byFolder.entries()) {
-          html += `<div class="tree-folder">▾ ${escapeHtml(folder)}</div>`;
-          for (const f of items) {
-            const active = f.id === state.activeFileId ? "active" : "";
-            const ext = f.lang === "markdown" ? "md" : "spl";
-            html += `
-              <button class="tree-item ${active}" data-file="${escapeHtml(f.id)}" type="button">
-                <span>${escapeHtml(f.name)}</span>
-                <span class="tree-ext">${ext}</span>
-              </button>
-            `;
+          const isCollapsed = !fq && state.collapsedFolders.has(folder);
+          html += `<button class="tree-folder" data-folder="${escapeHtml(folder)}" type="button" style="width:100%;background:transparent;border:none;cursor:pointer;text-align:left;">${isCollapsed ? "▸" : "▾"} ${escapeHtml(folder)} <span style="color:var(--fg-muted);font-weight:500;">(${items.length})</span></button>`;
+          if (!isCollapsed) {
+            for (const f of items) {
+              const active = f.id === state.activeFileId ? "active" : "";
+              const ext = f.lang === "markdown" ? "md" : (f.lang === "sdn" ? "sdn" : "spl");
+              html += `
+                <button class="tree-item ${active}" data-file="${escapeHtml(f.id)}" type="button">
+                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>
+                  <span class="tree-ext">${ext}</span>
+                </button>
+              `;
+            }
           }
         }
         sidebarContent.innerHTML = html;
+        const finp = document.getElementById("explorer-filter-input");
+        finp.addEventListener("input", () => {
+          state.explorerFilter = finp.value;
+          renderSidebar();
+          const ref = document.getElementById("explorer-filter-input");
+          ref.focus();
+          ref.setSelectionRange(ref.value.length, ref.value.length);
+        });
+        sidebarContent.querySelectorAll(".tree-folder").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const folder = btn.getAttribute("data-folder");
+            if (state.collapsedFolders.has(folder)) state.collapsedFolders.delete(folder);
+            else state.collapsedFolders.add(folder);
+            renderSidebar();
+          });
+        });
         sidebarContent.querySelectorAll(".tree-item").forEach((btn) => {
           btn.addEventListener("click", () => openFile(btn.getAttribute("data-file")));
         });
@@ -1316,7 +1464,7 @@
         const q = state.searchQuery.trim().toLowerCase();
         const hits = [];
         for (const f of state.files) {
-          const lines = f.content.split("\n");
+          const lines = (f.content || "").split("\n");
           lines.forEach((line, idx) => {
             if (!q || line.toLowerCase().includes(q)) {
               if (q || line.trim().startsWith("fn ") || line.trim().startsWith("struct ")) {
@@ -1384,11 +1532,20 @@
       }
 
       sidebarContent.innerHTML = CAPABILITIES.map((c) => `
-        <div class="cap-row">
-          <span><strong>${escapeHtml(c.id)}</strong></span>
+        <button class="cap-row" data-cap-id="${escapeHtml(c.id)}" data-cap-owner="${escapeHtml(c.owner)}" type="button" style="width:100%;background:transparent;border:none;color:var(--fg-primary);cursor:pointer;text-align:left;">
+          <span><strong>${escapeHtml(c.id)}</strong> <span style="font-size:10px;color:var(--fg-muted);">${escapeHtml(c.owner)}</span></span>
           <span class="sev-pill sev-ok">${escapeHtml(c.status)}</span>
-        </div>
+        </button>
       `).join("");
+      sidebarContent.querySelectorAll(".cap-row").forEach((row) => {
+        row.addEventListener("click", () => {
+          const cid = row.getAttribute("data-cap-id");
+          const owner = row.getAttribute("data-cap-owner");
+          state.outputLines.push(`[capability] ${cid} -> ${owner} (status=bound)`);
+          state.drawerTab = "output";
+          renderDrawer();
+        });
+      });
     }
 
     function renderDrawer() {
@@ -1427,15 +1584,15 @@
       }
 
       if (state.drawerTab === "output") {
-        drawerContent.innerHTML = `<pre class="mono" style="margin:0;font-size:11px;line-height:1.5;color:var(--fg-secondary);user-select:text;">${escapeHtml(state.outputLines.join("\n"))}</pre>`;
+        drawerContent.innerHTML = `<pre class="mono" style="margin:0;font-size:11px;line-height:1.5;color:var(--fg-secondary);user-select:text;white-space:pre-wrap;">${escapeHtml(state.outputLines.join("\n"))}</pre>`;
         return;
       }
 
       drawerContent.innerHTML = `
         <div class="panel-card" style="margin-bottom:0;">
           <h4>Live IDE Interaction Evidence</h4>
-          <div>Profile: <strong>${escapeHtml(state.profile)}</strong> · Theme: <strong>${escapeHtml(state.theme)}</strong> · Tabs open: <strong>${state.openTabs.length}</strong></div>
-          <div class="mono" style="margin-top:4px;color:var(--fg-secondary);">ide_feature_check_report("gui"), ide_gui_sanity_summary(), ide_interaction_evidence("gui", ...), ide_render_gui_frame(..., 1120, 720, "software")</div>
+          <div>Profile: <strong>${escapeHtml(state.profile)}</strong> · Theme: <strong>${escapeHtml(state.theme)}</strong> · Tabs open: <strong>${state.openTabs.length}</strong> · Files: <strong>${state.files.length}</strong></div>
+          <div class="mono" style="margin-top:4px;color:var(--fg-secondary);">ide_feature_check_report("gui"), ide_gui_sanity_summary(), ide_render_gui_frame(..., 1120, 720, "software")</div>
         </div>
       `;
     }
@@ -1445,25 +1602,25 @@
       const outline = parseOutline(f);
       const views = state.profile === "caret"
         ? ["explorer", "outline", "preview", "wiki-panel", "problems"]
-        : ["explorer", "problems"];
+        : ["explorer", "outline", "problems"];
       rightPanelTitle.textContent = state.profile === "caret" ? "Caret Preview & Outline" : "Live Outline & Theme";
 
       const previewHtml = f.lang === "markdown"
-        ? f.content.split("\n").map((ln) => {
+        ? (f.content || "").split("\n").slice(0, 28).map((ln) => {
             if (ln.startsWith("# ")) return `<div style="font-size:13px;font-weight:800;margin-bottom:4px;">${escapeHtml(ln.slice(2))}</div>`;
             if (ln.startsWith("- ")) return `<div style="padding-left:8px;">• ${escapeHtml(ln.slice(2))}</div>`;
             return `<div>${escapeHtml(ln)}</div>`;
           }).join("")
-        : `<div class="mono" style="font-size:11px;color:var(--fg-secondary);">Active buffer: ${escapeHtml(f.id)} (${f.content.split("\n").length} lines)</div>`;
+        : `<div class="mono" style="font-size:11px;color:var(--fg-secondary);">Active buffer: ${escapeHtml(f.id)} (${(f.content || "").split("\n").length} lines)</div>`;
 
       rightPanelContent.innerHTML = `
         <div class="panel-card">
           <h4>Shell Profile Views</h4>
-          <div>${views.map((v) => `<span class="sev-pill sev-ok" style="margin:0 4px 4px 0;">${escapeHtml(v)}</span>`).join("")}</div>
+          <div>${views.map((v) => `<button type="button" class="sev-pill sev-ok profile-view-pill" data-profile-view="${escapeHtml(v)}" style="margin:0 4px 4px 0;border:none;cursor:pointer;">${escapeHtml(v)}</button>`).join("")}</div>
         </div>
         <div class="panel-card">
           <h4>Symbol Outline (${escapeHtml(f.name)})</h4>
-          ${outline.length ? outline.map((o) => `
+          ${outline.length ? outline.slice(0, 30).map((o) => `
             <div class="outline-row" data-right-line="${o.line}">
               <span><strong style="color:var(--accent);">${escapeHtml(o.kind)}</strong> ${escapeHtml(o.name)}</span>
               <span class="mono" style="color:var(--fg-muted);">:${o.line}</span>
@@ -1482,6 +1639,25 @@
 
       rightPanelContent.querySelectorAll(".outline-row").forEach((r) => {
         r.addEventListener("click", () => jumpToLine(f.id, Number(r.getAttribute("data-right-line"))));
+      });
+      rightPanelContent.querySelectorAll(".profile-view-pill").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const pv = btn.getAttribute("data-profile-view");
+          if (pv === "preview") {
+            floatingInspector.classList.remove("hidden");
+            floatingInspector.classList.remove("minimized");
+            loadCaptureImages();
+          } else if (pv === "explorer" || pv === "outline" || pv === "problems") {
+            state.sidebarView = pv;
+            if (pv === "problems") state.drawerTab = "problems";
+            renderSidebar();
+            renderDrawer();
+          } else {
+            state.outputLines.push(`[view] focused ${pv}`);
+            state.drawerTab = "output";
+            renderDrawer();
+          }
+        });
       });
     }
 
@@ -1533,8 +1709,8 @@
 
     function renderEditorContent() {
       const f = activeFile();
-      if (codeEditor.value !== f.content) {
-        codeEditor.value = f.content;
+      if (codeEditor.value !== (f.content || "")) {
+        codeEditor.value = f.content || "";
         codeEditor.setSelectionRange(0, 0);
         codeEditor.scrollTop = 0;
       }
@@ -1548,6 +1724,42 @@
       renderDrawer();
       renderRightPanel();
     }
+
+    function applyIndentKey(isShift) {
+      const val = codeEditor.value;
+      const start = codeEditor.selectionStart;
+      const end = codeEditor.selectionEnd;
+      if (!isShift && start === end) {
+        codeEditor.value = val.slice(0, start) + "    " + val.slice(end);
+        codeEditor.setSelectionRange(start + 4, start + 4);
+      } else {
+        const lineStart = val.lastIndexOf("\n", start - 1) + 1;
+        const lineEnd = val.indexOf("\n", end);
+        const blockEnd = lineEnd === -1 ? val.length : lineEnd;
+        const lines = val.slice(lineStart, blockEnd).split("\n");
+        const updated = lines.map((ln) => {
+          if (!isShift) return "    " + ln;
+          if (ln.startsWith("    ")) return ln.slice(4);
+          return ln.replace(/^ {1,3}/, "");
+        }).join("\n");
+        codeEditor.value = val.slice(0, lineStart) + updated + val.slice(blockEnd);
+        codeEditor.setSelectionRange(lineStart, lineStart + updated.length);
+      }
+      codeEditor.dispatchEvent(new Event("input"));
+    }
+
+    codeEditor.addEventListener("keydown", (e) => {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        applyIndentKey(e.shiftKey);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        saveActiveFile();
+      } else if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        runActiveFile();
+      }
+    });
 
     // Editor live editing & cursor tracking
     codeEditor.addEventListener("input", () => {
@@ -1620,8 +1832,17 @@
       floatingInspector.classList.toggle("minimized");
     });
 
+    document.getElementById("btn-expand-inspector").addEventListener("click", () => {
+      floatingInspector.classList.remove("minimized");
+      floatingInspector.classList.toggle("expanded");
+    });
+
     document.getElementById("btn-reload-captures").addEventListener("click", () => {
       loadCaptureImages();
+    });
+
+    document.getElementById("btn-rerender-inspector").addEventListener("click", () => {
+      rerenderLiveFrames();
     });
 
     inspectorMode.addEventListener("change", () => {
@@ -1633,14 +1854,16 @@
       cardWeb.style.display = m === "engine2d" ? "none" : "flex";
     });
 
+    document.getElementById("btn-save-file").addEventListener("click", () => {
+      saveActiveFile();
+    });
+
+    document.getElementById("btn-run-file").addEventListener("click", () => {
+      runActiveFile();
+    });
+
     document.getElementById("btn-run-check").addEventListener("click", () => {
-      const diags = computeDiagnostics();
-      const f = activeFile();
-      state.outputLines.push(
-        `[verify] ${new Date().toLocaleTimeString()} active=${f.id} profile=${state.profile} theme=${state.theme} diagnostics=${diags.length}`
-      );
-      state.drawerTab = "output";
-      renderDrawer();
+      runLiveVerify();
     });
 
     document.getElementById("btn-clear-output").addEventListener("click", () => {
@@ -1651,13 +1874,14 @@
     document.getElementById("btn-new-file").addEventListener("click", () => {
       const idx = state.files.length + 1;
       const id = `src/app/ide/scratch_${idx}.spl`;
-      state.files.push({
+      state.files.unshift({
         id,
         folder: "src/app/ide",
         name: `scratch_${idx}.spl`,
         lang: "simple",
-        content: `# Scratch buffer ${idx}\nfn probe() -> i64:\n    0\n`,
-        savedContent: ""
+        content: `# Scratch buffer ${idx}\nfn main() -> i64:\n    print "hello from scratch ${idx}"\n    0\n`,
+        savedContent: "",
+        loadedFromDisk: true
       });
       openFile(id);
     });
@@ -1673,6 +1897,10 @@
         width: rect.width,
         height: rect.height
       };
+      floatingInspector.style.left = `${rect.left}px`;
+      floatingInspector.style.top = `${rect.top}px`;
+      floatingInspector.style.right = "auto";
+      floatingInspector.style.bottom = "auto";
       floatingTitlebar.setPointerCapture(e.pointerId);
     });
 
@@ -1685,6 +1913,7 @@
       floatingInspector.style.left = `${nextX}px`;
       floatingInspector.style.top = `${nextY}px`;
       floatingInspector.style.right = "auto";
+      floatingInspector.style.bottom = "auto";
     });
 
     floatingTitlebar.addEventListener("pointerup", (e) => {
@@ -1697,10 +1926,95 @@
       }
     });
 
-    applyTheme(INITIAL_THEME);
-    applyProfile(INITIAL_PROFILE);
-    renderAll();
-    loadCaptureImages();
+    window.__ideTest = {
+      runInteractiveChecks: async () => {
+        const workspaceLoaded = state.files.length > 5;
+        const firstFolder = document.querySelector(".tree-folder");
+        const beforeItems = document.querySelectorAll(".tree-item").length;
+        if (firstFolder) firstFolder.click();
+        const afterCollapse = document.querySelectorAll(".tree-item").length;
+        const secondFolder = document.querySelector(".tree-folder");
+        if (secondFolder) secondFolder.click();
+        const afterExpand = document.querySelectorAll(".tree-item").length;
+        const folderToggled = afterCollapse < beforeItems && afterExpand === beforeItems;
+
+        // Create scratch buffer, indent via Tab, save, run in Simple
+        document.getElementById("btn-new-file").click();
+        const f = activeFile();
+        codeEditor.value = "fn main() -> i64:\nprint 77\n0\n";
+        codeEditor.setSelectionRange(18, 18);
+        codeEditor.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+        codeEditor.setSelectionRange(31, 31);
+        codeEditor.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+        const tabIndented = codeEditor.value.includes("    print 77") && codeEditor.value.includes("    0");
+        const dirtyBeforeSave = document.querySelectorAll(".tab-dirty").length;
+        await saveActiveFile();
+        const dirtyAfterSave = document.querySelectorAll(".tab-dirty").length;
+        const runRes = await runActiveFile();
+        const verifyRes = await runLiveVerify();
+        const rerenderRes = await rerenderLiveFrames();
+
+        const pvBtn = document.querySelector(".profile-view-pill[data-profile-view=\"outline\"]");
+        let pillClicked = false;
+        if (pvBtn) {
+          pvBtn.click();
+          pillClicked = state.sidebarView === "outline";
+        }
+        document.querySelector('[data-view="capabilities"]').click();
+        const capRow = document.querySelector(".cap-row");
+        let capClicked = false;
+        if (capRow) {
+          capRow.click();
+          capClicked = state.outputLines.some((l) => l.startsWith("[capability]"));
+        }
+        document.querySelector('[data-view="explorer"]').click();
+        return {
+          workspaceLoaded,
+          fileCount: state.files.length,
+          folderToggled,
+          tabIndented,
+          dirtyBeforeSave,
+          dirtyAfterSave,
+          runExitCode: runRes.exitCode,
+          runStdout: (runRes.stdout || "").trim(),
+          verifyOk: Boolean(verifyRes && verifyRes.ok),
+          rerenderOk: Boolean(rerenderRes && rerenderRes.ok),
+          pillClicked,
+          capClicked,
+        };
+      }
+    };
+
+    window.__ideInitPromise = (async () => {
+      applyTheme(INITIAL_THEME);
+      applyProfile(INITIAL_PROFILE);
+      renderAll();
+      loadCaptureImages();
+      if (ideBridge && ideBridge.listWorkspaceFiles) {
+        try {
+          const list = await ideBridge.listWorkspaceFiles();
+          if (Array.isArray(list) && list.length > 0) {
+            const byId = new Map(state.files.map((f) => [f.id, f]));
+            const merged = [];
+            for (const item of list) {
+              if (byId.has(item.id)) {
+                merged.push(byId.get(item.id));
+              } else {
+                merged.push({ ...item, content: "", savedContent: "", loadedFromDisk: false });
+              }
+            }
+            for (const existing of state.files) {
+              if (!merged.some((m) => m.id === existing.id)) merged.push(existing);
+            }
+            state.files = merged;
+            await loadFileContentIfNeeded(activeFile());
+            renderAll();
+          }
+        } catch (_err) {
+          // Keep bundled files on error.
+        }
+      }
+    })();
   </script>
 </body>
 </html>

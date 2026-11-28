@@ -21,7 +21,8 @@ use std.spec.*
 use compiler.mdsoc.weaving.join_point.{JoinPointContext}
 use compiler.mdsoc.weaving.weaving_rule.{WeavingRule}
 use compiler.mdsoc.weaving.advice_form.{AdviceForm}
-use compiler.mdsoc.aop_cache.aop_group_keys.{aop_selector_digest, aop_descriptor_digest, aop_advice_interface_digest, aop_advice_implementation_digest, aop_advice_interface_root, aop_selection_key_today, aop_selection_key_digest, AopWeaveKey, aop_weave_key_digest, aop_empty_seq_sentinel}
+use compiler.mdsoc.aop_cache.aop_group_keys.{aop_descriptor_digest, aop_advice_interface_digest, aop_advice_implementation_digest, aop_advice_interface_root, aop_selection_key_today, aop_selection_key_digest, AopWeaveKey, aop_weave_key_digest, aop_empty_seq_sentinel}
+use compiler.frontend.core.aop_selector_identity_v1.{aop_selector_id_v1}
 use compiler.mdsoc.aop_cache.aop_group_manifest.{aop_partition_candidates, aop_partition_roots}
 use compiler.mdsoc.aop_index.reverse_index.{AopTargetSelection, aop_reverse_index_build, aop_selector_read_set, aop_selectors_reading_field}
 use compiler.mdsoc.aop_cache.invalidation.{aop_invalidate, AOP_CHANGE_ADVICE_BODY_SYMBOLIC, AOP_CHANGE_ADVICE_BODY_EMBEDDED, AOP_CHANGE_TARGET_DESCRIPTOR_FIELD, AOP_CHANGE_RUNTIME_TOGGLE}
@@ -103,17 +104,37 @@ describe "AOP selection/weave key stability (core invariant)":
         expect(aop_advice_interface_digest(first) == aop_advice_interface_digest(legacy)).to_equal(false)
 
     it "legacy payloads containing parentheses keep distinct identities":
-        expect(aop_selector_digest("@name(x)#first") == aop_selector_digest("@name(x)#second")).to_equal(false)
-        expect(aop_selector_digest("module:app(x)#first") == aop_selector_digest("module:app(x)#second")).to_equal(false)
-        expect(aop_selector_digest("effect:io(x)#first") == aop_selector_digest("effect:io(x)#second")).to_equal(false)
+        expect(aop_selector_id_v1("@name(x)#first") == aop_selector_id_v1("@name(x)#second")).to_equal(false)
+        expect(aop_selector_id_v1("module:app(x)#first") == aop_selector_id_v1("module:app(x)#second")).to_equal(false)
+        expect(aop_selector_id_v1("effect:io(x)#first") == aop_selector_id_v1("effect:io(x)#second")).to_equal(false)
 
     it "raw and serialized selector tokens share identity":
-        expect(aop_selector_digest("execution(* app.run(..))")).to_equal(aop_selector_digest("execution ( * app . run ( .. ) )"))
-        expect(aop_selector_digest("execution(* app.run(..)) # note\n")).to_equal(aop_selector_digest("execution(* app.run(..))"))
+        expect(aop_selector_id_v1("execution(* app.run(..))")).to_equal(aop_selector_id_v1("execution ( * app . run ( .. ) )"))
+        expect(aop_selector_id_v1("execution(* app.run(..)) # note\n")).to_equal(aop_selector_id_v1("execution(* app.run(..))"))
 
-    it "predicate whitespace-only respelling preserves the selector digest":
-        step("Verify: predicate whitespace-only respelling preserves the selector digest")
-        expect(aop_selector_digest("  module_path ==   app.core ")).to_equal(aop_selector_digest("module_path == app.core"))
+    it "predicate surrounding-whitespace respelling preserves the selector id":
+        step("Verify: predicate surrounding-whitespace respelling preserves the selector id")
+        # The mir matcher compares a bare predicate by its trimmed text, so inner
+        # whitespace is part of the predicate (aspect plan AW-3).
+        expect(aop_selector_id_v1("  module_path == app.core ")).to_equal(aop_selector_id_v1("module_path == app.core"))
+        expect(aop_selector_id_v1("module_path ==   app.core") == aop_selector_id_v1("module_path == app.core")).to_equal(false)
+
+    it "selection key moves when a respelling keeps the selector id but changes the order rank":
+        step("Verify: selection key moves when a respelling keeps the selector id but changes the order rank")
+        # Equal-priority advice is ordered by specificity, which is read from the
+        # spelling: a star form ranks below the exact form of the same selector.
+        val iface = aop_advice_interface_digest(rule_log(10))
+        val exact = aop_selection_key_today("execution(i64 run())", ["root-a"], [iface], visible_catalog_digest())
+        val starred = aop_selection_key_today("execution(* run(..))", ["root-a"], [iface], visible_catalog_digest())
+        val commented = aop_selection_key_today("execution(i64 run()) # *", ["root-a"], [iface], visible_catalog_digest())
+        val spaced = aop_selection_key_today("execution ( i64 run ( ) )", ["root-a"], [iface], visible_catalog_digest())
+        expect(aop_selector_id_v1("execution(* run(..))")).to_equal(aop_selector_id_v1("execution(i64 run())"))
+        expect(aop_selection_key_digest(starred) == aop_selection_key_digest(exact)).to_equal(false)
+        expect(aop_selection_key_digest(commented) == aop_selection_key_digest(exact)).to_equal(false)
+        expect(aop_selection_key_digest(spaced)).to_equal(aop_selection_key_digest(exact))
+        # Bare sha256 hex, like the other digests of the key.
+        expect(exact.normalized_query_digest.contains(":")).to_equal(false)
+        expect(exact.normalized_query_digest.len()).to_equal(exact.matcher_schema_digest.len())
 
 describe "Candidate Merkle partitioning":
     it "a new candidate changes only its own partition root, siblings unchanged":
@@ -138,14 +159,14 @@ describe "Candidate Merkle partitioning":
 describe "Selector read-set precision (reverse table 2)":
     it "descriptor change on a field outside the selector read-set does not select it":
         step("Verify: descriptor change on a field outside the selector read-set does not select it")
-        val r = WeavingRule(predicate_text: "module_path == app.core", advice_function: "adv",
+        val r = WeavingRule(predicate_text: "execution(* run(..))", advice_function: "adv",
                             form: AdviceForm.Before, priority: 1)
         val rs = aop_selector_read_set(r)
         expect(rs.conservative).to_equal(false)
         val index = aop_reverse_index_build([r], [["pk1"]], [])
-        # signature is NOT in the read-set of a module_path-only predicate.
+        # signature is NOT in the read-set of a function-name predicate.
         expect(aop_selectors_reading_field(index, "signature").len()).to_equal(0)
-        expect(aop_selectors_reading_field(index, "module_path").len()).to_equal(1)
+        expect(aop_selectors_reading_field(index, "function_name").len()).to_equal(1)
 
     it "an opaque predicate falls back to the FULL read-set (conservative)":
         step("Verify: an opaque predicate falls back to the FULL read-set (conservative)")
@@ -170,13 +191,13 @@ describe "Invalidation transaction (§16.5 / matrix §16.6)":
 
     it "descriptor-field change selects only selectors reading that field (row 8)":
         step("Verify: descriptor-field change selects only selectors reading that field (row 8)")
-        val r = WeavingRule(predicate_text: "module_path == app.core", advice_function: "adv",
+        val r = WeavingRule(predicate_text: "execution(* run(..))", advice_function: "adv",
                             form: AdviceForm.Before, priority: 1)
         val index = aop_reverse_index_build([r], [["pk1"]], [])
         val res = aop_invalidate(AOP_CHANGE_TARGET_DESCRIPTOR_FIELD, "mod.a::f1", "signature", index)
         expect(res.selections.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(res.weave_targets.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        val res2 = aop_invalidate(AOP_CHANGE_TARGET_DESCRIPTOR_FIELD, "mod.a::f1", "module_path", index)
+        val res2 = aop_invalidate(AOP_CHANGE_TARGET_DESCRIPTOR_FIELD, "mod.a::f1", "function_name", index)
         expect(res2.selections.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "embedded-body change over-invalidates all targets of the advice (conservative, row 2)":

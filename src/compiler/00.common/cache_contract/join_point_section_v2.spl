@@ -1,0 +1,327 @@
+# `join-point|` module TLDR section and JoinPointFactV2 (aspect plan stage AW-2).
+#
+# doc/05_design/compiler/cache/aspect_tldr_async_trace.md section 3 and gap G15:
+# JoinPointFactV1 has no signature digest and no guard ids, and the production
+# producer leaves `base_body_digest` empty, so a weave key cannot be built from
+# it. A module's own compile task writes its forward join points (exported or
+# not) into its TLDR as JoinPointFactV2 rows; a directory's
+# DirectoryJoinPointFactsV1 is then built from its members' sections instead of
+# from every member's HIR.
+#
+# A section also carries the module's static guard evaluations, because the
+# directory guard root is a function of them. `guard_ids` of a fact are the
+# ids of the guards evaluated in its owning file (file granularity).
+#
+# Pure value code: no filesystem, no lock, no module-level mutable state.
+# Wire form (frames as in aspect_decl_section_v1):
+#   frame(seal) frame(magic) frame(module key) frame(owner file)
+#   frame(guard profile)
+#   frame(guard count) { frame(kind) frame(expr) frame(digest) frame(evaluable) frame(active) }
+#   frame(point count) { frame(pair count) { frame(key) frame(value) } }
+# Point fields are keyed; an unknown key is ignored only when it starts with `?`.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1, DirectoryJoinPointFactsV1,
+    directory_join_point_facts_guarded_v1}
+use compiler.common.cache_contract.guard_id_v1.{GuardIdV1, GuardEvalV1, active_guard_root_v1}
+use compiler.common.cache_contract.aspect_decl_section_v1.{ASPECT_SECTION_OK_V1, ASPECT_SECTION_MISS_V1,
+    ASPECT_SECTION_REJECT_V1, aspect_section_frame_v1, aspect_section_count_v1,
+    aspect_section_frames_read_v1, aspect_section_seal_v1, aspect_section_seal_status_v1}
+
+pub val JOIN_POINT_SECTION_KIND_V2: text = "join-point"
+pub val JOIN_POINT_SECTION_MAGIC_V2: text = "join-point/v2"
+pub val JOIN_POINT_SECTION_MAX_POINTS_V2: i64 = 4096
+pub val JOIN_POINT_SECTION_MAX_GUARDS_V2: i64 = 1024
+pub val JOIN_POINT_SECTION_MAX_FIELD_BYTES_V2: i64 = 65536
+pub val JOIN_POINT_SECTION_MAX_BYTES_V2: i64 = 4194304
+
+pub struct JoinPointFactV2:
+    id: text
+    kind: text
+    symbol: text
+    attrs: [text]
+    owner_file: text
+    base_body_digest: text
+    signature_digest: text
+    guard_ids: [text]
+
+# What the HIR reader supplies for one join point of a module.
+pub struct JoinPointRowInputV2:
+    kind: text
+    symbol: text
+    attrs: [text]
+    signature_digest: text
+    base_body_digest: text
+
+pub struct JoinPointSectionV2:
+    module_key: text
+    owner_file: text
+    guard_profile: text
+    guards: [GuardEvalV1]
+    points: [JoinPointFactV2]
+
+pub struct JoinPointSectionDecodeV2:
+    status: text
+    reason: text
+    section: JoinPointSectionV2
+
+fn _sorted_texts_v2(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and out[i - 1] > v:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+fn _guard_ids_v2(guards: [GuardEvalV1]) -> [text]:
+    var ids: [text] = []
+    for item in guards:
+        val eval: GuardEvalV1 = item
+        if eval.guard.digest != "" and not ids.contains(eval.guard.digest):
+            ids.push(eval.guard.digest)
+    _sorted_texts_v2(ids)
+
+pub fn join_point_section_v2(module_key: text, owner_file: text, guard_profile: text,
+        guards: [GuardEvalV1], inputs: [JoinPointRowInputV2]) -> Result<JoinPointSectionV2, text>:
+    """One module's section. Every row must name a symbol and carry a signature
+    digest and a base body digest; rows are sorted by id and ids are unique."""
+    if module_key == "" or owner_file == "":
+        return Err("join-point-owner-missing")
+    val guard_ids = _guard_ids_v2(guards)
+    var points: [JoinPointFactV2] = []
+    for item in inputs:
+        val input: JoinPointRowInputV2 = item
+        if input.symbol == "" or input.kind == "":
+            return Err("join-point-symbol-missing")
+        if input.signature_digest == "":
+            return Err("join-point-signature-unavailable")
+        if input.base_body_digest == "":
+            return Err("join-point-body-unavailable")
+        val point = JoinPointFactV2(id: "{module_key}::{input.symbol}", kind: input.kind,
+            symbol: input.symbol, attrs: _sorted_texts_v2(input.attrs), owner_file: owner_file,
+            base_body_digest: input.base_body_digest, signature_digest: input.signature_digest,
+            guard_ids: guard_ids)
+        var i = points.len()
+        points.push(point)
+        while i > 0 and points[i - 1].id > point.id:
+            points[i] = points[i - 1]
+            i = i - 1
+        points[i] = point
+        if i > 0 and points[i - 1].id == point.id:
+            return Err("join-point-duplicate")
+    Ok(JoinPointSectionV2(module_key: module_key, owner_file: owner_file,
+        guard_profile: guard_profile, guards: guards, points: points))
+
+pub fn join_point_fact_v1_of_v2(point: JoinPointFactV2) -> JoinPointFactV1:
+    JoinPointFactV1(id: point.id, kind: point.kind, symbol: point.symbol, attrs: point.attrs,
+        owner_file: point.owner_file, base_body_digest: point.base_body_digest)
+
+fn _flag_v2(value: bool) -> text:
+    if value: "1" else: "0"
+
+fn _frames_v2(values: [text]) -> text:
+    var out = ""
+    for v in values:
+        out = out + aspect_section_frame_v1(v)
+    out
+
+fn _point_keys_v2() -> [text]:
+    ["kind", "symbol", "attrs", "signature", "body"]
+
+pub fn join_point_section_encode_v2(section: JoinPointSectionV2) -> Result<text, text>:
+    if section.points.len() > JOIN_POINT_SECTION_MAX_POINTS_V2:
+        return Err("point-limit")
+    if section.guards.len() > JOIN_POINT_SECTION_MAX_GUARDS_V2:
+        return Err("guard-limit")
+    var values: [text] = [JOIN_POINT_SECTION_MAGIC_V2, section.module_key, section.owner_file,
+        section.guard_profile, "{section.guards.len()}"]
+    for item in section.guards:
+        val eval: GuardEvalV1 = item
+        for field in [eval.guard.kind, eval.guard.canonical_expr, eval.guard.digest,
+                _flag_v2(eval.evaluable), _flag_v2(eval.active)]:
+            values.push(field)
+    values.push("{section.points.len()}")
+    val keys = _point_keys_v2()
+    for item in section.points:
+        val point: JoinPointFactV2 = item
+        val fields = [point.kind, point.symbol, _frames_v2(point.attrs), point.signature_digest,
+            point.base_body_digest]
+        values.push("{keys.len()}")
+        var i = 0
+        while i < keys.len():
+            values.push(keys[i])
+            values.push(fields[i])
+            i = i + 1
+    var body = ""
+    for value in values:
+        if value.byte_len() > JOIN_POINT_SECTION_MAX_FIELD_BYTES_V2:
+            return Err("field-limit")
+        body = body + aspect_section_frame_v1(value)
+        # The seal frame is 74 bytes; an over-limit section is never hashed.
+        if body.byte_len() + 74 > JOIN_POINT_SECTION_MAX_BYTES_V2:
+            return Err("section-limit")
+    Ok(aspect_section_frame_v1(aspect_section_seal_v1(body)) + body)
+
+fn _empty_section_v2() -> JoinPointSectionV2:
+    JoinPointSectionV2(module_key: "", owner_file: "", guard_profile: "", guards: [], points: [])
+
+fn _not_ok_v2(status: text, reason: text) -> JoinPointSectionDecodeV2:
+    JoinPointSectionDecodeV2(status: status, reason: reason, section: _empty_section_v2())
+
+fn _reject_v2(reason: text) -> JoinPointSectionDecodeV2:
+    _not_ok_v2(ASPECT_SECTION_REJECT_V1, reason)
+
+fn _point_decode_v2(toks: [text], first: i64, pair_count: i64) -> Result<JoinPointRowInputV2, text>:
+    val keys = _point_keys_v2()
+    var fields: Dict<text, text> = {}
+    var i = 0
+    while i < pair_count:
+        val key = toks[first + i * 2]
+        if keys.contains(key):
+            if fields.contains_key(key):
+                return Err("duplicate-field")
+            fields[key] = toks[first + i * 2 + 1]
+        else:
+            if not key.starts_with("?"):
+                return Err("unknown-mandatory-field")
+        i = i + 1
+    for key in keys:
+        if not fields.contains_key(key):
+            return Err("missing-field")
+    val attrs = aspect_section_frames_read_v1(fields["attrs"])
+    if attrs.is_none():
+        return Err("bad-attrs")
+    Ok(JoinPointRowInputV2(kind: fields["kind"], symbol: fields["symbol"], attrs: attrs.unwrap(),
+        signature_digest: fields["signature"], base_body_digest: fields["body"]))
+
+pub fn join_point_section_decode_v2(data: text) -> JoinPointSectionDecodeV2:
+    """Strict decode. Size, framing, magic, seal, counts, every guard and every
+    row must verify, and the rows must satisfy the same rules as the builder;
+    the result is never a partial section."""
+    if data.byte_len() > JOIN_POINT_SECTION_MAX_BYTES_V2:
+        return _reject_v2("section-limit")
+    val frames = aspect_section_frames_read_v1(data)
+    if frames.is_none():
+        return _reject_v2("malformed-frame")
+    val toks = frames.unwrap()
+    if toks.len() < 7:
+        return _reject_v2("truncated-section")
+    if toks[1] != JOIN_POINT_SECTION_MAGIC_V2:
+        return _reject_v2("bad-magic")
+    val seal = toks[0]
+    val body = data.substring(aspect_section_frame_v1(seal).byte_len(), data.byte_len())
+    val sealed = aspect_section_seal_status_v1(seal, body)
+    if sealed == ASPECT_SECTION_MISS_V1:
+        return _not_ok_v2(ASPECT_SECTION_MISS_V1, "unknown-digest-algorithm")
+    if sealed == ASPECT_SECTION_REJECT_V1:
+        return _reject_v2("seal-mismatch")
+    val guard_count = aspect_section_count_v1(toks[5])
+    if guard_count < 0 or guard_count > JOIN_POINT_SECTION_MAX_GUARDS_V2:
+        return _reject_v2("guard-limit")
+    if 6 + guard_count * 5 >= toks.len():
+        return _reject_v2("truncated-section")
+    var guards: [GuardEvalV1] = []
+    var g = 0
+    while g < guard_count:
+        val base = 6 + g * 5
+        for flag in [toks[base + 3], toks[base + 4]]:
+            if flag != "1" and flag != "0":
+                return _reject_v2("bad-flag")
+        guards.push(GuardEvalV1(
+            guard: GuardIdV1(kind: toks[base], canonical_expr: toks[base + 1], digest: toks[base + 2]),
+            evaluable: toks[base + 3] == "1", active: toks[base + 4] == "1"))
+        g = g + 1
+    var at = 6 + guard_count * 5
+    val point_count = aspect_section_count_v1(toks[at])
+    if point_count < 0 or point_count > JOIN_POINT_SECTION_MAX_POINTS_V2:
+        return _reject_v2("point-limit")
+    at = at + 1
+    var inputs: [JoinPointRowInputV2] = []
+    var r = 0
+    while r < point_count:
+        if at >= toks.len():
+            return _reject_v2("truncated-section")
+        val pair_count = aspect_section_count_v1(toks[at])
+        if pair_count < 0 or at + 1 + pair_count * 2 > toks.len():
+            return _reject_v2("truncated-row")
+        match _point_decode_v2(toks, at + 1, pair_count):
+            case Ok(input): inputs.push(input)
+            case Err(reason): return _reject_v2(reason)
+        at = at + 1 + pair_count * 2
+        r = r + 1
+    if at != toks.len():
+        return _reject_v2("trailing-data")
+    match join_point_section_v2(toks[2], toks[3], toks[4], guards, inputs):
+        case Ok(section):
+            JoinPointSectionDecodeV2(status: ASPECT_SECTION_OK_V1, reason: "", section: section)
+        case Err(reason): _reject_v2(reason)
+
+pub fn join_point_section_entry_v2(section: JoinPointSectionV2) -> Result<text, text>:
+    """The module TLDR entry (`join-point|<section text>`) for `section`."""
+    match join_point_section_encode_v2(section):
+        case Ok(encoded): Ok(JOIN_POINT_SECTION_KIND_V2 + "|" + encoded)
+        case Err(reason): Err(reason)
+
+pub fn join_point_section_of_entries_v2(entries: [text]) -> JoinPointSectionDecodeV2:
+    """Decode the one `join-point|` entry of a module TLDR's section entries.
+    None is a miss; more than one is a reject."""
+    val prefix = JOIN_POINT_SECTION_KIND_V2 + "|"
+    var found = 0
+    var payload = ""
+    for entry in entries:
+        if entry.starts_with(prefix):
+            found = found + 1
+            payload = entry.substring(prefix.byte_len(), entry.byte_len())
+    if found == 0:
+        return _not_ok_v2(ASPECT_SECTION_MISS_V1, "section-absent")
+    if found > 1:
+        return _reject_v2("duplicate-section")
+    join_point_section_decode_v2(payload)
+
+pub fn directory_join_point_facts_of_sections_v2(scope_id: text, member_files: [text],
+        sections: [JoinPointSectionV2], guard_profile: text) -> DirectoryJoinPointFactsV1:
+    """A directory's facts from its members' sections. The facts are complete
+    only when every member file has exactly one section written for
+    `guard_profile`; a section of a non-member, a second section of one member
+    or a section of another profile is not used and makes them incomplete."""
+    var complete = true
+    var seen: Dict<text, bool> = {}
+    var points: [JoinPointFactV1] = []
+    var evals: [GuardEvalV1] = []
+    for item in sections:
+        val section: JoinPointSectionV2 = item
+        if not member_files.contains(section.owner_file) or seen.contains_key(section.owner_file) or
+                section.guard_profile != guard_profile:
+            complete = false
+            continue
+        seen[section.owner_file] = true
+        for point in section.points:
+            points.push(join_point_fact_v1_of_v2(point))
+        for eval in section.guards:
+            evals.push(eval)
+    for file in member_files:
+        if not seen.contains_key(file):
+            complete = false
+    directory_join_point_facts_guarded_v1(scope_id, member_files, points, [], complete,
+        active_guard_root_v1(guard_profile, evals))
+
+pub fn aspect_root_digest_v1(leaf_digests: [text], child_roots: [text]) -> text:
+    """A directory's aspect root: its members' aspect leaf digests
+    (`DirectoryAspectSemanticV2.interface_digest`, which holds no advice body)
+    and its child directories' roots, both as sorted multisets."""
+    val leaves = _sorted_texts_v2(leaf_digests)
+    val children = _sorted_texts_v2(child_roots)
+    "sha256:" + sha256_text(aspect_section_frame_v1("aop-aspect-root/v1") +
+        aspect_section_frame_v1("{leaves.len()}") + _frames_v2(leaves) +
+        aspect_section_frame_v1("{children.len()}") + _frames_v2(children))
+
+export JOIN_POINT_SECTION_KIND_V2, JOIN_POINT_SECTION_MAGIC_V2, JOIN_POINT_SECTION_MAX_POINTS_V2
+export JOIN_POINT_SECTION_MAX_GUARDS_V2, JOIN_POINT_SECTION_MAX_FIELD_BYTES_V2
+export JOIN_POINT_SECTION_MAX_BYTES_V2
+export JoinPointFactV2, JoinPointRowInputV2, JoinPointSectionV2, JoinPointSectionDecodeV2
+export join_point_section_v2, join_point_fact_v1_of_v2, join_point_section_encode_v2
+export join_point_section_decode_v2, join_point_section_entry_v2, join_point_section_of_entries_v2
+export directory_join_point_facts_of_sections_v2, aspect_root_digest_v1

@@ -1,0 +1,206 @@
+# @req REQ-ASPECT-AW1-WRITER
+# @req REQ-ASPECT-AW1-FACETS
+"""
+# Writing `aspect-decl|` from a compiled module
+
+## Purpose and audience
+
+Purpose: document and pin
+`src/compiler/80.driver/cache/aspect_tldr_section_writer_v1.spl`, the writer
+that turns one module's typed-HIR aspect capture into its `aspect-decl|` TLDR
+entry (aspect plan stage AW-1), and prove the stage's two edit rules on real
+parsed and lowered modules rather than on hand-built rows:
+
+- editing an advice body changes only the `advice.body` facet;
+- editing a selector changes the declaration row and the module's leaf digest.
+
+Audience: compiler engineers wiring TLDR publication and reviewers deciding
+what an advice edit is allowed to invalidate.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/aop/aspect_decl_section_writer_v1_spec.spl`
+   from the repository root. Every scenario parses and lowers a small module
+   in memory; no file is read.
+2. Measure coverage with
+   `SIMPLE_EXECUTION_MODE=interpreter SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<f> <seed> run <this spec>`
+   (doc/07_guide/infra/testing/coverage.md).
+
+## How the writer gets its inputs
+
+| Input | Source |
+|-------|--------|
+| declarations, handler signature and effects, leaf digest | `directory_aspect_semantic_capture_v2`, run while the module's HIR owner is alive |
+| handler body digest | sha256 over the handler's own source span (`HirFunction.span`), blank edges trimmed |
+
+The body digest is taken from source text, so a comment or layout change
+inside the handler counts as a body edit. That is conservative: it can cause
+an extra rebuild of the advice object, never a stale one.
+
+## Lifecycle
+
+Research: doc/01_research/local/dir_tldr_aspect.md
+Plan: doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (AW-1)
+Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
+Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md (section 3)
+
+## Decision inventory (MC/DC)
+
+| Function | Decision | Covering scenario |
+|----------|----------|-------------------|
+| `aspect_function_body_digests_v1` | loop over the module's functions: none left / one more | every scenario (one or two functions) |
+| `aspect_decl_tldr_entry_v1` | section built or refused (match arms) | "a compiled module writes one row per declaration", "a source that is not the parsed text is refused" |
+
+Exclusions: none. All fail-closed rules live in the pure codec and are
+covered by `aspect_decl_section_v1_spec.spl`.
+
+## Compatibility and limitations
+
+The writer is not yet called by TLDR publication: publication runs at parse
+time, before the typed-HIR capture exists. Until the engine's write-once slots
+land, a caller that holds the capture appends the entry itself.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:aop
+# @tag:cache
+# @tag:coverage
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1}
+use compiler.core.parser.{parser_initialization_generation_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_seal_parser_inventory_v2}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_trait_root_v2, module_surface_extension_root_v2}
+use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2}
+use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2}
+use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectSemanticV2}
+use compiler.driver.cache.directory_aspect_capture_v2.{directory_aspect_capture_v2}
+use compiler.driver.cache.directory_aspect_semantic_v2.{directory_aspect_semantic_capture_v2}
+use compiler.driver.cache.aspect_tldr_section_writer_v1.{aspect_function_body_digests_v1,
+    aspect_decl_tldr_entry_v1}
+use compiler.common.cache_contract.aspect_decl_section_v1.{AspectDeclSectionV1, AspectDeclRowV1,
+    ASPECT_SECTION_OK_V1, aspect_decl_section_of_entries_v1, aspect_decl_row_digest_v1}
+
+val PATH = "pkg/aspects.spl"
+val LOGICAL = "@advice(forward, submit)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    return\n"
+val BODY_EDIT = "@advice(forward, submit)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    val seen: i64 = 1\n"
+val SELECTOR_EDIT = "@advice(forward, pay)\n@readonly\n@noalloc\n@bounded_time\nfn observe():\n    return\n"
+val MIR_PART = r"on pc{call(*)} use hook before"
+val PLAIN = "fn ordinary() -> i64:\n    7\n"
+
+struct CompiledAspectModule:
+    semantic: DirectoryAspectSemanticV2
+    module: HirModule
+    source: text
+
+# Parse, capture the declaration draft, lower, and capture the typed handlers:
+# the same steps the driver runs for one module.
+fn compiled(source: text) -> CompiledAspectModule:
+    val before = parser_initialization_generation_v1()
+    val parsed = parse_and_build_module_checked_reference_v1(source, PATH).unwrap()
+    val after = parser_initialization_generation_v1()
+    expect(aspect_registry_seal_parser_inventory_v2(PATH, true)).to_equal(true)
+    val category = DirectoryCategoryProjectionV2(canonical_path: PATH, source_identity: PATH,
+        source_digest: sha256_text(source), target_triple: "aarch64-unknown-linux-gnu",
+        preprocessed_digest: sha256_text(source), cfg_decision_digest: sha256_text("fixture-without-cfg"),
+        environment_policy_digest: sha256_text("fixture-policy"),
+        trait_root: module_surface_trait_root_v2(parsed.traits),
+        extension_root: module_surface_extension_root_v2(parsed.impls, parsed.extend_enums))
+    val epoch = DirectorySourceEpochV2(driver_identity: 1, generation: 1)
+    val draft = directory_aspect_capture_v2(ModuleSurfaceParserOwner.new(parsed), PATH, category,
+        epoch, before, after).unwrap()
+    var lowering = HirLowering.with_filename(PATH)
+    val module = lowering.lower_parser_module_unstub(parsed, false)
+    val semantic = directory_aspect_semantic_capture_v2(draft, category, epoch, module, PATH).unwrap()
+    CompiledAspectModule(semantic: semantic, module: module, source: source)
+
+fn section_of(source: text) -> AspectDeclSectionV1:
+    val built = compiled(source)
+    val entry = aspect_decl_tldr_entry_v1(built.semantic, built.module, built.source).unwrap()
+    val decoded = aspect_decl_section_of_entries_v1([entry])
+    expect(decoded.status).to_equal(ASPECT_SECTION_OK_V1)
+    decoded.section
+
+# @manual_section: Writing the entry
+describe "aspect_decl_tldr_entry_v1":
+    it "a compiled module writes one row per declaration":
+        # @req REQ-ASPECT-AW1-WRITER
+        step("Compile a module with one `@advice` function and write its aspect-decl entry")
+        val built = compiled(LOGICAL)
+        val entry = aspect_decl_tldr_entry_v1(built.semantic, built.module, built.source).unwrap()
+        val section = aspect_decl_section_of_entries_v1([entry]).section
+        # @capture(exec): decoded entry of the compiled module
+        step("The entry decodes to one logical row carrying the capture's digests and the handler body digest")
+        expect(entry.starts_with("aspect-decl|")).to_equal(true)
+        expect(section.leaf_digest).to_equal(built.semantic.interface_digest)
+        expect([section.rows[0].family, section.rows[0].handler, section.rows[0].form,
+            section.rows[0].selector, section.rows[0].activation]).to_equal(
+            ["logical", "observe", "forward", "submit", "static"])
+        expect(section.rows[0].signature_digest).to_equal(built.semantic.handlers[0].signature_digest)
+        expect(section.rows[0].effects_digest).to_equal(built.semantic.handlers[0].effects_digest)
+        expect(section.rows[0].body_digest).to_equal(
+            aspect_function_body_digests_v1(built.module, built.source)["observe"])
+        expect(section.rows[0].body_digest.byte_len()).to_equal(64)  # oracle: sha256 hex width
+
+    it "both families are written, mir rows first":
+        # @req REQ-ASPECT-AW1-WRITER
+        step("Compile a module that declares an `on pc{...}` advice and an `@advice` function")
+        val section = section_of(MIR_PART + "\n\nfn hook():\n    return\n\n" + LOGICAL)
+        # @capture(exec): families and handlers of the two rows
+        step("The section has a mir row for `hook` and a logical row for `observe`, with different ids")
+        expect([section.rows[0].family, section.rows[0].handler, section.rows[0].form]).to_equal(
+            ["mir", "hook", "before"])
+        expect([section.rows[1].family, section.rows[1].handler]).to_equal(["logical", "observe"])
+        expect(section.rows[0].advice_id == section.rows[1].advice_id).to_equal(false)
+        expect(section.rows[0].body_digest == section.rows[1].body_digest).to_equal(false)
+
+    it "a module without advice writes a section with no row":
+        # @req REQ-ASPECT-AW1-WRITER
+        step("Compile a module that declares no advice and write its entry")
+        val section = section_of(PLAIN)
+        # @capture(exec): empty section
+        step("The section exists, names the module and has no row, so absence of advice is a stated fact")
+        expect(section.rows.len()).to_equal(0)  # oracle: no declaration in the source
+        expect(section.module_identity == "").to_equal(false)
+        expect(section.leaf_digest.byte_len()).to_equal(64)  # oracle: sha256 hex width
+
+    it "a source that is not the parsed text is refused":
+        # @req REQ-ASPECT-AW1-WRITER
+        step("Write the entry of a compiled module while passing another source text")
+        val built = compiled(LOGICAL)
+        val wrong = aspect_decl_tldr_entry_v1(built.semantic, built.module, PLAIN)
+        # @capture(exec): writer error
+        step("No entry is produced, because the handler span does not hold the handler in that text")
+        expect(wrong.unwrap_err()).to_equal("advice-body-unavailable")
+
+# @manual_section: What an edit changes
+describe "aspect-decl edit rules on compiled modules":
+    it "an advice body edit changes only the advice.body facet":
+        # @req REQ-ASPECT-AW1-FACETS
+        step("Compile the module, edit only the body of the advice function, and compile it again")
+        val before = section_of(LOGICAL)
+        val after = section_of(BODY_EDIT)
+        # @capture(exec): leaf, row and body digests before and after
+        step("The leaf digest and the row digest are equal; only the body facet differs")
+        expect(after.leaf_digest).to_equal(before.leaf_digest)
+        expect(aspect_decl_row_digest_v1(after.rows[0])).to_equal(aspect_decl_row_digest_v1(before.rows[0]))
+        expect(after.rows[0].body_digest == before.rows[0].body_digest).to_equal(false)
+
+    it "a selector edit changes the row and the leaf digest":
+        # @req REQ-ASPECT-AW1-FACETS
+        step("Compile the module, change only the selector of the `@advice` line, and compile it again")
+        val before = section_of(LOGICAL)
+        val after = section_of(SELECTOR_EDIT)
+        # @capture(exec): leaf, row, selector and body digests before and after
+        step("Leaf digest, row digest and selector id change; the advice id and the body facet do not")
+        expect(after.leaf_digest == before.leaf_digest).to_equal(false)
+        expect(aspect_decl_row_digest_v1(after.rows[0]) == aspect_decl_row_digest_v1(before.rows[0])).to_equal(false)
+        expect(after.rows[0].selector_id == before.rows[0].selector_id).to_equal(false)
+        expect(after.rows[0].advice_id).to_equal(before.rows[0].advice_id)
+        expect(after.rows[0].body_digest).to_equal(before.rows[0].body_digest)
