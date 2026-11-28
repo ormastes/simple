@@ -310,6 +310,84 @@ fn _fr_units_per_em(identity: text, blob: [u8]) -> i64:
     _fr_upem_value = upem
     upem
 
+fn _fr_floor_f64(value: f64) -> i64:
+    val whole = value as i64
+    if (whole as f64) > value: whole - 1 else: whole
+
+fn _fr_ceil_f64(value: f64) -> i64:
+    val whole = value as i64
+    if (whole as f64) < value: whole + 1 else: whole
+
+fn _fr_embolden_cov_bitmap(pixels: [u8], w: i64, h: i64, extra_cols: i64) -> (i64, [u8]):
+    if w <= 0 or h <= 0 or extra_cols <= 0:
+        return (w, pixels)
+    val nw = w + extra_cols
+    var out: [u8] = [0u8; nw * h]
+    var r: i64 = 0
+    while r < h:
+        val src_off = r * w
+        val dst_off = r * nw
+        var c: i64 = 0
+        while c < nw:
+            var best: i64 = if c < w: pixels[src_off + c] as i64 else: 0
+            var k: i64 = 1
+            while k <= extra_cols:
+                val sc = c - k
+                if sc >= 0 and sc < w:
+                    val cand = pixels[src_off + sc] as i64
+                    if cand > best:
+                        best = cand
+                k = k + 1
+            out[dst_off + c] = best as u8
+            c = c + 1
+        r = r + 1
+    (nw, out)
+
+fn _fr_shear_cov_bitmap(pixels: [u8], w: i64, h: i64, draw_x: i64, draw_y: i64, baseline_y_i: i64, skew: f64) -> (i64, i64, [u8]):
+    if w <= 0 or h <= 0:
+        return (draw_x, w, pixels)
+    var min_dx: i64 = 0
+    var max_dx: i64 = w
+    var first = true
+    var r: i64 = 0
+    while r < h:
+        val y_rel = (draw_y + r - baseline_y_i) as f64
+        val shift = -y_rel * skew
+        val lo = _fr_floor_f64(shift)
+        val hi = _fr_ceil_f64((w as f64) + shift)
+        if first:
+            min_dx = lo
+            max_dx = hi
+            first = false
+        else:
+            if lo < min_dx: min_dx = lo
+            if hi > max_dx: max_dx = hi
+        r = r + 1
+    val nw = max_dx - min_dx
+    if nw <= 0 or nw > 4096:
+        return (draw_x, w, pixels)
+    var out: [u8] = [0u8; nw * h]
+    r = 0
+    while r < h:
+        val y_rel = (draw_y + r - baseline_y_i) as f64
+        val shift = -y_rel * skew
+        val src_off = r * w
+        val dst_off = r * nw
+        var dc: i64 = 0
+        while dc < nw:
+            val sx = ((min_dx + dc) as f64) - shift
+            val x0 = _fr_floor_f64(sx)
+            val tx = sx - (x0 as f64)
+            val v0 = if x0 >= 0 and x0 < w: pixels[src_off + x0] as f64 else: 0.0
+            val v1 = if x0 + 1 >= 0 and x0 + 1 < w: pixels[src_off + x0 + 1] as f64 else: 0.0
+            var interp = ((v0 * (1.0 - tx) + v1 * tx) + 0.5) as i64
+            if interp < 0: interp = 0
+            if interp > 255: interp = 255
+            out[dst_off + dc] = interp as u8
+            dc = dc + 1
+        r = r + 1
+    (draw_x + min_dx, nw, out)
+
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
         val slot = _adv_ascii_slot(identity, font_size)
@@ -395,7 +473,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, sfnt_gray_glyph_outline, sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdGlyph, SfntLcdOutline}
-use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
+use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_font_cache_key_milli_px, sfnt_subpixel_pen_split_milli, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be, sfnt_glyf_cmap_ids_into, sfnt_glyf_measure_codepoint_advances_kerned}
 use std.common.encoding.font_registry.{FontAssetCandidate, FontAssetRuntimeValidation, clear_registered_selected_font_fixtures, register_selected_font_fixture, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_kern_face_pair_size_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
@@ -3210,11 +3288,31 @@ class FontRenderer:
     # -----------------------------------------------------------------------
     # Render text into a pixel buffer (ARGB u32)
     # -----------------------------------------------------------------------
+    me _render_baseline_offset(content_cps: [i64], font_size: i32) -> i32:
+        val content_len = content_cps.len()
+        if content_len == 0:
+            return 0
+        if self.selected_outline_blob.len() > 0:
+            var ascent_meta: [i64] = [0; 20]
+            sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
+                content_cps[0], font_size.to_i64(), ascent_meta)
+            if ascent_meta[7] == 310031 and ascent_meta[17] > 0:
+                return ascent_meta[17].to_i32()
+        var baseline: i32 = 0
+        var fi = 0
+        while fi < content_len:
+            val fg = self.get_glyph(content_cps[fi] as i32, font_size)
+            val ink_top = fg.bearing_y + fg.height
+            if ink_top > baseline:
+                baseline = ink_top
+            fi = fi + 1
+        baseline
+
     me render_text(buffer: [u32], buf_w: i32, buf_h: i32,
                    x: i32, y: i32, content: text,
                    color: u32, font_size: i32) -> [u32]:
         """Render text string into an ARGB pixel buffer with unified cumulative milli-px
-        pen stepping and kerning matching measure_text_advances."""
+        pen stepping, kerning matching measure_text_advances, and baseline alignment."""
         var out = buffer
         val content_cps = text_codepoints(content)
         val content_len = content_cps.len()
@@ -3224,14 +3322,142 @@ class FontRenderer:
         if val run_rasterizer = self.ttf_rasterizer:
             run_identity = run_rasterizer.cache_identity()
         val boundaries = self._text_pen_milli(content_cps, font_size, run_identity)
+        val baseline = self._render_baseline_offset(content_cps, font_size)
         var ci = 0
         while ci < content_len:
             val cp = content_cps[ci] as i32
             val glyph = self.get_glyph(cp, font_size)
             val pen_x = x + _milli_px_to_px(boundaries[ci])
             val draw_x = if not self.use_bitmap: pen_x + glyph.bearing_x else: pen_x
+            val draw_y = y + baseline - glyph.bearing_y - glyph.height
             if glyph.width > 0 and glyph.height > 0:
-                out = blit_glyph(out, buf_w, buf_h, draw_x, y, glyph, color)
+                out = blit_glyph(out, buf_w, buf_h, draw_x, draw_y, glyph, color)
+            ci = ci + 1
+        out
+
+    me _text_pen_milli_styled_size(content_cps: [i64], size_milli: i64, bold: bool) -> [i64]:
+        val n = content_cps.len()
+        if n == 0:
+            return [0]
+        val eff_size_milli = sfnt_font_cache_key_milli_px(size_milli)
+        val eff_sz_px = (eff_size_milli as f64) / 1000.0
+        val bold_widen_milli: i64 = if bold: (if eff_sz_px >= 24.0: 1500 else: 750) else: 0
+        var run_identity: text = ""
+        if val run_rasterizer = self.ttf_rasterizer:
+            run_identity = run_rasterizer.cache_identity()
+        if eff_size_milli % 1000 == 0 and self.selected_outline_blob.len() == 0:
+            val base = self._text_pen_milli(content_cps, (eff_size_milli / 1000) as i32, run_identity)
+            if bold_widen_milli == 0:
+                return base
+            var styled_b: [i64] = [0; n + 1]
+            var bi = 0
+            while bi <= n:
+                styled_b[bi] = base[bi] + (bi as i64) * bold_widen_milli
+                bi = bi + 1
+            return styled_b
+        if self.selected_outline_blob.len() > 0:
+            val kerned_advs = sfnt_glyf_measure_codepoint_advances_kerned(self.selected_outline_blob, content_cps, eff_sz_px, true)
+            if kerned_advs.len() == n:
+                var boundaries: [i64] = [0; n + 1]
+                var acc: f64 = 0.0
+                var ci = 0
+                while ci < n:
+                    boundaries[ci] = ((acc + (if acc >= 0.0: 0.5 else: -0.5)) as i64)
+                    acc = acc + kerned_advs[ci] * 1000.0 + (bold_widen_milli as f64)
+                    ci = ci + 1
+                boundaries[n] = ((acc + (if acc >= 0.0: 0.5 else: -0.5)) as i64)
+                return boundaries
+        val whole_sz = ((eff_size_milli + 500) / 1000) as i32
+        val base = self._text_pen_milli(content_cps, whole_sz, run_identity)
+        if bold_widen_milli == 0:
+            return base
+        var out_b: [i64] = [0; n + 1]
+        var bi = 0
+        while bi <= n:
+            out_b[bi] = base[bi] + (bi as i64) * bold_widen_milli
+            bi = bi + 1
+        out_b
+
+    me measure_text_width_size_milli(content: text, size_milli: i64, bold: bool = false) -> i64:
+        """Measure exact fractional-size run width in milli-px using SFNT kerning."""
+        val content_cps = text_codepoints(content)
+        if content_cps.len() == 0:
+            return 0
+        val boundaries = self._text_pen_milli_styled_size(content_cps, size_milli, bold)
+        boundaries[content_cps.len()]
+
+    me render_text_baseline_styled(buffer: [u32], buf_w: i32, buf_h: i32,
+                                   x_px: f64, baseline_y: f64, content: text,
+                                   color: u32, font_size_px: f64, bold: bool, italic: bool) -> [u32]:
+        """Render baseline-aligned text into ARGB buffer with fractional font sizes,
+        SFNT kerning, quarter-pixel phase snapping, and deterministic bold/italic styling."""
+        val cps = text_codepoints(content)
+        val n = cps.len()
+        if n == 0:
+            return buffer
+        val sz = if font_size_px > 0.0: font_size_px else: 12.0
+        val size_milli = (sz * 1000.0 + 0.5) as i64
+        val eff_size_milli = sfnt_font_cache_key_milli_px(size_milli)
+        val whole_px = (eff_size_milli + 500) / 1000
+        if self.selected_outline_blob.len() == 0:
+            val top_y = (baseline_y - sz * 0.8 + 0.5) as i32
+            return self.render_text(buffer, buf_w, buf_h, (x_px + 0.5) as i32, top_y, content, color, whole_px as i32)
+        val x_milli_arg: i64 = if eff_size_milli % 1000 != 0: eff_size_milli else: 0
+        val boundaries = self._text_pen_milli_styled_size(cps, eff_size_milli, bold)
+        val origin_milli = (x_px * 1000.0 + (if x_px >= 0.0: 0.5 else: -0.5)) as i64
+        val baseline_y_i = (baseline_y + (if baseline_y >= 0.0: 0.5 else: -0.5)) as i64
+        val eff_sz_px = (eff_size_milli as f64) / 1000.0
+        val bold_extra: i64 = if bold: (if eff_sz_px >= 24.0: 2 else: 1) else: 0
+        var gid_slot: i64 = -1
+        if val Some(rast) = self.ttf_rasterizer:
+            if rast.has_glyph_reads_selected_blob():
+                gid_slot = _gid_warm(rast.cache_identity(), self.selected_outline_blob)
+        var out = buffer
+        var ci = 0
+        while ci < n:
+            val cp = cps[ci] as i32
+            val pen_milli = origin_milli + boundaries[ci]
+            val split = sfnt_subpixel_pen_split_milli(pen_milli)
+            val pen_base = split[0]
+            val phase_q = split[1]
+            var sel_kind = SFNT_GLYPH_SELECTOR_CODEPOINT
+            var sel_val: i64 = cp as i64
+            if gid_slot >= 0:
+                val known_gid = _gid_lookup(gid_slot, cp)
+                if known_gid > 0:
+                    sel_kind = SFNT_GLYPH_SELECTOR_INDEX
+                    sel_val = known_gid
+            if val Some(outline) = sfnt_gray_glyph_outline(self.selected_outline_blob, sel_kind, sel_val, whole_px, x_milli_arg):
+                if val Some(g) = sfnt_gray_outline_raster(outline, phase_q):
+                    var gw = g.slg_width
+                    val gh = g.slg_height
+                    var gp = g.slg_gray
+                    var draw_x = pen_base + g.slg_bearing_x
+                    val draw_y = baseline_y_i - g.slg_bearing_y - gh
+                    if gw > 0 and gh > 0 and gp.len() == gw * gh:
+                        if italic:
+                            val sheared = _fr_shear_cov_bitmap(gp, gw, gh, draw_x, draw_y, baseline_y_i, 0.21)
+                            draw_x = sheared.0
+                            gw = sheared.1
+                            gp = sheared.2
+                        if bold and bold_extra > 0:
+                            val emb = _fr_embolden_cov_bitmap(gp, gw, gh, bold_extra)
+                            gw = emb.0
+                            gp = emb.1
+                        val styled_glyph = CachedGlyph(
+                            codepoint: cp,
+                            face_id: 0,
+                            face_generation: 0,
+                            glyph_index: -1,
+                            font_size: whole_px as i32,
+                            width: gw as i32,
+                            height: gh as i32,
+                            advance: g.slg_advance as i32,
+                            bearing_x: (draw_x - pen_base) as i32,
+                            bearing_y: g.slg_bearing_y as i32,
+                            pixels: gp
+                        )
+                        out = blit_glyph(out, buf_w, buf_h, draw_x as i32, draw_y as i32, styled_glyph, color)
             ci = ci + 1
         out
 
