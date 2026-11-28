@@ -660,6 +660,13 @@ pub class MachineFreshEpochAdmissionOwnerV1:
         MachineFreshEpochCloseTurnV1(Some(retained), false,
             if retained.error != "": retained.error else: fallback)
 
+    fn retire_engine_group_v1() -> Result<(), text>:
+        for name in self.lifecycle.engine_group_decision_v1()?:
+            if self.custody.is_none(): return Err("machine-fresh-epoch-engine-group-custody-missing")
+            val retired = self.custody.unwrap().retire_engine_group_v3(name, "")?
+            self.lifecycle.engine_group_retired_v1(name)?
+        Ok(())
+
     pub fn close_v1() -> MachineFreshEpochCloseTurnV1:
         var retained = self
         # Plain refusal, not a sticky lifecycle diagnostic: the borrower ends
@@ -684,6 +691,11 @@ pub class MachineFreshEpochAdmissionOwnerV1:
         if closing.is_err(): return MachineFreshEpochCloseTurnV1(Some(retained), false, closing.unwrap_err())
         val process = retained.lifecycle.close_process_v1()
         if process.is_err(): return retained.pending_close_v1(process.unwrap_err())
+        # The provider helper's engine group, after that helper was collected and before the writer and
+        # custody are released. A plain refusal: the group stays under its name and the same close may be
+        # repeated. Killed whatever the store records; this epoch's store is not read again.
+        val engine = retained.retire_engine_group_v1()
+        if engine.is_err(): return MachineFreshEpochCloseTurnV1(Some(retained), false, engine.unwrap_err())
         if val authority = retained.authority:
             val state = authority.close_v1()
             val diagnostic = authority.close_diagnostic_v1()

@@ -10,6 +10,8 @@ use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, PipedProcessOwnedTransf
 use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_encode_v3
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.container.machine_fresh_epoch_process_progress_v1.*
+use std.nogc_sync_mut.container.machine_fresh_workload_engine_group_v3.{machine_fresh_engine_group_requested_v3,
+    machine_fresh_epoch_engine_group_decide_v1, machine_fresh_engine_group_forget_v3}
 
 struct FreshEpochLifecycleStateV1:
     phase: text
@@ -24,6 +26,8 @@ struct FreshEpochLifecycleStateV1:
     fallback_phase: text = ""
     fallback_identity: text = ""
     fallback_reference: Option<PipedProcessRefV1> = None
+    # Launch identity of the provider helper whose captured launch asked for the leader-residue move; "" otherwise.
+    engine_group: text = ""
 
 var fresh_epoch_lifecycle_states_v1: [FreshEpochLifecycleStateV1] = []
 var fresh_epoch_lifecycle_thread_v1: i64 = 0
@@ -90,6 +94,10 @@ pub class MachineFreshEpochLifecycleV1:
         val binding = machine_fresh_epoch_process_progress_v1(fresh_epoch_progress_v1(current), process.identity_digest, "bind")?
         fresh_epoch_apply_progress_v1(self, binding)
         fresh_epoch_lifecycle_states_v1[self.slot].fallback_reference = reference
+        # The launch actually captured asks for the move: its engine group is this epoch's to retire from
+        # here on, whatever the template check below or the helper's outcome says.
+        if machine_fresh_engine_group_requested_v3(process.launch):
+            fresh_epoch_lifecycle_states_v1[self.slot].engine_group = process.identity_digest
         val matched = fresh_epoch_fallback_template_v1(current, process)?
         val transferred = machine_fresh_epoch_process_progress_v1(binding, process.identity_digest, "transferred")?
         fresh_epoch_lifecycle_states_v1[self.slot].process = Some(process)
@@ -139,6 +147,20 @@ pub class MachineFreshEpochLifecycleV1:
             return Err("machine-fresh-epoch-fallback-cleanup-required")
         Ok(())
 
+    # The engine group name to retire now: none when the captured launch never asked, refused while the
+    # provider helper is still held. Read at close, after close_process_v1 or the fallback cleanup.
+    pub fn engine_group_decision_v1() -> Result<[text], text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        machine_fresh_epoch_engine_group_decide_v1(current.engine_group, current.process.is_none() and
+            current.reference.is_none() and current.fallback_phase != "unresolved" and current.fallback_phase != "transferred")
+
+    # Custody reported the named group killed, empty and removed, or absent.
+    pub fn engine_group_retired_v1(name: text) -> Result<(), text>:
+        val current = fresh_epoch_lifecycle_current_v1(self)?
+        val kept = machine_fresh_engine_group_forget_v3([current.engine_group], name)?
+        fresh_epoch_lifecycle_states_v1[self.slot].engine_group = ""
+        Ok(())
+
     pub fn retain_diagnostic_v1(error: text) -> Result<text, text>:
         val current = fresh_epoch_lifecycle_current_v1(self)?
         if current.error == "" and error != "": fresh_epoch_lifecycle_states_v1[self.slot].error = error
@@ -183,6 +205,7 @@ pub class MachineFreshEpochLifecycleV1:
         if (current.process.is_some() or current.reference.is_some() or
                 current.fallback_phase == "unresolved" or current.fallback_phase == "transferred"):
             return Err("machine-fresh-epoch-process-still-retained")
+        if current.engine_group != "": return Err("machine-fresh-epoch-engine-group-retained")
         if current.error == "": fresh_epoch_lifecycle_states_v1[self.slot].error = error
         fresh_epoch_lifecycle_states_v1[self.slot].phase = "closed"
         Ok(())
@@ -226,6 +249,9 @@ pub class MachineFreshEpochProcessCleanupV1:
         if candidate.is_err(): return MachineFreshEpochProcessCleanupTurnV1(false, candidate.unwrap_err())
         fresh_epoch_apply_progress_v1(self.lifecycle, bound.unwrap())
         fresh_epoch_lifecycle_states_v1[self.lifecycle.slot].fallback_reference = reference
+        # An unattached helper may have left an engine group as well; it is recorded before the cleanup.
+        if machine_fresh_engine_group_requested_v3(process.launch):
+            fresh_epoch_lifecycle_states_v1[self.lifecycle.slot].engine_group = process.identity_digest
         val closed = process_cleanup_piped_owned_v2(process, reference)
         if closed.is_err():
             val pending = machine_fresh_epoch_process_progress_v1(bound.unwrap(), process.identity_digest, "retained", closed.unwrap_err())
