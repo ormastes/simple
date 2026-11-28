@@ -300,10 +300,23 @@ Traps hit while doing it:
   projection must set or clear the mode itself: the workspace one passed the
   base profile through until 2026-11-27, so workspace containers lost conmon.
   Primary attach, `wait`/`logs` and the socket exec leave nothing behind and
-  never ask; epoch startup V1 admits a `start` operand and has no engine-group
-  owner (open, see the record's path table). Runtime proof:
+  never ask. Epoch startup V1 asks for its own `start` operand since 2026-11-28
+  (`linux_fresh_epoch_leader_residue_mode_v1`, podman provider only; the
+  `version` base it hands the workload projections is unchanged) and the
+  admission's `close_v1` retires that group after `close_process_v1`, whatever
+  the store records. Runtime proof:
   `sh scripts/check/check-linux-group-residue-move.shs` (real cgroups, needs a
   delegated user scope, exits 77 without one).
+- A requested move that did not happen is never a clean start (2026-11-28):
+  the runtime reports it as the leader's exit code, 1001 when the delegated
+  root refused the engine group (EACCES, EPERM or EROFS on `mkdirat` or on a
+  `cgroup.procs` write) and 1000 for every other failure, and Start latches
+  `machine-fresh-workload-engine-group-move-permission` or `...-move-failed`
+  (`machine_fresh_engine_group_move_outcome_v3`). The residue still dies with
+  the helper group, so the store may be poisoned; the reason says why. Both
+  values pass the observation's exit bound and are above every wait status.
+  Not run in the guest. `engine_group_retired_v3` also drops the recorded
+  device/inode with the group.
 - Measured there (podman 4.9.3): `--cgroups=split` is refused with a cgroup
   parent; `no-conmon` and the systemd manager leave conmon in the helper group;
   conmon and the pause process keep `/dev/null` on fd 1 and 2, so a surviving
@@ -321,7 +334,9 @@ Traps hit while doing it:
   absent `/nonexistent`. `HOME=/nonexistent` is the broker's inherited-environment
   rule, a different thing. The guest unit's account home and `SIMPLE_*`
   environment do not meet custody's rules yet:
-  `container_fresh_route_helper_home_2026-11-27.md`.
+  `container_fresh_route_helper_home_2026-11-27.md`. The provisioning script
+  lost its `UNIT=` line in 3daa49c1dcd and stopped under `set -eu` on a fresh
+  guest; restored 2026-11-28.
 - Emulating helper containment with real podman: a `systemd-run --user --scope
   -p Delegate=yes` shell, move the shell into a child group first, enable
   `+cpu +memory +pids` on the scope and on the engine's parent, one group per

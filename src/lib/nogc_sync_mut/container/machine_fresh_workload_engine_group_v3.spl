@@ -54,3 +54,33 @@ pub fn machine_fresh_engine_group_decide_v3(progress: MachineFreshEngineGroupPro
 pub fn machine_fresh_engine_group_settle_gate_v3(identities: [text]) -> Result<(), text>:
     if identities.len() != 0: return Err("machine-fresh-workload-engine-group-retained")
     Ok(())
+
+# One retired group leaves the held list; a name that is not held is refused, so a second retirement of the
+# same group cannot pass as a first one.
+pub fn machine_fresh_engine_group_forget_v3(held: [text], name: text) -> Result<[text], text>:
+    var kept: [text] = []
+    for identity in held:
+        if machine_fresh_engine_group_name_v3(identity)? != name: kept.push(identity)
+    if kept.len() == held.len(): return Err("machine-fresh-workload-engine-group-unrecorded")
+    Ok(kept)
+
+# The group runtime reports a requested move that did not happen as the Start leader's exit code
+# (RT_LG_RESIDUE_MOVE_FAILED_EXIT 1000, RT_LG_RESIDUE_MOVE_PERMISSION_EXIT 1001 in
+# runtime_linux_group_owner_impl.h). The residue then died with the helper group, so the monitor of a
+# container the store may call running is gone: the owner latches under the reason named here. 1001 is the
+# delegated root refusing the engine group (EACCES, EPERM or EROFS on making it or on writing a member).
+# @allow(primitive_api) reason: exit_code is the Start helper's observed leader exit code
+pub fn machine_fresh_engine_group_move_outcome_v3(exit_code: i64) -> Result<(), text>:
+    if exit_code == 1001: return Err("machine-fresh-workload-engine-group-move-permission")
+    if exit_code == 1000: return Err("machine-fresh-workload-engine-group-move-failed")
+    Ok(())
+
+# Epoch startup V1 has one helper and no workload record. Its engine group is retired at epoch close, after
+# that helper was collected, whatever the store records: the epoch is ending and no later command will read
+# the store (the "epoch teardown kills regardless" order of the decision). `identity` is "" when the
+# captured launch never asked for the move.
+# @allow(primitive_api) reason: identity is the captured launch identity digest or ""; helper_retired is the lifecycle's own closed flag
+pub fn machine_fresh_epoch_engine_group_decide_v1(identity: text, helper_retired: bool) -> Result<[text], text>:
+    if identity == "": return Ok([])
+    if not helper_retired: return Err("machine-fresh-epoch-engine-group-helper-active")
+    Ok([machine_fresh_engine_group_name_v3(identity)?])
