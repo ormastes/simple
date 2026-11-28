@@ -37,12 +37,13 @@
 #include <sys/syscall.h>
 #endif
 
-/* glibc hides setres*id / getres*id behind _GNU_SOURCE; declare them so this
- * unit is independent of which feature macros the including TU chose. */
+/* glibc hides setres*id / getres*id / pipe2 behind _GNU_SOURCE; declare them
+ * so this unit is independent of which feature macros the including TU chose. */
 extern int setresuid(uid_t, uid_t, uid_t);
 extern int setresgid(gid_t, gid_t, gid_t);
 extern int getresuid(uid_t*, uid_t*, uid_t*);
 extern int getresgid(gid_t*, gid_t*, gid_t*);
+extern int pipe2(int[2], int);
 
 typedef struct RtPrivCred {
     uint64_t magic;
