@@ -11,6 +11,10 @@
 //!   those three; serving only `statx` left every retained-file open that
 //!   walks beneath a directory descriptor dead with "unknown extern
 //!   function: openat")
+//! * `src/lib/nogc_sync_mut/io/linux_machine_policy_abi_v1.spl` (Linux
+//!   branch): `getuid`, `getgid`, `getegid`, `gettid`, `getpid`,
+//!   `readlinkat`, `fstatfs`, `ioctl`, `sysconf` (the runtime-core
+//!   `ioctl(fd, request, argp)` three-argument form is accepted too)
 //! * `src/lib/nogc_sync_mut/io/darwin_image_owner.spl` (macOS branch):
 //!   `_NSGetExecutablePath`
 //!
@@ -58,10 +62,24 @@ const COMMON_NAMES: &[&str] = &[
     "malloc", "free", "realpath", "readlink", "open", "read", "pread", "write", "close", "fsync",
 ];
 
-/// Externs `retained_file_abi.spl` declares only in its Linux branch. They
-/// are claimed only there, so a host whose `.spl` branch does not declare
-/// them keeps the explicit unknown-extern error.
-pub const LINUX_NAMES: &[&str] = &["statx", "openat", "geteuid"];
+/// Externs `retained_file_abi.spl` and `linux_machine_policy_abi_v1.spl`
+/// declare only in their Linux branches. They are claimed only there, so a
+/// host whose `.spl` branch does not declare them keeps the explicit
+/// unknown-extern error.
+pub const LINUX_NAMES: &[&str] = &[
+    "statx",
+    "openat",
+    "geteuid",
+    "getuid",
+    "getgid",
+    "getegid",
+    "gettid",
+    "getpid",
+    "readlinkat",
+    "fstatfs",
+    "ioctl",
+    "sysconf",
+];
 
 /// Externs `darwin_image_owner.spl` declares only in its macOS branch. They
 /// are claimed only there, so non-macOS hosts keep the explicit unknown-extern error.
@@ -261,7 +279,13 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "statx" if cfg!(target_os = "linux") => &[5],
         // Fixed four-argument form: the declaration always passes `mode`.
         "openat" if cfg!(target_os = "linux") => &[4],
-        "geteuid" if cfg!(target_os = "linux") => &[0],
+        "geteuid" | "getuid" | "getgid" | "getegid" | "gettid" | "getpid" if cfg!(target_os = "linux") => &[0],
+        "readlinkat" if cfg!(target_os = "linux") => &[4],
+        "fstatfs" if cfg!(target_os = "linux") => &[2],
+        // libc `ioctl` is variadic: linux_machine_policy_abi_v1.spl declares
+        // the nsfs `(fd, request)` form, runtime-core `(fd, request, argp)`.
+        "ioctl" if cfg!(target_os = "linux") => &[2, 3],
+        "sysconf" if cfg!(target_os = "linux") => &[1],
         "_NSGetExecutablePath" if cfg!(target_os = "macos") => &[2],
         _ => return Err(super::common::unknown_function(name)),
     };
@@ -314,6 +338,29 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             // then records whatever the thread already had, as libc would leave it.
             #[cfg(target_os = "linux")]
             "geteuid" => libc::geteuid() as i64,
+            // Credential and id queries cannot fail; as with geteuid the
+            // errno capture records the thread's existing value.
+            #[cfg(target_os = "linux")]
+            "getuid" => libc::getuid() as i64,
+            #[cfg(target_os = "linux")]
+            "getgid" => libc::getgid() as i64,
+            #[cfg(target_os = "linux")]
+            "getegid" => libc::getegid() as i64,
+            #[cfg(target_os = "linux")]
+            "gettid" => libc::gettid() as i64,
+            #[cfg(target_os = "linux")]
+            "getpid" => libc::getpid() as i64,
+            #[cfg(target_os = "linux")]
+            "readlinkat" => libc::readlinkat(a[0] as libc::c_int, ptr(a[1]), ptr(a[2]), a[3] as usize) as i64,
+            #[cfg(target_os = "linux")]
+            "fstatfs" => libc::fstatfs(a[0] as libc::c_int, ptr(a[1])) as i64,
+            #[cfg(target_os = "linux")]
+            "ioctl" => {
+                let argp = if a.len() == 3 { a[2] } else { 0 };
+                libc::ioctl(a[0] as libc::c_int, a[1] as libc::c_ulong as _, argp as usize as *mut libc::c_void) as i64
+            }
+            #[cfg(target_os = "linux")]
+            "sysconf" => libc::sysconf(a[0] as libc::c_int) as i64,
             _ => return Err(super::common::unknown_function(name)),
         }
     };
@@ -460,6 +507,70 @@ mod tests {
     fn geteuid_is_the_real_effective_uid_and_takes_no_arguments() {
         assert_eq!(int_of(dispatch("geteuid", &[])), unsafe { libc::geteuid() } as i64);
         assert!(dispatch("geteuid", &[Value::Int(0)]).is_err());
+    }
+
+    /// linux_machine_policy_abi_v1.spl's process-identity owner reads these
+    /// from the real process; before they were served the seed died with
+    /// "unknown extern function: gettid".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_machine_policy_ids_are_the_real_process_values() {
+        assert_eq!(int_of(dispatch("getuid", &[])), unsafe { libc::getuid() } as i64);
+        assert_eq!(int_of(dispatch("getgid", &[])), unsafe { libc::getgid() } as i64);
+        assert_eq!(int_of(dispatch("getegid", &[])), unsafe { libc::getegid() } as i64);
+        assert_eq!(int_of(dispatch("getpid", &[])), std::process::id() as i64);
+        assert_eq!(int_of(dispatch("gettid", &[])), unsafe { libc::gettid() } as i64);
+        for name in ["getuid", "getgid", "getegid", "gettid", "getpid"] {
+            assert!(dispatch(name, &[Value::Int(0)]).is_err(), "{name} takes no arguments");
+        }
+        let pages = int_of(dispatch("sysconf", &[Value::Int(libc::_SC_PHYS_PAGES as i64)]));
+        assert_eq!(pages, unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) } as i64);
+        assert!(pages > 0);
+        assert!(dispatch("sysconf", &[]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readlinkat_fstatfs_and_ioctl_reach_libc_with_errno() {
+        // readlinkat(AT_FDCWD, "/proc/self/exe") is the running test binary.
+        let name = c_text("/proc/self/exe");
+        let buffer = int_of(dispatch("malloc", &[Value::Int(4096)]));
+        let n = int_of(dispatch(
+            "readlinkat",
+            &[Value::Int(libc::AT_FDCWD as i64), Value::Int(name), Value::Int(buffer), Value::Int(4096)],
+        ));
+        assert!(n > 0);
+        let got = unsafe { std::slice::from_raw_parts(buffer as *const u8, n as usize) };
+        assert_eq!(std::path::Path::new(std::str::from_utf8(got).unwrap()), std::env::current_exe().unwrap());
+        assert!(dispatch("readlinkat", &[Value::Int(0), Value::Int(0), Value::Int(0)]).is_err());
+
+        // fstatfs on an open directory fills the caller-owned statfs buffer.
+        let root = c_text("/");
+        let fd = int_of(dispatch("open", &[Value::Int(root), Value::Int((libc::O_RDONLY | libc::O_DIRECTORY) as i64)]));
+        assert!(fd >= 0);
+        let statfs_buf = int_of(dispatch("malloc", &[Value::Int(std::mem::size_of::<libc::statfs>() as i64)]));
+        assert_eq!(int_of(dispatch("fstatfs", &[Value::Int(fd), Value::Int(statfs_buf)])), 0);
+        let mut expected: libc::statfs = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstatfs(fd as libc::c_int, &mut expected) }, 0);
+        assert_eq!(unsafe { (*(statfs_buf as *const libc::statfs)).f_type }, expected.f_type);
+
+        // A regular directory is not a terminal: ioctl(TCGETS) fails ENOTTY
+        // in both the two- and three-argument forms, through the errno cell.
+        let cell = int_of(dispatch(ERRNO_ADDRESS_NAME.unwrap(), &[]));
+        assert_eq!(int_of(dispatch("ioctl", &[Value::Int(fd), Value::Int(libc::TCGETS as i64)])), -1);
+        assert_eq!(unsafe { *(cell as *const i32) }, libc::ENOTTY);
+        let termios = int_of(dispatch("malloc", &[Value::Int(std::mem::size_of::<libc::termios>() as i64)]));
+        assert_eq!(
+            int_of(dispatch("ioctl", &[Value::Int(fd), Value::Int(libc::TCGETS as i64), Value::Int(termios)])),
+            -1
+        );
+        assert_eq!(unsafe { *(cell as *const i32) }, libc::ENOTTY);
+        assert!(dispatch("ioctl", &[Value::Int(fd)]).is_err());
+
+        assert_eq!(int_of(dispatch("close", &[Value::Int(fd)])), 0);
+        for p in [name, buffer, root, statfs_buf, termios] {
+            dispatch("free", &[Value::Int(p)]).unwrap();
+        }
     }
 
     /// Only this host's errno spelling is claimed; every other spelling falls
